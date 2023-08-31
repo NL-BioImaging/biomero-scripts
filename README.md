@@ -1,5 +1,9 @@
-OMERO User Scripts
+OMERO Slurm Scripts
 ==================
+
+These scripts are to be used with the [Omero Slurm Client library](https://github.com/NL-BioImaging/omero-slurm-client).
+
+They show how to use the library to run workflows directly from Omero on a Slurm cluster.
 
 Installation
 ------------
@@ -8,7 +12,7 @@ Installation
 
         cd OMERO_DIST/lib/scripts
 
-2. Clone the repository with a unique name (e.g. "useful_scripts")
+2. Clone the repository with a unique name (e.g. "slurm")
 
         git clone https://github.com/THISREPOSITORY/omero-user-scripts.git UNIQUE_NAME
 
@@ -86,7 +90,7 @@ Testing your script
 Legal
 -----
 
-See [LICENSE](LICENSE)
+See [LICENSE](LICENSE). Note this is copy-left, as we copied from OME with copy-left.
 
 
 # About #
@@ -95,26 +99,28 @@ It will be used to help generate a landing page and links for your work.
 Please modify **all** values on **each** branch to describe your scripts.
 
 ###### Repository name ######
-Base OMERO User Scripts repository
+OMERO Slurm Scripts repository
 
 ###### Minimum version ######
-4.4
+5.6
 
 ###### Maximum version ######
-5.0
+5.6
 
 ###### Owner(s) ######
-The OME Team
+T.T. Luik
+
 
 ###### Institution ######
-Open Microscopy Environment
+Amsterdam UMC
 
 ###### URL ######
-http://openmicroscopy.org/info/scripts
+https://nl-bioimaging.github.io/omero-slurm-client/
 
 ###### Email ######
-ome-devel@lists.openmicroscopy.org.uk
+t.t.luik@amsterdamumc.nl
 
 ###### Description ######
-Example script repository to be cloned, modified, and extended.
-This text may be used on OME resources to explain your scripts.
+These scripts are to be used with the [Omero Slurm Client library](https://github.com/NL-BioImaging/omero-slurm-client).
+
+They show how to use the library to run workflows directly from Omero on a Slurm cluster.
