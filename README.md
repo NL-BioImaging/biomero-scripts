@@ -48,7 +48,7 @@ Developer Installation
 
 3. Clone the repository
 
-        git clone git@github.com:YOURGITUSER/omero-user-scripts.git YOUR_SCRIPTS
+        git clone https://github.com/NL-BioImaging/omero-slurm-scripts.git slurm
 
 Adding a script
 ---------------
