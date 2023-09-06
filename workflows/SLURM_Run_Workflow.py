@@ -29,10 +29,11 @@ EXPORT_SCRIPTS = [IMAGE_EXPORT_SCRIPT]
 IMPORT_SCRIPTS = [IMAGE_IMPORT_SCRIPT]
 DATATYPES = [rstring('Dataset'), rstring('Image'), rstring('Plate')]
 NO = "--NO THANK YOU--"
-OUTPUT_RENAME = "3b) Rename the imported images"
+OUTPUT_RENAME = "3c) Rename the imported images"
 OUTPUT_PARENT = "1) Zip attachment to parent"
 OUTPUT_ATTACH = "2) Attach to original images"
 OUTPUT_NEW_DATASET = "3a) Import into NEW Dataset"
+OUTPUT_DUPLICATES = "3b) Allow duplicate dataset (name)?"
 OUTPUT_OPTIONS = [OUTPUT_RENAME, OUTPUT_PARENT, OUTPUT_NEW_DATASET,
                   OUTPUT_ATTACH]
 
@@ -144,7 +145,7 @@ def runScript():
                            default=True),
             omscripts.String(OUTPUT_RENAME,
                              optional=True,
-                             grouping="02.6",
+                             grouping="02.7",
                              description="A new name for the imported images. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
                              default=NO),
             omscripts.Bool(OUTPUT_PARENT,
@@ -160,6 +161,11 @@ def runScript():
                              grouping="02.5",
                              description="Name for the new dataset w/ result images",
                              default=NO),
+            omscripts.Bool(OUTPUT_DUPLICATES,
+                           optional=True,
+                           grouping="02.6",
+                           description="If a dataset already matches this name, still make a new one?",
+                           default=True),
 
         ]
         # Generate script parameters for all our workflows
@@ -589,6 +595,9 @@ def importImagesToOmero(client: omscripts.client,
     if selected_output[OUTPUT_NEW_DATASET]:
         inputs["Output - Add as new images in NEW dataset"] = rbool(True)
         inputs["New Dataset"] = client.getInput(OUTPUT_NEW_DATASET)
+        # duplicate dataset name check
+        inputs["Allow duplicate?"] = client.getInput(OUTPUT_DUPLICATES)
+
     else:
         inputs["Output - Add as new images in NEW dataset"] = rbool(False)
 

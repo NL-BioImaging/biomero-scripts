@@ -164,7 +164,7 @@ def to_5d(*arys):
         return res
 
 
-def saveImagesToOmeroAsDataset(conn, folder, client, dataset):
+def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=True):
     """Save image from a (unzipped) folder to OMERO as dataset
 
     Args:
@@ -201,7 +201,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset):
                     source_image_id = images[0].getId()
                 except IndexError:
                     source_image_id = None
-                print(img_data.shape, dataset.id.val, source_image_id)
+                print(img_data.shape, dataset_id, source_image_id)
                 
                 img_data = to_5d(img_data)
                 
@@ -213,8 +213,8 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset):
                     renamed = name
                 img_id = ezomero.post_image(conn, img_data,
                                             renamed, 
-                                            dataset_id=dataset.id.val,
-                                            dim_order="xyzct",
+                                            dataset_id=dataset_id,
+                                            dim_order="yxzct",
                                             source_image_id=source_image_id,
                                             description=f"Result from job {job_id} | analysis {folder}")
                 del img_data
@@ -223,25 +223,26 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset):
             except Exception as e:
                 msg = f"Issue uploading file {name} to OMERO {og_name}: {e}"
                 print(msg)
+                raise RuntimeError(e)
 
-        if images:  # link dataset to OG project
+        if images and new_dataset:  # link new dataset to OG project
             parent_dataset = images[0].getParent()
             parent_project = None
             if parent_dataset is not None:
                 parent_project = parent_dataset.getParent()
             if parent_project and parent_project.canLink():
                 # and put it in the current project
-                print(parent_dataset, parent_project, parent_project.getId(), dataset.id.val)
+                print(parent_dataset, parent_project, parent_project.getId(), dataset_id)
                 project_link = omero.model.ProjectDatasetLinkI()
                 project_link.parent = omero.model.ProjectI(
                     parent_project.getId(), False)
                 project_link.child = omero.model.DatasetI(
-                    dataset.id.val, False)
+                    dataset_id, False)
                 update_service = conn.getUpdateService()
                 update_service.saveAndReturnObject(project_link)
 
         print(files)
-        message = f"\nTried importing images to {dataset.id.val} {dataset.name.val}!\n{msg}"
+        message = f"\nTried importing images to dataset {dataset_id}!\n{msg}"
     else:
         message = f"\nNo files found to upload in {folder}"
 
@@ -341,22 +342,41 @@ def upload_contents_to_omero(client, conn, message, folder):
         if unwrap(client.getInput(_OUTPUT_ATTACH_NEW_DATASET)):
             # create a new dataset for new images
             dataset_name = unwrap(client.getInput("New Dataset"))
-            dataset = omero.model.DatasetI()
-            dataset.name = rstring(dataset_name)
-            desc = "Images in this Dataset are label masks of job:\n"\
-                "  Id: %s" % (unwrap(client.getInput(_SLURM_JOB_ID)))
-            dataset.description = rstring(desc)
-            update_service = conn.getUpdateService()
-            dataset = update_service.saveAndReturnObject(dataset)
-
+            
+            create_new_dataset = unwrap(client.getInput("Allow duplicate?"))
+            if not create_new_dataset:  # check the named dataset first
+                try:
+                    existing_datasets_w_name = [d.id for d in conn.getObjects(
+                        'Dataset', 
+                        attributes={"name": dataset_name})]
+                    #  if type(d) == omero.model.ProjectI
+                    if not existing_datasets_w_name:
+                        create_new_dataset = True
+                    else:
+                        dataset_id = existing_datasets_w_name[0]
+                except Exception:
+                    create_new_dataset = True
+            
+            if create_new_dataset:  # just create a new dataset
+                dataset = omero.model.DatasetI()
+                dataset.name = rstring(dataset_name)
+                desc = "Images in this Dataset are label masks of job:\n"\
+                    "  Id: %s" % (unwrap(client.getInput(_SLURM_JOB_ID)))
+                dataset.description = rstring(desc)
+                update_service = conn.getUpdateService()
+                dataset = update_service.saveAndReturnObject(dataset)
+                dataset_id = dataset.id.val
+            
             msg = saveImagesToOmeroAsDataset(conn=conn, 
                                              folder=folder, 
                                              client=client,
-                                             dataset=dataset)
+                                             dataset_id=dataset_id,
+                                             new_dataset=create_new_dataset)
             message += msg
 
     except Exception as e:
         message += f" Failed to upload images to OMERO: {e}"
+        raise RuntimeError(message)
 
     return message
 
@@ -375,6 +395,7 @@ def unzip_zip_locally(message, folder):
         print(f"Unzipped {folder} on the server")
     except Exception as e:
         message += f" Unzip failed: {e}"
+        raise RuntimeError(message)
 
     return message
 
@@ -414,6 +435,7 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file):
     except Exception as e:
         message += f" Uploading file failed: {e}"
         print(message)
+        raise RuntimeError(message)
 
     return message
 
@@ -447,6 +469,7 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder):
     except Exception as e:
         message += f" Uploading zip failed: {e}"
         print(message)
+        raise RuntimeError(message)
 
     return message
 
@@ -529,13 +552,18 @@ def runScript():
                            grouping="06.1",
                            description="Name for the new dataset w/ results",
                            default="My_Results"),
-            scripts.Bool(_OUTPUT_RENAME,
+            scripts.Bool("Allow duplicate?",
                          optional=True,
                          grouping="06.2",
+                         description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
+                         default=True),
+            scripts.Bool(_OUTPUT_RENAME,
+                         optional=True,
+                         grouping="06.3",
                          description="Rename all imported files as below. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
                          default=False),
             scripts.String("Rename", optional=True,
-                           grouping="06.3",
+                           grouping="06.4",
                            description="A new name for the imported images.",
                            default="{original_file}NucleiLabels.{ext}"),
             # scripts.Bool("Output - Add as new images in same dataset",
@@ -630,9 +658,6 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, message, folder)
 
-                            message = cleanup_tmp_files_locally(
-                                message, folder, log_file)
-
                             clean_result = slurmClient.cleanup_tmp_files(
                                 slurm_job_id,
                                 filename,
@@ -641,6 +666,9 @@ def runScript():
                             print(message, clean_result)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
+                finally:
+                    message = cleanup_tmp_files_locally(
+                                message, folder, log_file)
 
             client.setOutput("Message", rstring(str(message)))
         finally:

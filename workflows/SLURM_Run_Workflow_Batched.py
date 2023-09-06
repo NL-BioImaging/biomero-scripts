@@ -27,10 +27,11 @@ logger = logging.getLogger(__name__)
 IMAGE_EXPORT_SCRIPT = "SLURM_Run_Workflow.py"
 PROC_SCRIPTS = [IMAGE_EXPORT_SCRIPT]
 DATATYPES = [rstring('Image')]
-OUTPUT_RENAME = "3b) Rename the imported images"
+OUTPUT_RENAME = "3c) Rename the imported images"
 OUTPUT_PARENT = "1) Zip attachment to parent"
 OUTPUT_ATTACH = "2) Attach to original images"
 OUTPUT_NEW_DATASET = "3a) Import into NEW Dataset"
+OUTPUT_DUPLICATES = "3b) Allow duplicate dataset (name)?"
 OUTPUT_OPTIONS = [OUTPUT_RENAME, OUTPUT_PARENT, OUTPUT_NEW_DATASET,
                   OUTPUT_ATTACH]
 NO = "--NO THANK YOU--"
@@ -92,7 +93,7 @@ def runScript():
                            default=True),
             omscripts.String(OUTPUT_RENAME,
                              optional=True,
-                             grouping="02.6",
+                             grouping="02.7",
                              description="A new name for the imported images. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
                              default=NO),
             omscripts.Bool(OUTPUT_PARENT,
@@ -107,7 +108,7 @@ def runScript():
             omscripts.String(OUTPUT_NEW_DATASET, optional=True,
                              grouping="02.5",
                              description="Name for the new dataset w/ result images",
-                             default=NO),
+                             default=NO)
         ]
         # Generate script parameters for all our workflows
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()
@@ -205,6 +206,8 @@ def runScript():
             data_ids = unwrap(client.getInput("IDs"))
             batch_ids = chunk(data_ids, batch_size)
             inputs = client.getInputs()
+            # For batching, ensure we write to 1 dataset, not 1 for each batch
+            inputs["3b) Allow duplicate dataset (name)?"] = omscripts.rbool(False)
             processes = {}
             remaining_batches = {i: b for i, b in enumerate(batch_ids)}
             print("#--------------------------------------------#")
