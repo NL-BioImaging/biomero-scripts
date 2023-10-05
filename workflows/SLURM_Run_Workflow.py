@@ -10,6 +10,7 @@
 # Example OMERO.script to run multiple segmentation images on Slurm.
 
 from __future__ import print_function
+import sys
 import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
@@ -381,6 +382,7 @@ def runScript():
                                 or job_state == "FAILED"):
                             # Remove from future checks
                             log_msg = f"Job {slurm_job_id} is {job_state}."
+                            log_msg += f"You can get the logfile using `Slurm Get Update` on job {slurm_job_id}"
                             print(log_msg)
                             logger.warning(log_msg)
                             UI_messages += log_msg
@@ -489,6 +491,7 @@ def exportImageToSLURM(client: omscripts.client,
                 not found in ({[unwrap(s.getName()) for s in scripts]}) ")
     # TODO: export nucleus channel only? that is individual channels,
     # but filtered...
+    # Might require metadata: what does the WF want? What is in which channel?
     inputs = {"Data_Type": client.getInput("Data_Type"),
               "IDs": client.getInput("IDs"),
               "Image settings (Optional)": rbool(True),
@@ -496,7 +499,7 @@ def exportImageToSLURM(client: omscripts.client,
               "Export_Merged_Image": rbool(True),
               "Choose_Z_Section": rstring('Max projection'),
               "Choose_T_Section": rstring('Default-T (last-viewed)'),
-              "Format": rstring('TIFF'),
+              "Format": rstring('ZARR'),
               "Folder_Name": rstring(zipfile)
               }
     print(inputs, script_ids)
@@ -642,4 +645,7 @@ def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        stream=sys.stdout)
     runScript()

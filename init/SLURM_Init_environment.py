@@ -24,6 +24,7 @@ def runScript():
     The main entry point of the script
     """
 
+    extra_config_name = "Extra Config file (optional!)"
     client = scripts.client(
         'Slurm Init',
         '''Will initiate the Slurm environment for workflow execution.
@@ -34,7 +35,7 @@ def runScript():
         ~/slurm-config.ini
         ''',
         scripts.Bool("Init Slurm", grouping="01", default=True),
-        scripts.String("Config file", optional=True, grouping="01.1",
+        scripts.String(extra_config_name, optional=True, grouping="01.1",
                        description="The path to your configuration file. Optional."),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
     )
@@ -43,7 +44,7 @@ def runScript():
         message = ""
         init_slurm = unwrap(client.getInput("Init Slurm"))
         if init_slurm:
-            configfile = unwrap(client.getInput("Config file"))
+            configfile = unwrap(client.getInput(extra_config_name))
             if not configfile:
                 configfile = ''
             with SlurmClient.from_config(configfile=configfile,

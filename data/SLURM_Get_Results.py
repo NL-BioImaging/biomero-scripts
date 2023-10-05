@@ -10,6 +10,7 @@
 # Example OMERO.script to get results from a Slurm job.
 
 import shutil
+import sys
 import omero
 import omero.gateway
 from omero import scripts
@@ -38,6 +39,7 @@ _OUTPUT_ATTACH_NEW_DATASET = "Output - Add as new images in NEW dataset"
 _LOGFILE_PATH_PATTERN_GROUP = "DATA_PATH"
 _LOGFILE_PATH_PATTERN = "Running [\w-]+? Job w\/ .+? \| .+? \| (?P<DATA_PATH>.+?) \|.*"
 _OUTPUT_RENAME = "Rename imported files?"
+SUPPORTED_EXTENSIONS = ['.tif', '.tiff', '.png']
 
 
 def load_image(conn, image_id):
@@ -81,12 +83,12 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
         String: Message to add to script output
     """
     all_files = glob.iglob(folder+'**/**', recursive=True)
-    files = [f for f in all_files if os.path.isfile(f)
-             and (f.endswith('.tiff') or f.endswith('.png'))]
+    files = [f for f in all_files if os.path.isfile(f) 
+             and any(f.endswith(ext) for ext in SUPPORTED_EXTENSIONS)]
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
-    print(f"Found the following files in {folder}: {all_files} && {files}")
+    print(f"Found the following files in {folder}: {files}")
     namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
     msg = ""
@@ -176,12 +178,13 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
         String: Message to add to script output
     """
     all_files = glob.iglob(folder+'**/**', recursive=True)
-    files = [f for f in all_files if os.path.isfile(f)
-             and (f.endswith('.tiff') or f.endswith('.png'))]
+    files = [f for f in all_files if os.path.isfile(f) 
+             and any(f.endswith(ext) for ext in SUPPORTED_EXTENSIONS)]
+
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
-    print(f"Found the following files in {folder}: {all_files} && {files}")
+    print(f"Found the following files in {folder}: {files}")
     # namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     msg = ""
     job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
@@ -202,6 +205,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 except IndexError:
                     source_image_id = None
                 print(img_data.shape, dataset_id, source_image_id)
+                print(f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
                 
                 img_data = to_5d(img_data)
                 
@@ -211,13 +215,33 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                     renamed = rename_import_file(client, name, og_name)
                 else:
                     renamed = name
+                
+                print(f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
                 img_id = ezomero.post_image(conn, img_data,
                                             renamed, 
                                             dataset_id=dataset_id,
                                             dim_order="yxzct",
                                             source_image_id=source_image_id,
                                             description=f"Result from job {job_id} | analysis {folder}")
+                
                 del img_data
+                omero_img, img_data = ezomero.get_image(conn, img_id, pyramid_level=0, xyzct=True)
+                print(f"Retrieving from EZOmero --Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
+                
+                
+                omero_pix = omero_img.getPrimaryPixels()
+                size_x = omero_pix.getSizeX()
+                size_y = omero_pix.getSizeY()
+                size_c = omero_img.getSizeC()
+                size_z = omero_img.getSizeZ()
+                size_t = omero_img.getSizeT()
+                
+                default_z = omero_img.getDefaultZ()+1
+                t = omero_img.getDefaultT()+1
+                plane = omero_img.renderImage((default_z,)[0]-1, t-1)
+                
+                print(f"Render from Omero object --Number of unique values: {np.unique(plane)} ")
+                
                 print(f"Uploaded {name} as {renamed} (from image {og_name}): {img_id}")
                 # os.remove(name)
             except Exception as e:
@@ -658,12 +682,13 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, message, folder)
 
-                            clean_result = slurmClient.cleanup_tmp_files(
-                                slurm_job_id,
-                                filename,
-                                data_location)
-                            message += "\nSuccesfully cleaned up tmp files"
-                            print(message, clean_result)
+                            # clean_result = slurmClient.cleanup_tmp_files(
+                            #     slurm_job_id,
+                            #     filename,
+                            #     data_location)
+                            # message += "\nSuccesfully cleaned up tmp files"
+                            # print(message, clean_result)
+                            print(message)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
@@ -676,4 +701,7 @@ def runScript():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        stream=sys.stdout)
     runScript()
