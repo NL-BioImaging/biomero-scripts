@@ -67,6 +67,21 @@ Other example OMERO scripts are:
 
 - [`workflows/Slurm CellPose Segmentation`](https://github.com/NL-BioImaging/omero-slurm-scripts/blob/master/workflows/SLURM_CellPose_Segmentation.py): This is a more primitive script that only runs the actual workflow `CellPose` (if correctly configured). You will need to manually transfer data first (with `Slurm Image Transfer`) and manually retrieve data afterward (with `Slurm Get Results`).
 
+Enable logging (of the OMERO Slurm Client library)
+-----
+
+Note that you can just enable more logging of your OMERO scripts (including the OMERO Slurm Client library) by changing the logger in the __init__ of your scripts:
+
+```Python
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        stream=sys.stdout)
+    runScript()
+```
+
+You can even turn on logging.DEBUG.
+
 
 Legal
 -----
