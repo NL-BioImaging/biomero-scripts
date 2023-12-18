@@ -1,11 +1,20 @@
-OMERO Slurm Scripts
+BIOMERO - OMERO Slurm Scripts
 ==================
 
-These scripts are to be used with the [OMERO Slurm Client library](https://github.com/NL-BioImaging/omero-slurm-client).
+These scripts are to be used within BIOMERO (an extension to OMERO), together with the [OMERO Slurm Client library](https://github.com/NL-BioImaging/omero-slurm-client).
 
-They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
+Together, BIOMERO allows you to run BioImage analysis workflows directly from OMERO on a Slurm cluster, through SSH.
 
 !!*NOTE*: Do not install [Example Minimal Slurm Script](https://github.com/NL-BioImaging/omero-slurm-scripts/blob/master/Example_Minimal_Slurm_Script.py) if you do not trust your users with your Slurm cluster. It has literal Command Injection for the SSH user as a **FEATURE**. 
+
+
+# Overview
+
+In the figure below we show our **BIOMERO** framework, for **B**io**I**mage analysis in **OMERO**. 
+
+BIOMERO consists of the Python library [OMERO Slurm Client](https://github.com/NL-BioImaging/omero-slurm-client) and the integrations within OMERO through the scripts in this repository.
+
+![OMERO-Figure1_Overview_v5](https://github.com/NL-BioImaging/omero-slurm-client/assets/68958516/ff437ed2-d4b7-48b4-a7e3-12f1dbf00981)
 
 Installation
 ------------
