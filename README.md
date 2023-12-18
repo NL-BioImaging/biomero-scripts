@@ -57,10 +57,10 @@ Upgrading
 
         <path>/<to>/<bin>/omero script list
 
-Use the OMERO Slurm scripts
+Use the BIOMERO scripts
 -----
 
-We have provided example OMERO scripts of how to use the [OMERO Slurm Client](https://github.com/NL-BioImaging/omero-slurm-client). These scripts do not work without installing that client on your OMERO servers/processors.
+This repository provides example OMERO scripts for using the BIOMERO [OMERO Slurm Client](https://github.com/NL-BioImaging/omero-slurm-client). These scripts do not work without installing that client on your OMERO servers/processors that will run these scripts.
 
 Always start with initiating the Slurm environment at least once, for example using [init/Slurm Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/init/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
 
