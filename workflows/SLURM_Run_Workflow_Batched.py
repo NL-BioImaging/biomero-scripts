@@ -16,7 +16,7 @@ from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rlist, robject
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 from itertools import islice
 import time as timesleep

@@ -19,7 +19,7 @@ import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap
 import omero.scripts as omscripts
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 
 logger = logging.getLogger(__name__)

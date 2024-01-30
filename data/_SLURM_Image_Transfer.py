@@ -46,7 +46,7 @@ try:
     from PIL import Image  # see ticket:2597
 except ImportError:
     import Image
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 
 logger = logging.getLogger(__name__)

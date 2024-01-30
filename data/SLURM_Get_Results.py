@@ -21,7 +21,7 @@ import os
 import re
 import zipfile
 import glob
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 import ezomero
 # from aicsimageio import AICSImage

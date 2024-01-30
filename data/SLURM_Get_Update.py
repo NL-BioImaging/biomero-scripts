@@ -16,7 +16,7 @@ import omero.util.script_utils as script_utils
 from omero.constants.namespaces import NSCREATED
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, robject, unwrap, wrap
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 
 logger = logging.getLogger(__name__)

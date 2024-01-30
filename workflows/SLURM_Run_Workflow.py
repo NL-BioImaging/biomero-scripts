@@ -17,7 +17,7 @@ from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 import time as timesleep
 from paramiko import SSHException

@@ -13,7 +13,7 @@ import omero
 import omero.gateway
 from omero import scripts
 from omero.rtypes import rstring, unwrap
-from omero_slurm_client import SlurmClient
+from biomero import SlurmClient
 import logging
 
 logger = logging.getLogger(__name__)
