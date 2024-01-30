@@ -1,7 +1,7 @@
 BIOMERO Scripts
 ==================
 
-These scripts are to be used within BIOMERO (an extension to OMERO), together with the [OMERO Slurm Client library](https://github.com/NL-BioImaging/omero-slurm-client).
+These scripts are to be used within BIOMERO (an extension to OMERO), together with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 Together, BIOMERO allows you to run BioImage analysis workflows directly from OMERO on a Slurm cluster, through SSH.
 
@@ -12,9 +12,9 @@ Together, BIOMERO allows you to run BioImage analysis workflows directly from OM
 
 In the figure below we show our **BIOMERO** framework, for **B**io**I**mage analysis in **OMERO**. 
 
-BIOMERO consists of the Python library [OMERO Slurm Client](https://github.com/NL-BioImaging/omero-slurm-client) and the integrations within OMERO through the scripts in this repository.
+BIOMERO consists of the Python library [BIOMERO](https://github.com/NL-BioImaging/biomero) and the integrations within OMERO through the scripts in this repository.
 
-![OMERO-Figure1_Overview_v5](https://github.com/NL-BioImaging/omero-slurm-client/assets/68958516/ff437ed2-d4b7-48b4-a7e3-12f1dbf00981)
+![OMERO-Figure1_Overview_v5](https://github.com/NL-BioImaging/biomero/assets/68958516/ff437ed2-d4b7-48b4-a7e3-12f1dbf00981)
 
 Installation
 ------------
@@ -60,7 +60,7 @@ Upgrading
 Use the BIOMERO scripts
 -----
 
-This repository provides example OMERO scripts for using the BIOMERO [OMERO Slurm Client](https://github.com/NL-BioImaging/omero-slurm-client). These scripts do not work without installing that client on your OMERO servers/processors that will run these scripts.
+This repository provides example OMERO scripts for using [BIOMERO](https://github.com/NL-BioImaging/biomero). These scripts do not work without installing that client on your OMERO servers/processors that will run these scripts.
 
 Always start with initiating the Slurm environment at least once, for example using [init/Slurm Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/init/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
 
@@ -76,10 +76,10 @@ Other example OMERO scripts are:
 
 - [`workflows/Slurm CellPose Segmentation`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/workflows/SLURM_CellPose_Segmentation.py): This is a more primitive script that only runs the actual workflow `CellPose` (if correctly configured). You will need to manually transfer data first (with `Slurm Image Transfer`) and manually retrieve data afterward (with `Slurm Get Results`).
 
-Enable logging (of the OMERO Slurm Client library)
+Enable logging (of the BIOMERO library)
 -----
 
-Note that you can just enable more logging of your OMERO scripts (including the OMERO Slurm Client library) by changing the logger in the __init__ of your scripts:
+Note that you can just enable more logging of your OMERO scripts (including the BIOMERO library) by changing the logger in the __init__ of your scripts:
 
 ```Python
 if __name__ == '__main__':
@@ -120,12 +120,12 @@ T.T. Luik
 Amsterdam UMC
 
 ###### URL ######
-https://nl-bioimaging.github.io/omero-slurm-client/
+https://nl-bioimaging.github.io/biomero/
 
 ###### Email ######
 t.t.luik@amsterdamumc.nl
 
 ###### Description ######
-These scripts are to be used with the [OMERO Slurm Client library](https://github.com/NL-BioImaging/omero-slurm-client).
+These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
