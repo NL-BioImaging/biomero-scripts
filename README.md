@@ -33,12 +33,27 @@ Installation
         <path>/<to>/<bin>/omero script list
 
 4. Install system requirements _on the_ **PROCESSOR** _nodes_:
-    - `python3 -m pip install ezomero==1.1.1 tifffile==2020.9.3` 
+    - `python3 -m pip install biomero==1.2.0 ezomero==1.1.1 tifffile==2020.9.3 omero-metadata==0.12.0` 
     - the [OMERO CLI Zarr plugin](https://github.com/ome/omero-cli-zarr), e.g. 
     `python3 -m pip install omero-cli-zarr==0.5.3` && `yum install -y blosc-devel`
     - the [bioformats2raw-0.7.0](https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.7.0/bioformats2raw-0.7.0.zip), e.g. `unzip -d /opt bioformats2raw-0.7.0.zip && export PATH="$PATH:/opt/bioformats2raw-0.7.0/bin"`
 
 These examples work on Linux CentOS (i.e. the official OMERO containers); for Windows, or other Linux package managers, check with the original repositories (OMERO CLI ZARR and BioFormats2RAW) for more details on installation.
+
+Requirements
+---------
+
+Just to reiterate, you need all these requirements installed to run all these scripts, on the OMERO  **PROCESSOR** node:
+
+- Python libraries:
+  - biomero==1.2.0
+  - ezomero==1.1.1
+  - tifffile==2020.9.3
+  - omero-metadata==0.12.0
+  - omero-cli-zarr==0.5.3 (see below)
+- the [OMERO CLI Zarr plugin](https://github.com/ome/omero-cli-zarr), e.g. 
+    `python3 -m pip install omero-cli-zarr==0.5.3` && `yum install -y blosc-devel`
+- the [bioformats2raw-0.7.0](https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.7.0/bioformats2raw-0.7.0.zip), e.g. `unzip -d /opt bioformats2raw-0.7.0.zip && export PATH="$PATH:/opt/bioformats2raw-0.7.0/bin"`
 
 
 Upgrading

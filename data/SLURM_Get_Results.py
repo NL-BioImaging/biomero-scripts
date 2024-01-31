@@ -27,6 +27,14 @@ import ezomero
 # from aicsimageio import AICSImage
 from tifffile import imread
 import numpy as np
+from omero_metadata.populate import ParsingContext
+OBJECT_TYPES = (
+    'Plate',
+    'Screen',
+    'Dataset',
+    'Project',
+    'Image',
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +44,16 @@ _OUTPUT_ATTACH_PROJECT = "Output - Attach as zip to project?"
 _OUTPUT_ATTACH_PLATE = "Output - Attach as zip to plate?"
 _OUTPUT_ATTACH_OG_IMAGES = "Output - Add as attachment to original images"
 _OUTPUT_ATTACH_NEW_DATASET = "Output - Add as new images in NEW dataset"
+_OUTPUT_ATTACH_TABLE = "Output - Add csv files as OMERO.table"
+_OUTPUT_ATTACH_TABLE_DATASET = "Attach table to dataset"
+_OUTPUT_ATTACH_TABLE_PLATE = "Attach table to plate"
+_OUTPUT_ATTACH_TABLE_DATASET_ID = "Dataset for table"
+_OUTPUT_ATTACH_TABLE_PLATE_ID = "Plate for table"
 _LOGFILE_PATH_PATTERN_GROUP = "DATA_PATH"
 _LOGFILE_PATH_PATTERN = "Running [\w-]+? Job w\/ .+? \| .+? \| (?P<DATA_PATH>.+?) \|.*"
 _OUTPUT_RENAME = "Rename imported files?"
-SUPPORTED_EXTENSIONS = ['.tif', '.tiff', '.png']
+SUPPORTED_IMAGE_EXTENSIONS = ['.tif', '.tiff', '.png']
+SUPPORTED_TABLE_EXTENSIONS = ['.csv']
 
 
 def load_image(conn, image_id):
@@ -71,6 +85,54 @@ def getOriginalFilename(name):
     return name
 
 
+def saveCSVToOmeroAsTable(conn, folder, client,
+                          data_type='Dataset', object_id=651):
+    """Save CSV files from a (unzipped) folder to OMERO as OMERO.tables
+
+    Args:
+        conn (_type_): Connection to OMERO
+        folder (String): Unzipped folder
+        client : OMERO client to attach output
+
+    Returns:
+        String: Message to add to script output
+    """
+    message = ""
+
+    # Get a list of all CSV files in the folder
+    all_files = glob.iglob(folder+'**/**', recursive=True)
+    csv_files = [f for f in all_files if os.path.isfile(f)
+                 and any(f.endswith(ext) for ext in SUPPORTED_TABLE_EXTENSIONS)]
+    print(f"Found the following table files in {folder}: {csv_files}")
+    # namespace = NSCREATED + "/BIOMERO/SLURM_GET_RESULTS"
+    job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
+
+    if not csv_files:
+        return "No table files found in the folder."
+    try:
+        for csv_file in csv_files:
+            csv_name = os.path.basename(csv_file)
+            csv_path = os.path.join(folder, csv_file)
+
+            objecti = getattr(omero.model, data_type + 'I')
+            omero_object = objecti(int(object_id), False)
+            ctx = ParsingContext(client, omero_object, "",
+                                 table_name=f"{job_id}_{csv_name}")
+
+            with open(csv_path, 'rt', encoding='utf-8-sig') as f1:
+                ctx.preprocess_from_handle(f1)
+                with open(csv_path, 'rt', encoding='utf-8-sig') as f2:
+                    ctx.parse_from_handle_stream(f2)
+
+            # Add the FileAnnotation to the script message
+            message += f"\nCSV file {csv_name} data added as table for {data_type}: {object_id}"
+
+    except Exception as e:
+        message += f"\nError attaching CSV files to OMERO: {e}"
+
+    return message
+
+
 def saveImagesToOmeroAsAttachments(conn, folder, client):
     """Save image from a (unzipped) folder to OMERO as attachments
 
@@ -83,8 +145,8 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
         String: Message to add to script output
     """
     all_files = glob.iglob(folder+'**/**', recursive=True)
-    files = [f for f in all_files if os.path.isfile(f) 
-             and any(f.endswith(ext) for ext in SUPPORTED_EXTENSIONS)]
+    files = [f for f in all_files if os.path.isfile(f)
+             and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
@@ -104,12 +166,12 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
             try:
                 # attach the masked image to the original image
                 ext = os.path.splitext(name)[1][1:]
-                
-                # if unwrap(client.getInput(_OUTPUT_RENAME)):                
+
+                # if unwrap(client.getInput(_OUTPUT_RENAME)):
                 #     renamed = rename_import_file(client, name, og_name)
                 # TODO: API doesn't allow changing filename when uploading.
                 # Maybe afterward? Update the originalFile name?
-                
+
                 file_ann = conn.createFileAnnfromLocalFile(
                     name, mimetype=f"image/{ext}",
                     ns=namespace, desc=f"Result from job {job_id} | analysis {folder}")
@@ -178,8 +240,8 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
         String: Message to add to script output
     """
     all_files = glob.iglob(folder+'**/**', recursive=True)
-    files = [f for f in all_files if os.path.isfile(f) 
-             and any(f.endswith(ext) for ext in SUPPORTED_EXTENSIONS)]
+    files = [f for f in all_files if os.path.isfile(f)
+             and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
 
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
@@ -205,44 +267,49 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 except IndexError:
                     source_image_id = None
                 print(img_data.shape, dataset_id, source_image_id)
-                print(f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
-                
+                print(
+                    f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
+
                 img_data = to_5d(img_data)
-                
+
                 print("Reshaped:", img_data.shape)
-                
-                if unwrap(client.getInput(_OUTPUT_RENAME)):            
+
+                if unwrap(client.getInput(_OUTPUT_RENAME)):
                     renamed = rename_import_file(client, name, og_name)
                 else:
                     renamed = name
-                
-                print(f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
+
+                print(
+                    f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
                 img_id = ezomero.post_image(conn, img_data,
-                                            renamed, 
+                                            renamed,
                                             dataset_id=dataset_id,
                                             dim_order="yxzct",
                                             source_image_id=source_image_id,
                                             description=f"Result from job {job_id} | analysis {folder}")
-                
+
                 del img_data
-                omero_img, img_data = ezomero.get_image(conn, img_id, pyramid_level=0, xyzct=True)
-                print(f"Retrieving from EZOmero --Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
-                
-                
+                omero_img, img_data = ezomero.get_image(
+                    conn, img_id, pyramid_level=0, xyzct=True)
+                print(
+                    f"Retrieving from EZOmero --Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
+
                 omero_pix = omero_img.getPrimaryPixels()
                 size_x = omero_pix.getSizeX()
                 size_y = omero_pix.getSizeY()
                 size_c = omero_img.getSizeC()
                 size_z = omero_img.getSizeZ()
                 size_t = omero_img.getSizeT()
-                
+
                 default_z = omero_img.getDefaultZ()+1
                 t = omero_img.getDefaultT()+1
                 plane = omero_img.renderImage((default_z,)[0]-1, t-1)
-                
-                print(f"Render from Omero object --Number of unique values: {np.unique(plane)} ")
-                
-                print(f"Uploaded {name} as {renamed} (from image {og_name}): {img_id}")
+
+                print(
+                    f"Render from Omero object --Number of unique values: {np.unique(plane)} ")
+
+                print(
+                    f"Uploaded {name} as {renamed} (from image {og_name}): {img_id}")
                 # os.remove(name)
             except Exception as e:
                 msg = f"Issue uploading file {name} to OMERO {og_name}: {e}"
@@ -256,7 +323,8 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 parent_project = parent_dataset.getParent()
             if parent_project and parent_project.canLink():
                 # and put it in the current project
-                print(parent_dataset, parent_project, parent_project.getId(), dataset_id)
+                print(parent_dataset, parent_project,
+                      parent_project.getId(), dataset_id)
                 project_link = omero.model.ProjectDatasetLinkI()
                 project_link.parent = omero.model.ProjectI(
                     parent_project.getId(), False)
@@ -277,7 +345,7 @@ def rename_import_file(client, name, og_name):
     pattern = unwrap(client.getInput("Rename"))
     print(f"Overwriting name {name} with pattern: {pattern}")
     ext = os.path.splitext(name)[1][1:]  # new extension
-    original_file = os.path.splitext(og_name)[0]  # original base 
+    original_file = os.path.splitext(og_name)[0]  # original base
     name = pattern.format(original_file=original_file, ext=ext)
     print(f"New name: {name} ({original_file}, {ext})")
     return name
@@ -292,6 +360,25 @@ def getUserPlates():
         objparams = [rstring('%d: %s' % (d.id, d.getName()))
                      for d in conn.getObjects('Plate')
                      if type(d) == omero.gateway.PlateWrapper]
+        #  if type(d) == omero.model.ProjectI
+        if not objparams:
+            objparams = [rstring('<No objects found>')]
+        return objparams
+    except Exception as e:
+        return ['Exception: %s' % e]
+    finally:
+        client.closeSession()
+
+
+def getUserDatasets():
+    try:
+        client = omero.client()
+        client.createSession()
+        conn = omero.gateway.BlitzGateway(client_obj=client)
+        conn.SERVICE_OPTS.setOmeroGroup(-1)
+        objparams = [rstring('%d: %s' % (d.id, d.getName()))
+                     for d in conn.getObjects('Dataset')
+                     if type(d) == omero.gateway.DatasetWrapper]
         #  if type(d) == omero.model.ProjectI
         if not objparams:
             objparams = [rstring('<No objects found>')]
@@ -363,15 +450,38 @@ def upload_contents_to_omero(client, conn, message, folder):
             msg = saveImagesToOmeroAsAttachments(conn=conn, folder=folder,
                                                  client=client)
             message += msg
+        if unwrap(client.getInput(_OUTPUT_ATTACH_TABLE)):
+            if unwrap(client.getInput(_OUTPUT_ATTACH_TABLE_DATASET)):
+                data_type = 'Dataset'
+                dataset_ids = unwrap(client.getInput(
+                    _OUTPUT_ATTACH_TABLE_DATASET_ID))
+                print(dataset_ids)
+                for d_id in dataset_ids:
+                    object_id = d_id.split(":")[0]
+                    msg = saveCSVToOmeroAsTable(
+                        conn=conn, folder=folder, client=client,
+                        data_type=data_type, object_id=object_id)
+                    message += msg
+            if unwrap(client.getInput(_OUTPUT_ATTACH_TABLE_PLATE)):
+                data_type = 'Plate'
+                plate_ids = unwrap(client.getInput(
+                    _OUTPUT_ATTACH_TABLE_PLATE_ID))
+                print(plate_ids)
+                for p_id in plate_ids:
+                    object_id = p_id.split(":")[0]
+                    msg = saveCSVToOmeroAsTable(
+                        conn=conn, folder=folder, client=client,
+                        data_type=data_type, object_id=object_id)
+                    message += msg
         if unwrap(client.getInput(_OUTPUT_ATTACH_NEW_DATASET)):
             # create a new dataset for new images
             dataset_name = unwrap(client.getInput("New Dataset"))
-            
+
             create_new_dataset = unwrap(client.getInput("Allow duplicate?"))
             if not create_new_dataset:  # check the named dataset first
                 try:
                     existing_datasets_w_name = [d.id for d in conn.getObjects(
-                        'Dataset', 
+                        'Dataset',
                         attributes={"name": dataset_name})]
                     #  if type(d) == omero.model.ProjectI
                     if not existing_datasets_w_name:
@@ -380,7 +490,7 @@ def upload_contents_to_omero(client, conn, message, folder):
                         dataset_id = existing_datasets_w_name[0]
                 except Exception:
                     create_new_dataset = True
-            
+
             if create_new_dataset:  # just create a new dataset
                 dataset = omero.model.DatasetI()
                 dataset.name = rstring(dataset_name)
@@ -390,16 +500,16 @@ def upload_contents_to_omero(client, conn, message, folder):
                 update_service = conn.getUpdateService()
                 dataset = update_service.saveAndReturnObject(dataset)
                 dataset_id = dataset.id.val
-            
-            msg = saveImagesToOmeroAsDataset(conn=conn, 
-                                             folder=folder, 
+
+            msg = saveImagesToOmeroAsDataset(conn=conn,
+                                             folder=folder,
                                              client=client,
                                              dataset_id=dataset_id,
                                              new_dataset=create_new_dataset)
             message += msg
 
     except Exception as e:
-        message += f" Failed to upload images to OMERO: {e}"
+        message += f" Failed to upload contents to OMERO: {e}"
         raise RuntimeError(message)
 
     return message
@@ -535,7 +645,8 @@ def runScript():
         _oldjobs = slurmClient.list_completed_jobs()
         _projects = getUserProjects()
         _plates = getUserPlates()
-     
+        _datasets = getUserDatasets()
+
         client = scripts.client(
             'Slurm Get Results',
             '''Retrieve the results from your completed SLURM job.
@@ -590,11 +701,30 @@ def runScript():
                            grouping="06.4",
                            description="A new name for the imported images.",
                            default="{original_file}NucleiLabels.{ext}"),
-            # scripts.Bool("Output - Add as new images in same dataset",
-            #  optional=False,
-            #  grouping="07",
-            #  description="Add all images to the original dataset",
-            #  default=False),
+            scripts.Bool(_OUTPUT_ATTACH_TABLE,
+                         optional=False,
+                         grouping="07",
+                         description="Add all csv files as OMERO.tables to the chosen dataset",
+                         default=False),
+            scripts.Bool(_OUTPUT_ATTACH_TABLE_DATASET,
+                         optional=True,
+                         grouping="07.1",
+                         description="Attach to the dataset chosen below",
+                         default=True),
+            scripts.List(_OUTPUT_ATTACH_TABLE_DATASET_ID, optional=True,
+                         grouping="07.2",
+                         description="Dataset to attach workflow results to",
+                         values=_datasets),
+            scripts.Bool(_OUTPUT_ATTACH_TABLE_PLATE,
+                         optional=True,
+                         grouping="07.3",
+                         description="Attach to the plate chosen below",
+                         default=False),
+            scripts.List(_OUTPUT_ATTACH_TABLE_PLATE_ID, optional=True,
+                         grouping="07.4",
+                         description="Plate to attach workflow results to",
+                         values=_plates),
+
 
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
         )
@@ -630,7 +760,7 @@ def runScript():
 
             # Job log
             if unwrap(client.getInput(_COMPLETED_JOB)):
-                
+
                 try:
                     # Copy file to server
                     tup = slurmClient.get_logfile_from_slurm(
@@ -692,8 +822,8 @@ def runScript():
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
-                    message = cleanup_tmp_files_locally(
-                                message, folder, log_file)
+                    # cleanup_tmp_files_locally(message, folder, log_file)
+                    message += "Oops, forgot to clean up!"
 
             client.setOutput("Message", rstring(str(message)))
         finally:
