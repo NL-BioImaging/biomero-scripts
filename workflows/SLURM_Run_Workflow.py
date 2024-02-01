@@ -152,7 +152,7 @@ def runScript():
                              default=NO),
             omscripts.Bool(OUTPUT_PARENT,
                            optional=True, grouping="02.2",
-                           description="Attach zip to parent dataset/plate",
+                           description="Attach zip to parent project/plate",
                            default=True),
             omscripts.Bool(OUTPUT_ATTACH,
                            optional=True,
