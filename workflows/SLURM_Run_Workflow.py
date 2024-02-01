@@ -17,7 +17,7 @@ from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 import logging
 import time as timesleep
 from paramiko import SSHException
@@ -35,8 +35,9 @@ OUTPUT_PARENT = "1) Zip attachment to parent"
 OUTPUT_ATTACH = "2) Attach to original images"
 OUTPUT_NEW_DATASET = "3a) Import into NEW Dataset"
 OUTPUT_DUPLICATES = "3b) Allow duplicate dataset (name)?"
+OUTPUT_CSV_TABLE = "4) Upload result CSVs as OMERO tables"
 OUTPUT_OPTIONS = [OUTPUT_RENAME, OUTPUT_PARENT, OUTPUT_NEW_DATASET,
-                  OUTPUT_ATTACH]
+                  OUTPUT_ATTACH, OUTPUT_CSV_TABLE]
 
 
 def getUserPlates():
@@ -151,8 +152,8 @@ def runScript():
                              default=NO),
             omscripts.Bool(OUTPUT_PARENT,
                            optional=True, grouping="02.2",
-                           description="Attach zip to parent project/plate",
-                           default=False),
+                           description="Attach zip to parent dataset/plate",
+                           default=True),
             omscripts.Bool(OUTPUT_ATTACH,
                            optional=True,
                            grouping="02.4",
@@ -166,7 +167,12 @@ def runScript():
                            optional=True,
                            grouping="02.6",
                            description="If a dataset already matches this name, still make a new one?",
-                           default=True),
+                           default=False),
+            omscripts.Bool(OUTPUT_CSV_TABLE,
+                           optional=False,
+                           grouping="02.7",
+                           dsecription="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
+                           default=True)
 
         ]
         # Generate script parameters for all our workflows
@@ -350,9 +356,9 @@ def runScript():
                             # 5. Retrieve SLURM images
                             # 6. Store results in OMERO
                             log_msg = f"Job {slurm_job_id} is COMPLETED."
-                            rv_imp = importImagesToOmero(
+                            rv_imp = importResultsToOmero(
                                 client, conn, slurm_job_id, selected_output)
-                            
+
                             if rv_imp:
                                 try:
                                     if rv_imp['Message']:
@@ -526,10 +532,10 @@ def runOMEROScript(client: omscripts.client, svc, script_ids, inputs):
     return rv
 
 
-def importImagesToOmero(client: omscripts.client,
-                        conn: BlitzGateway,
-                        slurm_job_id: int,
-                        selected_output: list) -> str:
+def importResultsToOmero(client: omscripts.client,
+                         conn: BlitzGateway,
+                         slurm_job_id: int,
+                         selected_output: list) -> str:
     if conn.keepAlive():
         svc = conn.getScriptService()
         scripts = svc.getScripts()
@@ -541,81 +547,153 @@ def importImagesToOmero(client: omscripts.client,
     script_ids = [unwrap(s.id)
                   for s in scripts if unwrap(s.getName()) in IMPORT_SCRIPTS]
     first_id = unwrap(client.getInput("IDs"))[0]
-    print(script_ids, first_id, unwrap(client.getInput("Data_Type")))
+    data_type = unwrap(client.getInput("Data_Type"))
+    print(script_ids, first_id, data_type)
     opts = {}
-    inputs = {"Completed Job": rbool(True),
-              "SLURM Job Id": rstring(str(slurm_job_id))
-              }
+    inputs = {
+        constants.RESULTS_OUTPUT_COMPLETED_JOB: rbool(True),
+        constants.RESULTS_OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id))
+    }
+
+    # Get a 'parent' dataset or plate of input images
+    parent_id = first_id
+    parent_data_type = data_type
+    if data_type == 'Image':
+        datasets = [d.id for d in conn.getObjects(
+            'Dataset', opts={'image': first_id})]
+        plates = [d.id for d in conn.getObjects(
+            'Plate', opts={'image': first_id})]
+        print(f"Datasets:{datasets} Plates:{plates}")
+        if len(plates) > len(datasets):
+            parent_id = plates[0]
+            parent_data_type = 'Plate'
+        else:
+            parent_id = datasets[0]
+            parent_data_type = 'Dataset'
+
+    print(f"Determined parent to be {parent_data_type}:{parent_id}")
 
     if selected_output[OUTPUT_PARENT]:
-        # get parent dataset and project
-        data_type = unwrap(client.getInput("Data_Type"))
-
-        if data_type == 'Image':
-            datasets = [d.id for d in conn.getObjects(
-                'Dataset', opts={'image': first_id})]
-            plates = [d.id for d in conn.getObjects(
-                'Plate', opts={'image': first_id})]
-            print(f"Datasets:{datasets} Plates:{plates}")
-            if len(plates) > len(datasets):
-                first_id = plates[0]
-                data_type = 'Plate'
-            else:
-                first_id = datasets[0]
-                data_type = 'Dataset'
-
-        if data_type == 'Dataset':
-            print(f"Adding to dataset {first_id}")
-            opts['dataset'] = first_id
-
-            print(opts)
-            projects = [rstring('%d: %s' % (d.id, d.getName()))
-                        for d in conn.getObjects('Project', opts=opts)]
-            print(projects)
-            inputs["Project"] = rlist(projects)
-        elif data_type == 'Plate':
-            print(f"Adding to plate {first_id}")
-            opts['plate'] = first_id
-            print(opts)
-            plates = [rstring('%d: %s' % (d.id, d.getName()))
-                      for d in conn.getObjects('Plate', opts=opts)]
-            print(plates)
-            inputs["Output - Attach as zip to project?"] = rbool(False)
-            inputs["Output - Attach as zip to plate?"] = rbool(True)
-            inputs["Plate"] = rlist(plates)
+        # For now, there is no attaching to Dataset or Screen...
+        # If we need that, build it ;) (in Get_Result script)
+        if parent_data_type == 'Dataset' or parent_data_type == 'Project':
+            print(f"Adding to dataset {parent_id}")
+            projects = get_project_name_ids(conn, parent_id)
+            inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT_ID] = rlist(
+                projects)
+        elif parent_data_type == 'Plate':
+            print(f"Adding to plate {parent_id}")
+            plates = get_plate_name_ids(conn, parent_id)
+            inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT] = rbool(False)
+            inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE] = rbool(True)
+            inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE_ID] = rlist(plates)
         else:
-            raise ValueError(f"Cannot handle {data_type}")
+            raise ValueError(f"Cannot handle {parent_data_type}")
     else:
-        inputs["Output - Attach as zip to project?"] = rbool(False)
-        inputs["Output - Attach as zip to plate?"] = rbool(False)
+        inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT] = rbool(False)
+        inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE] = rbool(False)
 
     if selected_output[OUTPUT_RENAME]:
-        inputs["Rename imported files?"] = rbool(True)
-        inputs["Rename"] = client.getInput(OUTPUT_RENAME)
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME
+        ] = rbool(True)
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME
+        ] = client.getInput(OUTPUT_RENAME)
     else:
-        inputs["Rename imported files?"] = rbool(False)
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME
+        ] = rbool(False)
 
     if selected_output[OUTPUT_NEW_DATASET]:
-        inputs["Output - Add as new images in NEW dataset"] = rbool(True)
-        inputs["New Dataset"] = client.getInput(OUTPUT_NEW_DATASET)
+        inputs[constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET] = rbool(True)
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_NAME
+        ] = client.getInput(OUTPUT_NEW_DATASET)
         # duplicate dataset name check
-        inputs["Allow duplicate?"] = client.getInput(OUTPUT_DUPLICATES)
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_DUPLICATE
+        ] = client.getInput(OUTPUT_DUPLICATES)
 
     else:
-        inputs["Output - Add as new images in NEW dataset"] = rbool(False)
+        inputs[constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET] = rbool(False)
 
     if selected_output[OUTPUT_ATTACH]:
         inputs[
-            "Output - Add as attachment to original images"
-            ] = rbool(True)
+            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+        ] = rbool(True)
     else:
         inputs[
-            "Output - Add as attachment to original images"
+            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+        ] = rbool(False)
+
+    if selected_output[OUTPUT_PARENT]:
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+        ] = rbool(True)
+    else:
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+        ] = rbool(False)
+
+    if selected_output[OUTPUT_CSV_TABLE]:
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_TABLE
+        ] = rbool(True)
+        if parent_data_type == 'Dataset':
+            inputs[
+                constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET
+            ] = rbool(True)
+            inputs[
+                constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET_ID
+            ] = rlist(get_dataset_name_ids(conn, parent_id))
+        else:
+            inputs[
+                constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET
             ] = rbool(False)
+        if parent_data_type == 'Plate':
+            inputs[
+                constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE
+            ] = rbool(True)
+            inputs[
+                constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE_ID
+            ] = rlist(get_plate_name_ids(conn, parent_id))
+        else:
+            inputs[
+                constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE
+            ] = rbool(False)
+    else:
+        inputs[
+            constants.RESULTS_OUTPUT_ATTACH_TABLE
+        ] = rbool(False)
 
     print(f"Running import script {script_ids} with inputs: {inputs}")
     rv = runOMEROScript(client, svc, script_ids, inputs)
     return rv
+
+
+def get_project_name_ids(conn, parent_id):
+    # Note different implementation XD
+    # Call it 'legacy code', at version 1 already ;)
+    projects = [rstring('%d: %s' % (d.id, d.getName()))
+                for d in conn.getObjects('Project',
+                                         opts={'dataset': parent_id})]
+    print(projects)
+    return projects
+
+
+def get_dataset_name_ids(conn, parent_id):
+    dataset = [rstring('%d: %s' % (d.id, d.getName()))
+               for d in conn.getObjects('Dataset', [parent_id])]
+    print(dataset)
+    return dataset
+
+
+def get_plate_name_ids(conn, parent_id):
+    plates = [rstring('%d: %s' % (d.id, d.getName()))
+              for d in conn.getObjects('Plate', [parent_id])]
+    print(plates)
+    return plates
 
 
 def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:

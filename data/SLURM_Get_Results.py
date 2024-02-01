@@ -21,7 +21,7 @@ import os
 import re
 import zipfile
 import glob
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 import logging
 import ezomero
 # from aicsimageio import AICSImage
@@ -38,20 +38,8 @@ OBJECT_TYPES = (
 
 logger = logging.getLogger(__name__)
 
-_SLURM_JOB_ID = "SLURM Job Id"
-_COMPLETED_JOB = "Completed Job"
-_OUTPUT_ATTACH_PROJECT = "Output - Attach as zip to project?"
-_OUTPUT_ATTACH_PLATE = "Output - Attach as zip to plate?"
-_OUTPUT_ATTACH_OG_IMAGES = "Output - Add as attachment to original images"
-_OUTPUT_ATTACH_NEW_DATASET = "Output - Add as new images in NEW dataset"
-_OUTPUT_ATTACH_TABLE = "Output - Add csv files as OMERO.table"
-_OUTPUT_ATTACH_TABLE_DATASET = "Attach table to dataset"
-_OUTPUT_ATTACH_TABLE_PLATE = "Attach table to plate"
-_OUTPUT_ATTACH_TABLE_DATASET_ID = "Dataset for table"
-_OUTPUT_ATTACH_TABLE_PLATE_ID = "Plate for table"
 _LOGFILE_PATH_PATTERN_GROUP = "DATA_PATH"
 _LOGFILE_PATH_PATTERN = "Running [\w-]+? Job w\/ .+? \| .+? \| (?P<DATA_PATH>.+?) \|.*"
-_OUTPUT_RENAME = "Rename imported files?"
 SUPPORTED_IMAGE_EXTENSIONS = ['.tif', '.tiff', '.png']
 SUPPORTED_TABLE_EXTENSIONS = ['.csv']
 
@@ -105,7 +93,8 @@ def saveCSVToOmeroAsTable(conn, folder, client,
                  and any(f.endswith(ext) for ext in SUPPORTED_TABLE_EXTENSIONS)]
     print(f"Found the following table files in {folder}: {csv_files}")
     # namespace = NSCREATED + "/BIOMERO/SLURM_GET_RESULTS"
-    job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
+    job_id = unwrap(client.getInput(
+        constants.RESULTS_OUTPUT_SLURM_JOB_ID)).strip()
 
     if not csv_files:
         return "No table files found in the folder."
@@ -152,7 +141,8 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
     # files += more_files
     print(f"Found the following files in {folder}: {files}")
     namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
-    job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
+    job_id = unwrap(client.getInput(
+        constants.RESULTS_OUTPUT_SLURM_JOB_ID)).strip()
     msg = ""
     for name in files:
         print(name)
@@ -249,7 +239,8 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
     print(f"Found the following files in {folder}: {files}")
     # namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     msg = ""
-    job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
+    job_id = unwrap(client.getInput(
+        constants.RESULTS_OUTPUT_SLURM_JOB_ID)).strip()
     images = None
     if files:
         for name in files:
@@ -274,7 +265,8 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
 
                 print("Reshaped:", img_data.shape)
 
-                if unwrap(client.getInput(_OUTPUT_RENAME)):
+                if unwrap(client.getInput(
+                        constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME)):
                     renamed = rename_import_file(client, name, og_name)
                 else:
                     renamed = name
@@ -294,12 +286,12 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 print(
                     f"Retrieving from EZOmero --Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
 
-                omero_pix = omero_img.getPrimaryPixels()
-                size_x = omero_pix.getSizeX()
-                size_y = omero_pix.getSizeY()
-                size_c = omero_img.getSizeC()
-                size_z = omero_img.getSizeZ()
-                size_t = omero_img.getSizeT()
+                # omero_pix = omero_img.getPrimaryPixels()
+                # size_x = omero_pix.getSizeX()
+                # size_y = omero_pix.getSizeY()
+                # size_c = omero_img.getSizeC()
+                # size_z = omero_img.getSizeZ()
+                # size_t = omero_img.getSizeT()
 
                 default_z = omero_img.getDefaultZ()+1
                 t = omero_img.getDefaultT()+1
@@ -445,16 +437,17 @@ def upload_contents_to_omero(client, conn, message, folder):
         folder (String): Path to folder with content
     """
     try:
-        if unwrap(client.getInput(_OUTPUT_ATTACH_OG_IMAGES)):
+        if unwrap(client.getInput(constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES)):
             # upload and link individual images
             msg = saveImagesToOmeroAsAttachments(conn=conn, folder=folder,
                                                  client=client)
             message += msg
-        if unwrap(client.getInput(_OUTPUT_ATTACH_TABLE)):
-            if unwrap(client.getInput(_OUTPUT_ATTACH_TABLE_DATASET)):
+        if unwrap(client.getInput(constants.RESULTS_OUTPUT_ATTACH_TABLE)):
+            if unwrap(client.getInput(
+                    constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET)):
                 data_type = 'Dataset'
                 dataset_ids = unwrap(client.getInput(
-                    _OUTPUT_ATTACH_TABLE_DATASET_ID))
+                    constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET_ID))
                 print(dataset_ids)
                 for d_id in dataset_ids:
                     object_id = d_id.split(":")[0]
@@ -462,10 +455,11 @@ def upload_contents_to_omero(client, conn, message, folder):
                         conn=conn, folder=folder, client=client,
                         data_type=data_type, object_id=object_id)
                     message += msg
-            if unwrap(client.getInput(_OUTPUT_ATTACH_TABLE_PLATE)):
+            if unwrap(client.getInput(
+                    constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE)):
                 data_type = 'Plate'
                 plate_ids = unwrap(client.getInput(
-                    _OUTPUT_ATTACH_TABLE_PLATE_ID))
+                    constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE_ID))
                 print(plate_ids)
                 for p_id in plate_ids:
                     object_id = p_id.split(":")[0]
@@ -473,7 +467,8 @@ def upload_contents_to_omero(client, conn, message, folder):
                         conn=conn, folder=folder, client=client,
                         data_type=data_type, object_id=object_id)
                     message += msg
-        if unwrap(client.getInput(_OUTPUT_ATTACH_NEW_DATASET)):
+        if unwrap(client.getInput(
+                constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET)):
             # create a new dataset for new images
             dataset_name = unwrap(client.getInput("New Dataset"))
 
@@ -495,7 +490,8 @@ def upload_contents_to_omero(client, conn, message, folder):
                 dataset = omero.model.DatasetI()
                 dataset.name = rstring(dataset_name)
                 desc = "Images in this Dataset are label masks of job:\n"\
-                    "  Id: %s" % (unwrap(client.getInput(_SLURM_JOB_ID)))
+                    "  Id: %s" % (unwrap(client.getInput(
+                        constants.RESULTS_OUTPUT_SLURM_JOB_ID)))
                 dataset.description = rstring(desc)
                 update_service = conn.getUpdateService()
                 dataset = update_service.saveAndReturnObject(dataset)
@@ -653,74 +649,82 @@ def runScript():
 
             Attach files to provided project.
             ''',
-            scripts.Bool(_COMPLETED_JOB, optional=False, grouping="01",
+            scripts.Bool(constants.RESULTS_OUTPUT_COMPLETED_JOB,
+                         optional=False, grouping="01",
                          default=True),
-            scripts.String(_SLURM_JOB_ID, optional=False, grouping="01.1",
+            scripts.String(constants.RESULTS_OUTPUT_SLURM_JOB_ID,
+                           optional=False, grouping="01.1",
                            values=_oldjobs),
-            scripts.Bool(_OUTPUT_ATTACH_PROJECT,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="03",
                          description="Attach all results in zip to a project",
                          default=True),
-            scripts.List("Project", optional=True, grouping="03.1",
+            scripts.List(constants.RESULTS_OUTPUT_ATTACH_PROJECT_ID,
+                         optional=True, grouping="03.1",
                          description="Project to attach workflow results to",
                          values=_projects),
-            scripts.Bool(_OUTPUT_ATTACH_OG_IMAGES,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES,
                          optional=False,
                          grouping="05",
                          description="Attach all results to original images as attachments",
                          default=True),
-            scripts.Bool(_OUTPUT_ATTACH_PLATE,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_PLATE,
                          optional=False,
                          grouping="04",
                          description="Attach all results in zip to a plate",
                          default=False),
-            scripts.List("Plate", optional=True, grouping="04.1",
+            scripts.List(constants.RESULTS_OUTPUT_ATTACH_PLATE_ID,
+                         optional=True, grouping="04.1",
                          description="Plate to attach workflow results to",
                          values=_plates),
-            scripts.Bool(_OUTPUT_ATTACH_NEW_DATASET,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET,
                          optional=False,
                          grouping="06",
                          description="Import all result as a new dataset",
                          default=False),
-            scripts.String("New Dataset", optional=True,
+            scripts.String(constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_NAME,
+                           optional=True,
                            grouping="06.1",
                            description="Name for the new dataset w/ results",
                            default="My_Results"),
-            scripts.Bool("Allow duplicate?",
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_DUPLICATE,
                          optional=True,
                          grouping="06.2",
                          description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
                          default=True),
-            scripts.Bool(_OUTPUT_RENAME,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
                          grouping="06.3",
                          description="Rename all imported files as below. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
                          default=False),
-            scripts.String("Rename", optional=True,
+            scripts.String(constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME,
+                           optional=True,
                            grouping="06.4",
                            description="A new name for the imported images.",
                            default="{original_file}NucleiLabels.{ext}"),
-            scripts.Bool(_OUTPUT_ATTACH_TABLE,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_TABLE,
                          optional=False,
                          grouping="07",
                          description="Add all csv files as OMERO.tables to the chosen dataset",
                          default=False),
-            scripts.Bool(_OUTPUT_ATTACH_TABLE_DATASET,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET,
                          optional=True,
                          grouping="07.1",
                          description="Attach to the dataset chosen below",
                          default=True),
-            scripts.List(_OUTPUT_ATTACH_TABLE_DATASET_ID, optional=True,
+            scripts.List(constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET_ID,
+                         optional=True,
                          grouping="07.2",
                          description="Dataset to attach workflow results to",
                          values=_datasets),
-            scripts.Bool(_OUTPUT_ATTACH_TABLE_PLATE,
+            scripts.Bool(constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE,
                          optional=True,
                          grouping="07.3",
                          description="Attach to the plate chosen below",
                          default=False),
-            scripts.List(_OUTPUT_ATTACH_TABLE_PLATE_ID, optional=True,
+            scripts.List(constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE_ID,
+                         optional=True,
                          grouping="07.4",
                          description="Plate to attach workflow results to",
                          values=_plates),
@@ -737,29 +741,31 @@ def runScript():
             print(f"Request: {scriptParams}\n")
 
             # Job id
-            slurm_job_id = unwrap(client.getInput(_SLURM_JOB_ID)).strip()
+            slurm_job_id = unwrap(client.getInput(
+                constants.RESULTS_OUTPUT_SLURM_JOB_ID)).strip()
 
             # Ask job State
-            if unwrap(client.getInput(_COMPLETED_JOB)):
+            if unwrap(client.getInput(constants.RESULTS_OUTPUT_COMPLETED_JOB)):
                 _, result = slurmClient.check_job_status([slurm_job_id])
                 print(result.stdout)
                 message += f"\n{result.stdout}"
 
             # Pull project from Omero
             projects = []  # note, can also be plate now
-            if unwrap(client.getInput(_OUTPUT_ATTACH_PROJECT)):
+            if unwrap(client.getInput(
+                    constants.RESULTS_OUTPUT_ATTACH_PROJECT)):
                 project_ids = unwrap(client.getInput("Project"))
                 print(project_ids)
                 projects = [conn.getObject("Project", p.split(":")[0])
                             for p in project_ids]
-            if unwrap(client.getInput(_OUTPUT_ATTACH_PLATE)):
+            if unwrap(client.getInput(constants.RESULTS_OUTPUT_ATTACH_PLATE)):
                 plate_ids = unwrap(client.getInput("Plate"))
                 print(plate_ids)
                 projects = [conn.getObject("Plate", p.split(":")[0])
                             for p in plate_ids]
 
             # Job log
-            if unwrap(client.getInput(_COMPLETED_JOB)):
+            if unwrap(client.getInput(constants.RESULTS_OUTPUT_COMPLETED_JOB)):
 
                 try:
                     # Copy file to server
@@ -801,8 +807,10 @@ def runScript():
 
                             folder = f"{local_tmp_storage}/{filename}"
 
-                            if (unwrap(client.getInput(_OUTPUT_ATTACH_PROJECT)) or
-                                    unwrap(client.getInput(_OUTPUT_ATTACH_PLATE))):
+                            if (unwrap(client.getInput(
+                                constants.RESULTS_OUTPUT_ATTACH_PROJECT)) or
+                                    unwrap(client.getInput(
+                                        constants.RESULTS_OUTPUT_ATTACH_PLATE))):
                                 message = upload_zip_to_omero(
                                     client, conn, message,
                                     slurm_job_id, projects, folder)
@@ -812,18 +820,17 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, message, folder)
 
-                            # clean_result = slurmClient.cleanup_tmp_files(
-                            #     slurm_job_id,
-                            #     filename,
-                            #     data_location)
-                            # message += "\nSuccesfully cleaned up tmp files"
-                            # print(message, clean_result)
-                            print(message)
+                            clean_result = slurmClient.cleanup_tmp_files(
+                                slurm_job_id,
+                                filename,
+                                data_location)
+                            message += "\nSuccesfully cleaned up tmp files"
+                            print(message, clean_result)
+                            # print(message)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
-                    # cleanup_tmp_files_locally(message, folder, log_file)
-                    message += "Oops, forgot to clean up!"
+                    cleanup_tmp_files_locally(message, folder, log_file)
 
             client.setOutput("Message", rstring(str(message)))
         finally:
