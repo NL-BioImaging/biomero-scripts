@@ -80,7 +80,7 @@ def compress(target, base):
     shutil.make_archive(base_name, ext, base)
 
 
-def save_plane(suuid, image, format, c_name, z_range, project_z, t=0, 
+def save_plane(image, format, c_name, z_range, project_z, t=0,
                channel=None,
                greyscale=False, zoom_percent=None, folder_name=None):
     """
@@ -107,40 +107,6 @@ def save_plane(suuid, image, format, c_name, z_range, project_z, t=0,
     log("channel: %s" % c_name)
     log("z: %s" % z_range)
     log("t: %s" % t)
-    
-    if format == 'ZARR':
-        img_name = make_image_name(
-            original_name, c_name, z_range, t, "zarr", folder_name)
-        print(f"Saving image: {img_name} / session {suuid}")
-        log(f"Saving image: {img_name} / session {suuid}")
-        
-        curr_dir = os.getcwd()
-        exp_dir = os.path.join(curr_dir, folder_name)
-        
-        # TODO: Check if import omero-cli-zarr and #export(...) works better than subprocess?
-        # https://github.com/ome/omero-cli-zarr/blob/a35ade1d8177585b3e21ef860fd645a8d6eb5aea/src/omero_zarr/cli.py#L327C9-L327C15
-    
-        # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
-        cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-        # TODO: replace "omeroserver" with a lookup, very likely the client/gateway knows the server
-        command = f'omero zarr -s "omeroserver" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
-        cmd = cmd1 + " && " + command
-        print(cmd)
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True
-        )
-        stdout, stderr = process.communicate()
-        if stderr:
-            print(stderr.decode("utf-8"))
-        if process.returncode == 0:
-            print(f"OME ZARR CLI: {stdout}")
-            log(f"OME ZARR CLI: {stdout}")
-            print(img_name)
-            os.rename(f"{exp_dir}/{image.getId()}.zarr", img_name)
-        return  # shortcut
 
     # if channel == None: use current rendering settings
     if channel is not None:
@@ -227,6 +193,50 @@ def save_as_ome_tiff(conn, image, folder_name=None):
             f.write(piece)
 
 
+def save_as_zarr(suuid, image, folder_name=None):
+    extension = "zarr"
+    name = os.path.basename(image.getName())
+    img_name = "%s.%s" % (name, extension)
+    if folder_name is not None:
+        img_name = os.path.join(folder_name, img_name)
+    # check we don't overwrite existing file
+    i = 1
+    path_name = img_name[:-(len(extension)+1)]
+    while os.path.exists(img_name):
+        img_name = "%s_(%d).%s" % (path_name, i, extension)
+        i += 1
+
+    log("  Saving file as: %s" % img_name)
+
+    curr_dir = os.getcwd()
+    exp_dir = os.path.join(curr_dir, folder_name)
+
+    # TODO: Check if import omero-cli-zarr and #export(...) works better than subprocess?
+    # https://github.com/ome/omero-cli-zarr/blob/a35ade1d8177585b3e21ef860fd645a8d6eb5aea/src/omero_zarr/cli.py#L327C9-L327C15
+
+    # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
+    cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
+    # TODO: replace "omeroserver" with a lookup, very likely the client/gateway knows the server
+    command = f'omero zarr -s "omeroserver" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
+    cmd = cmd1 + " && " + command
+    print(cmd)
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=True
+    )
+    stdout, stderr = process.communicate()
+    if stderr:
+        print(stderr.decode("utf-8"))
+    if process.returncode == 0:
+        print(f"OME ZARR CLI: {stdout}")
+        log(f"OME ZARR CLI: {stdout}")
+        print(img_name)
+        os.rename(f"{exp_dir}/{image.getId()}.zarr", img_name)
+    return  # shortcut
+
+
 def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
                           channel_names=None, z_range=None, t_range=None,
                           greyscale=False, zoom_percent=None, project_z=False,
@@ -289,18 +299,18 @@ def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
         for t in t_indexes:
             if z_range is None:
                 default_z = image.getDefaultZ()+1
-                save_plane(suuid, image, format, c_name, (default_z,), project_z, t,
+                save_plane(image, format, c_name, (default_z,), project_z, t,
                            c, g_scale, zoom_percent, folder_name)
             elif project_z:
-                save_plane(suuid, image, format, c_name, z_range, project_z, t, c,
+                save_plane(image, format, c_name, z_range, project_z, t, c,
                            g_scale, zoom_percent, folder_name)
             else:
                 if len(z_range) > 1:
                     for z in range(z_range[0], z_range[1]):
-                        save_plane(suuid, image, format, c_name, (z,), project_z, t,
+                        save_plane(image, format, c_name, (z,), project_z, t,
                                    c, g_scale, zoom_percent, folder_name)
                 else:
-                    save_plane(suuid, image, format, c_name, z_range, project_z, t,
+                    save_plane(image, format, c_name, z_range, project_z, t,
                                c, g_scale, zoom_percent, folder_name)
 
 
@@ -408,7 +418,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
             nr_samples = well.countWellSample()
             for index in range(0, nr_samples):
                 image = well.getImage(index)
-                images.append(image)            
+                images.append(image)
         if not images:
             message += "No image found in plate(s)"
             return None, message
@@ -446,6 +456,8 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
                 continue
             else:
                 save_as_ome_tiff(conn, img, folder_name)
+        elif format == 'ZARR':
+            save_as_zarr(suuid, img, folder_name)
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -675,7 +687,7 @@ def run_script():
             script_params = {}
 
             conn = BlitzGateway(client_obj=client)
-            
+
             suuid = client.getSessionId()
 
             script_params = client.getInputs(unwrap=True)
