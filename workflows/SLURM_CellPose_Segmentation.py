@@ -131,38 +131,41 @@ def runScript():
             if not unpack_result.ok:
                 print("Error unpacking data:", unpack_result.stderr)
             else:
-                update_result = slurmClient.update_slurm_scripts()
-                print(update_result.stdout)
-                if not update_result.ok:
+                # Quick git pull on Slurm for latest version of job scripts
+                try:
+                    update_result = slurmClient.update_slurm_scripts()
+                    print(update_result.__dict__)
+                except Exception as e:
                     print("Error updating SLURM scripts:",
-                          update_result.stderr)
+                          e)
+
+                cp_result, slurm_job_id = slurmClient.run_workflow(
+                    workflow_name='cellpose',
+                    workflow_version=cellpose_version,
+                    input_data=zipfile,
+                    email=email,
+                    time=time,
+                    **kwargs
+                )
+                if not cp_result.ok:
+                    print("Error running CellPose job:", cp_result.stderr)
                 else:
-                    cp_result, slurm_job_id = slurmClient.run_cellpose(
-                        cellpose_version,
-                        zipfile,
-                        email=email,
-                        time=time,
-                        **kwargs
-                    )
-                    if not cp_result.ok:
-                        print("Error running CellPose job:", cp_result.stderr)
-                    else:
-                        print_result = f"Submitted to Slurm as\
-                            batch job {slurm_job_id}."
-                        # 4. Poll SLURM results
-                        try:
-                            tup = slurmClient.check_job_status(
-                                [slurm_job_id])
-                            (job_status_dict, poll_result) = tup
-                            print(poll_result.stdout, job_status_dict)
-                            if not poll_result.ok:
-                                print("Error checking job status:",
-                                      poll_result.stderr)
-                            else:
-                                print_result += f"\n{job_status_dict}"
-                        except Exception as e:
-                            print_result += f" ERROR WITH JOB: {e}"
-                            print(print_result)
+                    print_result = f"Submitted to Slurm as\
+                        batch job {slurm_job_id}."
+                    # 4. Poll SLURM results
+                    try:
+                        tup = slurmClient.check_job_status(
+                            [slurm_job_id])
+                        (job_status_dict, poll_result) = tup
+                        print(poll_result.stdout, job_status_dict)
+                        if not poll_result.ok:
+                            print("Error checking job status:",
+                                  poll_result.stderr)
+                        else:
+                            print_result += f"\n{job_status_dict}"
+                    except Exception as e:
+                        print_result += f" ERROR WITH JOB: {e}"
+                        print(print_result)
 
             # 7. Script output
             client.setOutput("Message", rstring(print_result))
