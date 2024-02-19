@@ -193,7 +193,7 @@ def save_as_ome_tiff(conn, image, folder_name=None):
             f.write(piece)
 
 
-def save_as_zarr(suuid, image, folder_name=None):
+def save_as_zarr(conn, suuid, image, folder_name=None):
     extension = "zarr"
     name = os.path.basename(image.getName())
     img_name = "%s.%s" % (name, extension)
@@ -216,8 +216,7 @@ def save_as_zarr(suuid, image, folder_name=None):
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    # TODO: replace "omeroserver" with a lookup, very likely the client/gateway knows the server
-    command = f'omero zarr -s "omeroserver" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
+    command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
     cmd = cmd1 + " && " + command
     print(cmd)
     process = subprocess.Popen(
@@ -457,7 +456,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == 'ZARR':
-            save_as_zarr(suuid, img, folder_name)
+            save_as_zarr(conn, suuid, img, folder_name)
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()

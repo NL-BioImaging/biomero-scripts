@@ -113,7 +113,7 @@ def runScript():
         client = omscripts.client(params)
 
         # Unpack script input values
-        cellpose_version = unwrap(client.getInput("Version"))
+        cellpose_version = unwrap(client.getInput("CellPose_Version"))
         zipfile = unwrap(client.getInput("Folder_Name"))
         email = unwrap(client.getInput("E-mail"))
         if email == _DEFAULT_MAIL:
