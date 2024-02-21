@@ -11,6 +11,7 @@
 
 from __future__ import print_function
 import sys
+import os
 import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
@@ -40,49 +41,6 @@ OUTPUT_OPTIONS = [OUTPUT_RENAME, OUTPUT_PARENT, OUTPUT_NEW_DATASET,
                   OUTPUT_ATTACH, OUTPUT_CSV_TABLE]
 
 
-def getUserPlates():
-    try:
-        client = omero.client()
-        client.createSession()
-        conn = omero.gateway.BlitzGateway(client_obj=client)
-        conn.SERVICE_OPTS.setOmeroGroup(-1)
-        objparams = [rstring('%d: %s' % (d.id, d.getName()))
-                     for d in conn.getObjects('Plate')
-                     if type(d) == omero.gateway.PlateWrapper]
-        #  if type(d) == omero.model.ProjectI
-        if not objparams:
-            objparams = [rstring('<No objects found>')]
-        return objparams
-    except Exception as e:
-        return ['Exception: %s' % e]
-    finally:
-        client.closeSession()
-
-
-def getUserProjects():
-    """ Get (OMERO) Projects that user has access to.
-
-    Returns:
-        List: List of project ids and names
-    """
-    try:
-        client = omero.client()
-        client.createSession()
-        conn = omero.gateway.BlitzGateway(client_obj=client)
-        conn.SERVICE_OPTS.setOmeroGroup(-1)
-        objparams = [rstring('%d: %s' % (d.id, d.getName()))
-                     for d in conn.getObjects('Project')
-                     if type(d) == omero.gateway.ProjectWrapper]
-        #  if type(d) == omero.model.ProjectI
-        if not objparams:
-            objparams = [rstring('<No objects found>')]
-        return objparams
-    except Exception as e:
-        return ['Exception: %s' % e]
-    finally:
-        client.closeSession()
-
-
 def runScript():
     """
     The main entry point of the script
@@ -102,7 +60,7 @@ def runScript():
         # and populated with the currently selected Image(s)/Dataset(s)
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "0.1.0"
+        params.version = "1.5.0"
         params.description = f'''Script to run a workflow on the Slurm cluster.
 
         This runs a script remotely on your Slurm cluster.
@@ -120,7 +78,7 @@ def runScript():
         OMERO admin.
         '''
         params.name = 'Slurm Workflow'
-        params.contact = 't.t.luik@amsterdamumc.nl'
+        params.contact = 'cellularimaging@amsterdamumc.nl'
         params.institutions = ["Amsterdam UMC"]
         params.authorsInstitutions = [[1]]
         # Default script parameters that we want to know for all workflows:
@@ -170,7 +128,7 @@ def runScript():
                            default=False),
             omscripts.Bool(OUTPUT_CSV_TABLE,
                            optional=False,
-                           grouping="02.7",
+                           grouping="02.8",
                            dsecription="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
                            default=True)
 
@@ -184,7 +142,11 @@ def runScript():
         workflows = wf_versions.keys()
         for group_incr, wf in enumerate(workflows):
             # increment per wf, determines UI order
-            parameter_group = f"0{group_incr+3}"
+            new_position = group_incr+3
+            if new_position > 9:
+                parameter_group = f"{new_position}"
+            else:
+                parameter_group = f"0{new_position}"
             _workflow_available_versions[wf] = wf_versions.get(
                 wf, na)
             # Get the workflow parameters (dynamically) from their repository
@@ -279,9 +241,11 @@ def runScript():
             conn.SERVICE_OPTS.setOmeroGroup(-1)
             email = getOmeroEmail(client, conn)  # retrieve an email for Slurm
 
+            print('''
             # --------------------------------------------
             # :: 1. Push selected data to Slurm ::
             # --------------------------------------------
+            ''')
             # Generate a filename for the input data
             zipfile = createFileName(client, conn)
             # Send data to Slurm, zipped, over SSH
@@ -723,7 +687,27 @@ def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        stream=sys.stdout)
+    # Some defaults from OMERO; don't feel like reading ice files.
+    # Retrieve the value of the OMERODIR environment variable
+    OMERODIR = os.environ.get('OMERODIR', '/opt/omero/server/OMERO.server')
+    LOGDIR = os.path.join(OMERODIR, 'var', 'log')
+    LOGFORMAT = "%(asctime)s %(levelname)-5.5s [%(name)40s] " \
+                "[%(process)d] (%(threadName)-10s) %(message)s"
+    # Added the process id
+    LOGSIZE = 500000000
+    LOGNUM = 9
+    log_filename = 'biomero.log'
+    # Create a stream handler with INFO level (for OMERO.web output)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    # Create DEBUG logging to rotating logfile at var/log
+    logging.basicConfig(level=logging.DEBUG,
+                        format=LOGFORMAT,
+                        handlers=[
+                            stream_handler,
+                            logging.handlers.RotatingFileHandler(
+                                os.path.join(LOGDIR, log_filename),
+                                maxBytes=LOGSIZE,
+                                backupCount=LOGNUM)
+                        ])
     runScript()

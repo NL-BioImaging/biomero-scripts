@@ -16,6 +16,8 @@
 
 from __future__ import print_function
 import omero
+import os
+import sys
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap
 import omero.scripts as omscripts
@@ -38,7 +40,7 @@ def runScript():
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "0.0.4"
+        params.version = "1.5.0"
         params.description = f'''Script to run CellPose on slurm cluster.
         First run the {_IMAGE_EXPORT_SCRIPT} script to export your data
         to the cluster.
@@ -51,7 +53,7 @@ def runScript():
         Connection ready? {slurmClient.validate()}
         '''
         params.name = 'Slurm Cellpose Segmentation'
-        params.contact = 't.t.luik@amsterdamumc.nl'
+        params.contact = 'cellularimaging@amsterdamumc.nl'
         params.institutions = ["Amsterdam UMC"]
         params.authorsInstitutions = [[1]]
 
@@ -174,4 +176,27 @@ def runScript():
 
 
 if __name__ == '__main__':
+    # Some defaults from OMERO; don't feel like reading ice files.
+    # Retrieve the value of the OMERODIR environment variable
+    OMERODIR = os.environ.get('OMERODIR', '/opt/omero/server/OMERO.server')
+    LOGDIR = os.path.join(OMERODIR, 'var', 'log')
+    LOGFORMAT = "%(asctime)s %(levelname)-5.5s [%(name)40s] " \
+                "[%(process)d] (%(threadName)-10s) %(message)s"
+    # Added the process id
+    LOGSIZE = 500000000
+    LOGNUM = 9
+    log_filename = 'biomero.log'
+    # Create a stream handler with INFO level (for OMERO.web output)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    # Create DEBUG logging to rotating logfile at var/log
+    logging.basicConfig(level=logging.DEBUG,
+                        format=LOGFORMAT,
+                        handlers=[
+                            stream_handler,
+                            logging.handlers.RotatingFileHandler(
+                                os.path.join(LOGDIR, log_filename),
+                                maxBytes=LOGSIZE,
+                                backupCount=LOGNUM)
+                        ])
     runScript()

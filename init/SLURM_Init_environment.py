@@ -15,6 +15,8 @@ from omero import scripts
 from omero.rtypes import rstring, unwrap
 from biomero import SlurmClient
 import logging
+import os
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -61,4 +63,27 @@ def runScript():
 
 
 if __name__ == '__main__':
+    # Some defaults from OMERO; don't feel like reading ice files.
+    # Retrieve the value of the OMERODIR environment variable
+    OMERODIR = os.environ.get('OMERODIR', '/opt/omero/server/OMERO.server')
+    LOGDIR = os.path.join(OMERODIR, 'var', 'log')
+    LOGFORMAT = "%(asctime)s %(levelname)-5.5s [%(name)40s] " \
+                "[%(process)d] (%(threadName)-10s) %(message)s"
+    # Added the process id
+    LOGSIZE = 500000000
+    LOGNUM = 9
+    log_filename = 'biomero.log'
+    # Create a stream handler with INFO level (for OMERO.web output)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    # Create DEBUG logging to rotating logfile at var/log
+    logging.basicConfig(level=logging.DEBUG,
+                        format=LOGFORMAT,
+                        handlers=[
+                            stream_handler,
+                            logging.handlers.RotatingFileHandler(
+                                os.path.join(LOGDIR, log_filename),
+                                maxBytes=LOGSIZE,
+                                backupCount=LOGNUM)
+                        ])
     runScript()
