@@ -13,6 +13,7 @@ import omero
 import omero.gateway
 from omero import scripts
 from omero.rtypes import rstring, unwrap
+from omero.gateway import BlitzGateway
 from biomero import SlurmClient
 import logging
 import os
@@ -43,18 +44,55 @@ def runScript():
     )
 
     try:
+        conn = BlitzGateway(client_obj=client)
         message = ""
         init_slurm = unwrap(client.getInput("Init Slurm"))
         if init_slurm:
             configfile = unwrap(client.getInput(extra_config_name))
             if not configfile:
                 configfile = ''
-            with SlurmClient.from_config(configfile=configfile,
-                                         init_slurm=True) as slurmClient:
-                slurmClient.validate(validate_slurm_setup=True)
-                message = "Slurm is setup:"
-                models, data = slurmClient.get_all_image_versions_and_data_files()
-                message += f"Models: {models}\nData:{data}"
+            with SlurmClient.from_config(configfile=configfile) as slurmClient:
+                conn.keepAlive()
+                if slurmClient.validate():
+                    # 1. Create directories
+                    slurmClient.setup_directories()
+                    conn.keepAlive()
+
+                    # 2. Clone git
+                    slurmClient.setup_job_scripts()
+                    conn.keepAlive()
+
+                    # 3. Setup converters
+                    slurmClient.setup_converters()
+                    conn.keepAlive()
+
+                    # 4. Download workflow images
+                    slurmClient.setup_container_images()
+                    conn.keepAlive()
+                message = "Slurm is almost set up. " + \
+                    "It will now download and build " + \
+                    "all the requested workflow images." + \
+                    " This might take a while!" + \
+                    " You can check progress with the " + \
+                    "'SLURM check setup' script. "
+                models, _ = slurmClient.get_all_image_versions_and_data_files()
+                filtered_models = {key: value for key, value in models.items() if any(v != '' for v in value)}
+                
+                # Initialize pending models dictionary
+                pending = {}
+                # Iterate through slurm_model_repos to identify pending models
+                for model, repo in slurmClient.slurm_model_repos.items():
+                    _, version = slurmClient.extract_parts_from_url(repo)
+                    if model not in models:
+                        pending[model] = version
+                    else:
+                        # Check versions for pending items
+                        if version not in models[model]:
+                            if model not in pending:
+                                pending[model] = [version]
+                            else:
+                                pending[model].append(version)  
+                message += f">> These workflows already available now: {filtered_models}. \nThese are still pending: {pending}"
 
         client.setOutput("Message", rstring(str(message)))
 
