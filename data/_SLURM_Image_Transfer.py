@@ -735,4 +735,9 @@ if __name__ == "__main__":
                                 maxBytes=LOGSIZE,
                                 backupCount=LOGNUM)
                         ])
+       
+    # Silence some of the DEBUG
+    logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
+    logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
+
     run_script()
