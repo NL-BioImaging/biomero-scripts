@@ -100,7 +100,8 @@ def runScript():
                 results = f"Error {e.__dict__}"
                 logger.info(results)
             finally:
-                print_result.append(f"{results.stdout}")
+                if results:
+                    print_result.append(f"{results}")
             client.setOutput("Message", rstring("".join(print_result)))
         finally:
             client.closeSession()
