@@ -91,7 +91,7 @@ def saveCSVToOmeroAsTable(conn, folder, client,
     all_files = glob.iglob(folder+'**/**', recursive=True)
     csv_files = [f for f in all_files if os.path.isfile(f)
                  and any(f.endswith(ext) for ext in SUPPORTED_TABLE_EXTENSIONS)]
-    print(f"Found the following table files in {folder}: {csv_files}")
+    logger.info(f"Found the following table files in {folder}: {csv_files}")
     # namespace = NSCREATED + "/BIOMERO/SLURM_GET_RESULTS"
     job_id = unwrap(client.getInput(
         constants.RESULTS_OUTPUT_SLURM_JOB_ID)).strip()
@@ -139,18 +139,18 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
-    print(f"Found the following files in {folder}: {files}")
+    logger.info(f"Found the following files in {folder}: {files}")
     namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     job_id = unwrap(client.getInput(
         constants.RESULTS_OUTPUT_SLURM_JOB_ID)).strip()
     msg = ""
     for name in files:
-        print(name)
+        logger.debug(name)
         og_name = getOriginalFilename(name)
-        print(og_name)
+        logger.debug(og_name)
         images = conn.getObjects("Image", attributes={
                                  "name": f"{og_name}"})  # Can we get in 1 go?
-        print(images)
+        logger.debug(images)
 
         if images:
             try:
@@ -165,25 +165,22 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
                 file_ann = conn.createFileAnnfromLocalFile(
                     name, mimetype=f"image/{ext}",
                     ns=namespace, desc=f"Result from job {job_id} | analysis {folder}")
-                print(f"Attaching {name} to image {og_name}")
+                logger.info(f"Attaching {name} to image {og_name}")
                 # image = load_image(conn, image_id)
                 for image in images:
                     image.linkAnnotation(file_ann)
 
-                print("Attaching FileAnnotation to Image: ", "File ID:",
-                      file_ann.getId(), ",",
-                      file_ann.getFile().getName(), "Size:",
-                      file_ann.getFile().getSize())
+                logger.info(f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
                 client.setOutput("File_Annotation", robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
-                print(msg)
+                logger.warning(msg)
         else:
             msg = f"No images ({og_name}) found to attach {name} to: {images}"
-            print(msg)
+            logger.info(msg)
 
-    print(files)
+    logger.info(files)
     message = f"\nTried attaching result images to OMERO original images!\n{msg}"
 
     return message
@@ -209,7 +206,7 @@ def to_5d(*arys):
         elif ary.ndim == 5:
             result = ary
         else:
-            logger.warn("Randomly reducing import down to first 5d")
+            logger.warning("Randomly reducing import down to first 5d")
             result = np.resize(ary, (ary.shape[0:5]))
         res.append(result)
     if len(res) == 1:
@@ -236,7 +233,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
-    print(f"Found the following files in {folder}: {files}")
+    logger.info(f"Found the following files in {folder}: {files}")
     # namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     msg = ""
     job_id = unwrap(client.getInput(
@@ -244,12 +241,12 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
     images = None
     if files:
         for name in files:
-            print(name)
+            logger.debug(name)
             og_name = getOriginalFilename(name)
-            print(og_name)
+            logger.debug(og_name)
             images = list(conn.getObjects("Image", attributes={
                 "name": f"{og_name}"}))  # Can we get in 1 go?
-            print(images)
+            logger.debug(images)
             try:
                 # import the masked image for now
                 img_data = imread(name)
@@ -257,13 +254,13 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                     source_image_id = images[0].getId()
                 except IndexError:
                     source_image_id = None
-                print(img_data.shape, dataset_id, source_image_id)
-                print(
+                logger.debug(img_data.shape, dataset_id, source_image_id)
+                logger.debug(
                     f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
 
                 img_data = to_5d(img_data)
 
-                print("Reshaped:", img_data.shape)
+                logger.debug("Reshaped:", img_data.shape)
 
                 if unwrap(client.getInput(
                         constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME)):
@@ -271,7 +268,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 else:
                     renamed = name
 
-                print(
+                logger.debug(
                     f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
                 img_id = ezomero.post_image(conn, img_data,
                                             renamed,
@@ -283,7 +280,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 del img_data
                 omero_img, img_data = ezomero.get_image(
                     conn, img_id, pyramid_level=0, xyzct=True)
-                print(
+                logger.debug(
                     f"Retrieving from EZOmero --Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
 
                 # omero_pix = omero_img.getPrimaryPixels()
@@ -297,15 +294,15 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 t = omero_img.getDefaultT()+1
                 plane = omero_img.renderImage((default_z,)[0]-1, t-1)
 
-                print(
+                logger.debug(
                     f"Render from Omero object --Number of unique values: {np.unique(plane)} ")
 
-                print(
+                logger.info(
                     f"Uploaded {name} as {renamed} (from image {og_name}): {img_id}")
                 # os.remove(name)
             except Exception as e:
                 msg = f"Issue uploading file {name} to OMERO {og_name}: {e}"
-                print(msg)
+                logger.warning(msg)
                 raise RuntimeError(e)
 
         if images and new_dataset:  # link new dataset to OG project
@@ -315,8 +312,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 parent_project = parent_dataset.getParent()
             if parent_project and parent_project.canLink():
                 # and put it in the current project
-                print(parent_dataset, parent_project,
-                      parent_project.getId(), dataset_id)
+                logger.debug(f"{parent_dataset}, {parent_project}, {parent_project.getId()}, {dataset_id}")
                 project_link = omero.model.ProjectDatasetLinkI()
                 project_link.parent = omero.model.ProjectI(
                     parent_project.getId(), False)
@@ -325,7 +321,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                 update_service = conn.getUpdateService()
                 update_service.saveAndReturnObject(project_link)
 
-        print(files)
+        logger.debug(files)
         message = f"\nTried importing images to dataset {dataset_id}!\n{msg}"
     else:
         message = f"\nNo files found to upload in {folder}"
@@ -335,11 +331,11 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
 
 def rename_import_file(client, name, og_name):
     pattern = unwrap(client.getInput("Rename"))
-    print(f"Overwriting name {name} with pattern: {pattern}")
+    logger.debug(f"Overwriting name {name} with pattern: {pattern}")
     ext = os.path.splitext(name)[1][1:]  # new extension
     original_file = os.path.splitext(og_name)[0]  # original base
     name = pattern.format(original_file=original_file, ext=ext)
-    print(f"New name: {name} ({original_file}, {ext})")
+    logger.info(f"New name: {name} ({original_file}, {ext})")
     return name
 
 
@@ -448,7 +444,7 @@ def upload_contents_to_omero(client, conn, message, folder):
                 data_type = 'Dataset'
                 dataset_ids = unwrap(client.getInput(
                     constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET_ID))
-                print(dataset_ids)
+                logger.debug(dataset_ids)
                 for d_id in dataset_ids:
                     object_id = d_id.split(":")[0]
                     msg = saveCSVToOmeroAsTable(
@@ -460,7 +456,7 @@ def upload_contents_to_omero(client, conn, message, folder):
                 data_type = 'Plate'
                 plate_ids = unwrap(client.getInput(
                     constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE_ID))
-                print(plate_ids)
+                logger.debug(plate_ids)
                 for p_id in plate_ids:
                     object_id = p_id.split(":")[0]
                     msg = saveCSVToOmeroAsTable(
@@ -522,7 +518,7 @@ def unzip_zip_locally(message, folder):
         # unzip locally
         with zipfile.ZipFile(f"{folder}.zip", "r") as zip:
             zip.extractall(folder)
-        print(f"Unzipped {folder} on the server")
+        logger.debug(f"Unzipped {folder} on the server")
     except Exception as e:
         message += f" Unzip failed: {e}"
         raise RuntimeError(message)
@@ -543,7 +539,7 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file):
     """
     try:
         # upload log and link to project(s)
-        print(f"Uploading {file} and attaching to {projects}")
+        logger.info(f"Uploading {file} and attaching to {projects}")
         mimetype = "text/plain"
         namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
         description = f"Log from SLURM job {slurm_job_id}"
@@ -564,7 +560,7 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file):
         message += f"Attached {file} to {projects}"
     except Exception as e:
         message += f" Uploading file failed: {e}"
-        print(message)
+        logger.warning(message)
         raise RuntimeError(message)
 
     return message
@@ -583,7 +579,7 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder):
     """
     try:
         # upload zip and link to project(s)
-        print(f"Uploading {folder}.zip and attaching to {projects}")
+        logger.info(f"Uploading {folder}.zip and attaching to {projects}")
         mimetype = "application/zip"
         namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
         description = f"Results from SLURM job {slurm_job_id}"
@@ -598,7 +594,7 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder):
         message += f"Attached zip {folder} to {projects}"
     except Exception as e:
         message += f" Uploading zip failed: {e}"
-        print(message)
+        logger.warning(message)
         raise RuntimeError(message)
 
     return message
@@ -618,12 +614,12 @@ def extract_data_location_from_log(export_file):
         data_location = None
         for line in log:
             try:
-                print(f"logline: {line}")
+                logger.debug(f"logline: {line}")
             except UnicodeEncodeError as e:
                 logger.error(f"Unicode error: {e}")
                 line = line.encode(
                     'ascii', 'ignore').decode('ascii')
-                print(f"logline: {line}")
+                logger.debug(f"logline: {line}")
             match = re.match(pattern=_LOGFILE_PATH_PATTERN, string=line)
             if match:
                 data_location = match.group(_LOGFILE_PATH_PATTERN_GROUP)
@@ -738,7 +734,7 @@ def runScript():
             conn = BlitzGateway(client_obj=client)
 
             message = ""
-            print(f"Request: {scriptParams}\n")
+            logger.info(f"Get Results: {scriptParams}\n")
 
             # Job id
             slurm_job_id = unwrap(client.getInput(
@@ -747,7 +743,7 @@ def runScript():
             # Ask job State
             if unwrap(client.getInput(constants.RESULTS_OUTPUT_COMPLETED_JOB)):
                 _, result = slurmClient.check_job_status([slurm_job_id])
-                print(result.stdout)
+                logger.debug(result.stdout)
                 message += f"\n{result.stdout}"
 
             # Pull project from Omero
@@ -755,12 +751,12 @@ def runScript():
             if unwrap(client.getInput(
                     constants.RESULTS_OUTPUT_ATTACH_PROJECT)):
                 project_ids = unwrap(client.getInput("Project"))
-                print(project_ids)
+                logger.debug(project_ids)
                 projects = [conn.getObject("Project", p.split(":")[0])
                             for p in project_ids]
             if unwrap(client.getInput(constants.RESULTS_OUTPUT_ATTACH_PLATE)):
                 plate_ids = unwrap(client.getInput("Plate"))
-                print(plate_ids)
+                logger.debug(plate_ids)
                 projects = [conn.getObject("Plate", p.split(":")[0])
                             for p in plate_ids]
 
@@ -773,8 +769,8 @@ def runScript():
                         slurm_job_id)
                     (local_tmp_storage, log_file, get_result) = tup
                     message += "\nSuccesfully copied logfile."
-                    print(message)
-                    print(get_result.__dict__)
+                    logger.info(message)
+                    logger.debug(get_result.__dict__)
 
                     # Upload logfile to Omero as Original File
                     message = upload_log_to_omero(
@@ -784,7 +780,7 @@ def runScript():
                     # Read file for data location
                     data_location = slurmClient.extract_data_location_from_log(
                         slurm_job_id)
-                    print(f"Extracted {data_location}")
+                    logger.debug(f"Extracted {data_location}")
 
                     # zip and scp data location
                     if data_location:
@@ -794,16 +790,16 @@ def runScript():
                             data_location, filename)
                         if not zip_result.ok:
                             message += "\nFailed to zip data on Slurm."
-                            print(message, zip_result.stderr)
+                            logger.warning(message, zip_result.stderr)
                         else:
                             message += "\nSuccesfully zipped data on Slurm."
-                            print(message, zip_result.stdout)
+                            logger.info(message, zip_result.stdout)
 
                             copy_result = slurmClient.copy_zip_locally(
                                 local_tmp_storage, filename)
 
                             message += "\nSuccesfully copied zip."
-                            print(message, copy_result)
+                            logger.info(message, copy_result)
 
                             folder = f"{local_tmp_storage}/{filename}"
 
@@ -825,8 +821,7 @@ def runScript():
                                 filename,
                                 data_location)
                             message += "\nSuccesfully cleaned up tmp files"
-                            print(message, clean_result)
-                            # print(message)
+                            logger.info(message, clean_result)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
