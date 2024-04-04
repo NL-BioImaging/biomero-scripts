@@ -60,7 +60,7 @@ def runScript():
         _versions, _datafiles = slurmClient.get_image_versions_and_data_files(
             'cellpose')
         _workflow_params = slurmClient.get_workflow_parameters('cellpose')
-        print(_workflow_params)
+        logger.debug(_workflow_params)
         name_descr = f"Name of folder where images are stored, as provided\
             with {_IMAGE_EXPORT_SCRIPT}"
         dur_descr = "Maximum time the script should run for. \
@@ -95,7 +95,7 @@ def runScript():
                                     values=versions)
             input_list.append(wf_v)
             for i, (k, param) in enumerate(wfparams.items()):
-                print(i, k, param)
+                logger.debug(i, k, param)
                 logging.info(param)
                 p = slurmClient.convert_cytype_to_omtype(
                     param["cytype"],
@@ -124,22 +124,21 @@ def runScript():
         kwargs = {}
         for i, k in enumerate(_workflow_params):
             kwargs[k] = unwrap(client.getInput(k))  # kwarg dict
-        print(kwargs)
+        logger.debug(kwargs)
 
         try:
             # 3. Call SLURM (segmentation)
             unpack_result = slurmClient.unpack_data(zipfile)
-            print(unpack_result.stdout)
+            logger.debug(unpack_result.stdout)
             if not unpack_result.ok:
-                print("Error unpacking data:", unpack_result.stderr)
+                logger.warning(f"Error unpacking data:{unpack_result.stderr}")
             else:
                 # Quick git pull on Slurm for latest version of job scripts
                 try:
                     update_result = slurmClient.update_slurm_scripts()
-                    print(update_result.__dict__)
+                    logger.debug(update_result.__dict__)
                 except Exception as e:
-                    print("Error updating SLURM scripts:",
-                          e)
+                    logger.warning(f"Error updating SLURM scripts:{e}")
 
                 cp_result, slurm_job_id = slurmClient.run_workflow(
                     workflow_name='cellpose',
@@ -150,7 +149,7 @@ def runScript():
                     **kwargs
                 )
                 if not cp_result.ok:
-                    print("Error running CellPose job:", cp_result.stderr)
+                    logger.warning(f"Error running CellPose job: {cp_result.stderr}")
                 else:
                     print_result = f"Submitted to Slurm as\
                         batch job {slurm_job_id}."
@@ -159,17 +158,18 @@ def runScript():
                         tup = slurmClient.check_job_status(
                             [slurm_job_id])
                         (job_status_dict, poll_result) = tup
-                        print(poll_result.stdout, job_status_dict)
+                        logger.debug(f"{poll_result.stdout},{job_status_dict}")
                         if not poll_result.ok:
-                            print("Error checking job status:",
-                                  poll_result.stderr)
+                            logger.warning("Error checking job status:", 
+                                           poll_result.stderr)
                         else:
                             print_result += f"\n{job_status_dict}"
                     except Exception as e:
                         print_result += f" ERROR WITH JOB: {e}"
-                        print(print_result)
+                        logger.warning(print_result)
 
             # 7. Script output
+            logger.info(print_result)
             client.setOutput("Message", rstring(print_result))
         finally:
             client.closeSession()

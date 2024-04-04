@@ -67,6 +67,7 @@ def log(text):
     except UnicodeEncodeError:
         pass
     log_strings.append(str(text))
+    logger.debug(str(text))
 
 
 def compress(target, base):
@@ -219,7 +220,7 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
     command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
     cmd = cmd1 + " && " + command
-    print(cmd)
+    logger.debug(cmd)
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -228,11 +229,10 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
     )
     stdout, stderr = process.communicate()
     if stderr:
-        print(stderr.decode("utf-8"))
+        logger.warning(stderr.decode("utf-8"))
     if process.returncode == 0:
-        print(f"OME ZARR CLI: {stdout}")
         log(f"OME ZARR CLI: {stdout}")
-        print(img_name)
+        logger.debug(img_name)
         os.rename(f"{exp_dir}/{image.getId()}.zarr", img_name)
     return  # shortcut
 
@@ -541,7 +541,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
     # Copy to SLURM
     try:
         r = slurmClient.transfer_data(Path(export_file))
-        print(r)
+        logger.debug(r)
         message += f"'{folder_name}' succesfully copied to SLURM!\n"
     except Exception as e:
         message += f"Copying to SLURM failed: {e}\n"

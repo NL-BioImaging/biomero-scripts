@@ -165,7 +165,7 @@ def runScript():
                 f"\nGenerated these parameters for {wf} descriptors:\n")
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                print(param_incr, k, param)
+                logger.debug(f"{param_incr}, {k}, {param}")
                 logger.info(param)
                 # Convert the parameter from cy(tomine)type to om(ero)type
                 omtype_param = slurmClient.convert_cytype_to_omtype(
@@ -235,7 +235,6 @@ def runScript():
                 client.setOutput("Message", rstring(errormsg))
                 raise ValueError(errormsg)
             else:
-                print(f"Output options chosen: {selected_output}")
                 logger.info(f"Output options chosen: {selected_output}")
 
             # Connect to Omero

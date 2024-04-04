@@ -165,7 +165,7 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                print(param_incr, k, param)
+                logger.debug(f"{param_incr}, {k}, {param}")
                 logger.info(param)
                 # Convert the parameter from cy(tomine)type to om(ero)type
                 omtype_param = slurmClient.convert_cytype_to_omtype(
@@ -212,7 +212,7 @@ def runScript():
             version_errors = ""
             for wf, selected in selected_workflows.items():
                 selected_version = unwrap(client.getInput(f"{wf}_Version"))
-                print(wf, selected, selected_version)
+                logger.debug(f"{wf}, {selected}, {selected_version}")
                 if selected and not selected_version:
                     version_errors += f"ERROR: No version for '{wf}'! \n"
             if version_errors:
@@ -227,13 +227,12 @@ def runScript():
                     selected_output[output_option] = False
                 else:
                     selected_output[output_option] = True
-                    print(f"Selected: {output_option} >> [{selected_op}]")
+                    logger.debug(f"Selected: {output_option} >> [{selected_op}]")
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
                 client.setOutput("Message", rstring(errormsg))
                 raise ValueError(errormsg)
             else:
-                print(f"Output options chosen: {selected_output}")
                 logger.info(f"Output options chosen: {selected_output}")
 
             # Connect to Omero
@@ -264,7 +263,7 @@ def runScript():
             unpack_result = slurmClient.unpack_data(zipfile)
             logger.debug(unpack_result.stdout)
             if not unpack_result.ok:
-                logger.warning(f"Error unpacking data:{unpack_result.stderr}")
+                logger.warning(f"Error unpacking data: {unpack_result.stderr}")
             else:
                 slurm_job_ids = {}
                 # Quick git pull on Slurm for latest version of job scripts
@@ -277,9 +276,9 @@ def runScript():
                 # --------------------------------------------
                 ''')
                 slurmJob = slurmClient.run_conversion_workflow_job(zipfile, 'zarr', 'tiff')
-                logger.debug(slurmJob)
+                logger.info(f"Conversion job: {slurmJob}")
                 if not slurmJob.ok:
-                    logger.warning(f"Error converting data:{slurmJob.get_error()}")
+                    logger.warning(f"Error converting data: {slurmJob.get_error()}")
                 else:
                     try:
                         slurmJob.wait_for_completion(slurmClient, conn)
@@ -328,7 +327,6 @@ def runScript():
                                 #     slurm_job_id)
                                 # log_msg = f"Job {slurm_job_id} has been
                                 # resubmitted ({new_job_id})."
-                                print(log_msg)
                                 logger.warning(log_msg)
                                 # log_string += log_msg
                                 slurm_job_id_list.remove(slurm_job_id)
@@ -361,7 +359,6 @@ def runScript():
                                 else:
                                     log_msg = "Attempted to import images to\
                                         Omero."
-                                print(log_msg)
                                 logger.info(log_msg)
                                 UI_messages += log_msg
                                 slurm_job_id_list.remove(slurm_job_id)
@@ -370,7 +367,6 @@ def runScript():
                                 # Remove from future checks
                                 log_msg = f"Job {slurm_job_id} is {job_state}."
                                 log_msg += f"You can get the logfile using `Slurm Get Update` on job {slurm_job_id}"
-                                print(log_msg)
                                 logger.warning(log_msg)
                                 UI_messages += log_msg
                                 slurm_job_id_list.remove(slurm_job_id)
@@ -378,13 +374,11 @@ def runScript():
                                     or job_state == "RUNNING"):
                                 # expected
                                 log_msg = f"Job {slurm_job_id} is busy..."
-                                print(log_msg)
                                 logger.debug(log_msg)
                                 continue
                             else:
                                 log_msg = f"Oops! State of job {slurm_job_id}\
                                     is unknown: {job_state}. Stop tracking."
-                                print(log_msg)
                                 logger.warning(log_msg)
                                 UI_messages += log_msg
                                 slurm_job_id_list.remove(slurm_job_id)
@@ -423,8 +417,7 @@ def run_workflow(slurmClient: SlurmClient,
             **kwargs)
         logger.debug(cp_result.stdout)
         if not cp_result.ok:
-            logger.warning(f"Error running {name} job:",
-                  cp_result.stderr)
+            logger.warning(f"Error running {name} job: {cp_result.stderr}")
         else:
             UI_messages += f"Submitted {name} to Slurm\
                 as batch job {slurm_job_id}."
@@ -434,14 +427,13 @@ def run_workflow(slurmClient: SlurmClient,
             logger.debug(
                 f"{job_status_dict[slurm_job_id]}, {poll_result.stdout}")
             if not poll_result.ok:
-                logger.warning(f"Error checking job status:{poll_result.stderr}")
+                logger.warning(f"Error checking job status: {poll_result.stderr}")
             else:
                 log_msg = f"\n{job_status_dict[slurm_job_id]}"
                 logger.info(log_msg)
-                print(log_msg)
     except Exception as e:
         UI_messages += f" ERROR WITH JOB: {e}"
-        print(UI_messages)
+        logger.warning(UI_messages)
         raise SSHException(UI_messages)
     return UI_messages, slurm_job_id
 
@@ -453,14 +445,14 @@ def getOmeroEmail(client, conn):
             user = conn.getUser()
             use_email = user.getEmail()
             if use_email == "None":
-                print("No email given for this user")
+                logger.debug("No email given for this user")
                 use_email = None
         except omero.gateway.OMEROError as e:
-            print(f"Error retrieving email {e}")
+            logger.warning(f"Error retrieving email {e}")
             use_email = None
     else:
         use_email = None
-    print(f"Using email {use_email}")
+    logger.info(f"Using email {use_email}")
     return use_email
 
 
@@ -488,7 +480,7 @@ def exportImageToSLURM(client: omscripts.client,
               "Format": rstring('ZARR'),
               "Folder_Name": rstring(zipfile)
               }
-    print(inputs, script_ids)
+    logger.debug(f"{inputs}, {script_ids}")
     rv = runOMEROScript(client, svc, script_ids, inputs)
     return rv
 
@@ -528,7 +520,7 @@ def importResultsToOmero(client: omscripts.client,
                   for s in scripts if unwrap(s.getName()) in IMPORT_SCRIPTS]
     first_id = unwrap(client.getInput("IDs"))[0]
     data_type = unwrap(client.getInput("Data_Type"))
-    print(script_ids, first_id, data_type)
+    logger.debug(f"{script_ids}, {first_id}, {data_type}")
     opts = {}
     inputs = {
         constants.RESULTS_OUTPUT_COMPLETED_JOB: rbool(True),
@@ -543,7 +535,7 @@ def importResultsToOmero(client: omscripts.client,
             'Dataset', opts={'image': first_id})]
         plates = [d.id for d in conn.getObjects(
             'Plate', opts={'image': first_id})]
-        print(f"Datasets:{datasets} Plates:{plates}")
+        logger.debug(f"Datasets:{datasets} Plates:{plates}")
         if len(plates) > len(datasets):
             parent_id = plates[0]
             parent_data_type = 'Plate'
@@ -551,18 +543,18 @@ def importResultsToOmero(client: omscripts.client,
             parent_id = datasets[0]
             parent_data_type = 'Dataset'
 
-    print(f"Determined parent to be {parent_data_type}:{parent_id}")
+    logger.debug(f"Determined parent to be {parent_data_type}:{parent_id}")
 
     if selected_output[OUTPUT_PARENT]:
         # For now, there is no attaching to Dataset or Screen...
         # If we need that, build it ;) (in Get_Result script)
         if parent_data_type == 'Dataset' or parent_data_type == 'Project':
-            print(f"Adding to dataset {parent_id}")
+            logger.debug(f"Adding to dataset {parent_id}")
             projects = get_project_name_ids(conn, parent_id)
             inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT_ID] = rlist(
                 projects)
         elif parent_data_type == 'Plate':
-            print(f"Adding to plate {parent_id}")
+            logger.debug(f"Adding to plate {parent_id}")
             plates = get_plate_name_ids(conn, parent_id)
             inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT] = rbool(False)
             inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE] = rbool(True)
@@ -647,7 +639,7 @@ def importResultsToOmero(client: omscripts.client,
             constants.RESULTS_OUTPUT_ATTACH_TABLE
         ] = rbool(False)
 
-    print(f"Running import script {script_ids} with inputs: {inputs}")
+    logger.info(f"Running import script {script_ids} with inputs: {inputs}")
     rv = runOMEROScript(client, svc, script_ids, inputs)
     return rv
 
@@ -658,21 +650,21 @@ def get_project_name_ids(conn, parent_id):
     projects = [rstring('%d: %s' % (d.id, d.getName()))
                 for d in conn.getObjects('Project',
                                          opts={'dataset': parent_id})]
-    print(projects)
+    logger.debug(projects)
     return projects
 
 
 def get_dataset_name_ids(conn, parent_id):
     dataset = [rstring('%d: %s' % (d.id, d.getName()))
                for d in conn.getObjects('Dataset', [parent_id])]
-    print(dataset)
+    logger.debug(dataset)
     return dataset
 
 
 def get_plate_name_ids(conn, parent_id):
     plates = [rstring('%d: %s' % (d.id, d.getName()))
               for d in conn.getObjects('Plate', [parent_id])]
-    print(plates)
+    logger.debug(plates)
     return plates
 
 
@@ -698,7 +690,7 @@ def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     filename = "_".join(objparams)
     full_filename = f"{filename}_{timestamp}"
-    print("Filename: " + full_filename)
+    logger.debug("Filename: " + full_filename)
     return full_filename
 
 

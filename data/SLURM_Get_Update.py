@@ -82,7 +82,7 @@ def runScript():
             scriptParams = client.getInputs(unwrap=True)
 
             message = ""
-            print(f"Request: {scriptParams}\n")
+            logger.info(f"Get Update: {scriptParams}\n")
 
             # Job id
             slurm_job_id = unwrap(client.getInput(SLURM_JOB_ID))
@@ -109,7 +109,7 @@ def runScript():
                     tup = slurmClient.get_logfile_from_slurm(
                         slurm_job_id_old)
                     (dir, export_file, result) = tup
-                    print(f"Pulled logfile {result.__dict__}")
+                    logger.debug(f"Pulled logfile {result.__dict__}")
                     # Upload logfile to Omero as Original File
                     output_display_name = f"Job logfile '{result.local}'"
                     namespace = NSCREATED + "/SLURM/SLURM_GET_UPDATE"
@@ -121,9 +121,9 @@ def runScript():
                     # Attach logfile (OriginalFile) to Project
                     conn = BlitzGateway(client_obj=client)
                     project_ids = unwrap(client.getInput("Project"))
-                    print(project_ids)
+                    logger.debug(project_ids)
                     project_id = project_ids[0].split(":")[0]
-                    print(project_id)
+                    logger.debug(project_id)
                     project = conn.getObject("Project", project_id)
                     tup = script_utils.create_link_file_annotation(
                         conn, export_file, project, output=output_display_name,
@@ -153,9 +153,9 @@ def check_job(slurmClient, message, slurm_job_id):
     try:
         job_status_dict, poll_result = slurmClient.check_job_status(
             slurm_job_ids=[slurm_job_id])
-        print(job_status_dict, poll_result.stdout)
+        logger.debug(f"{job_status_dict}, {poll_result.stdout}")
         if not poll_result.ok:
-            print("Error checking job status:", poll_result.stderr)
+            logger.warning(f"Error checking job status: {poll_result.stderr}")
             message += f"\nError checking job status: {poll_result.stderr}"
         else:
             message += f"\n{job_status_dict}"
