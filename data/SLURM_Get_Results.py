@@ -254,7 +254,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                     source_image_id = images[0].getId()
                 except IndexError:
                     source_image_id = None
-                logger.debug(img_data.shape, dataset_id, source_image_id)
+                logger.debug(f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
                 logger.debug(
                     f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
 
@@ -269,12 +269,12 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
                     renamed = name
 
                 logger.debug(
-                    f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
+                    f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape} | dtype: {img_data.dtype}")
                 img_id = ezomero.post_image(conn, img_data,
                                             renamed,
                                             dataset_id=dataset_id,
                                             dim_order="yxzct",
-                                            source_image_id=source_image_id,
+                                            # source_image_id=source_image_id,
                                             description=f"Result from job {job_id} | analysis {folder}")
 
                 del img_data

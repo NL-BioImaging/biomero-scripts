@@ -284,6 +284,8 @@ def runScript():
                         slurmJob.wait_for_completion(slurmClient, conn)
                         if not slurmJob.completed():
                             raise Exception(f"Conversion is not completed: {slurmJob}")
+                        else:
+                            slurmJob.cleanup(slurmClient)
                     except Exception as e:
                         UI_messages += f" ERROR WITH CONVERTING DATA: {e}"
                         raise e
