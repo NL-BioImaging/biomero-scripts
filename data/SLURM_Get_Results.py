@@ -170,7 +170,7 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
                 for image in images:
                     image.linkAnnotation(file_ann)
 
-                logger.info(f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
+                logger.debug(f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
                 client.setOutput("File_Annotation", robject(file_ann._obj))
             except Exception as e:
@@ -180,7 +180,7 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
             msg = f"No images ({og_name}) found to attach {name} to: {images}"
             logger.info(msg)
 
-    logger.info(files)
+    logger.debug(files)
     message = f"\nTried attaching result images to OMERO original images!\n{msg}"
 
     return message
@@ -790,16 +790,18 @@ def runScript():
                             data_location, filename)
                         if not zip_result.ok:
                             message += "\nFailed to zip data on Slurm."
-                            logger.warning(message, zip_result.stderr)
+                            logger.warning(f"{message}, {zip_result.stderr}")
                         else:
                             message += "\nSuccesfully zipped data on Slurm."
-                            logger.info(message, zip_result.stdout)
+                            logger.info(f"{message}")
+                            logger.debug(f"{zip_result.stdout}")
 
                             copy_result = slurmClient.copy_zip_locally(
                                 local_tmp_storage, filename)
 
                             message += "\nSuccesfully copied zip."
-                            logger.info(message, copy_result)
+                            logger.info(f"{message}")
+                            logger.debug(f"{copy_result}")
 
                             folder = f"{local_tmp_storage}/{filename}"
 
@@ -821,7 +823,8 @@ def runScript():
                                 filename,
                                 data_location)
                             message += "\nSuccesfully cleaned up tmp files"
-                            logger.info(message, clean_result)
+                            logger.info(message)
+                            logger.debug(clean_result)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
