@@ -76,6 +76,11 @@ def runScript():
                          description="Project to attach workflow results to",
                          values=_projects),
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
+            version="1.9.0",
+            authors=["Torec Luik"],
+            institutions=["Amsterdam UMC"],
+            contact='cellularimaging@amsterdamumc.nl',
+            authorsInstitutions=[[1]]
         )
 
         try:

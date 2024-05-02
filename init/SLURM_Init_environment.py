@@ -39,8 +39,13 @@ def runScript():
         ''',
         scripts.Bool("Init Slurm", grouping="01", default=True),
         scripts.String(extra_config_name, optional=True, grouping="01.1",
-                       description="The path to your configuration file. Optional."),
+                       description="The path to your configuration file on the server. Optional."),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
+        version="1.9.0",
+        authors=["Torec Luik"],
+        institutions=["Amsterdam UMC"],
+        contact='cellularimaging@amsterdamumc.nl',
+        authorsInstitutions=[[1]]
     )
 
     try:

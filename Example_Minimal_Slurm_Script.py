@@ -41,7 +41,7 @@ def runScript():
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "0.0.3"
+        params.version = "1.9.0"
         params.description = f'''Example script to run on slurm cluster
 
         Runs a script remotely on SLURM.
@@ -49,7 +49,7 @@ def runScript():
         Connection ready? {slurmClient.validate()}
         '''
         params.name = 'Minimal Slurm Script'
-        params.contact = 't.t.luik@amsterdamumc.nl'
+        params.contact = 'cellularimaging@amsterdamumc.nl'
         params.institutions = ["Amsterdam UMC"]
         params.authorsInstitutions = [[1]]
 

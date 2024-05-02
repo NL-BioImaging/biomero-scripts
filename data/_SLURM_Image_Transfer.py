@@ -46,7 +46,7 @@ try:
     from PIL import Image  # see ticket:2597
 except ImportError:
     import Image
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 import logging
 import sys
 
@@ -136,11 +136,11 @@ def save_plane(image, format, c_name, z_range, project_z, t=0,
             original_name, c_name, z_range, t, "png", folder_name)
         log("Saving image: %s" % img_name)
         plane.save(img_name, "PNG")
-    elif format == 'TIFF':
+    elif format == constants.transfer.FORMAT_TIFF:
         img_name = make_image_name(
             original_name, c_name, z_range, t, "tiff", folder_name)
         log("Saving image: %s" % img_name)
-        plane.save(img_name, 'TIFF')
+        plane.save(img_name, constants.transfer.FORMAT_TIFF)
     else:
         img_name = make_image_name(
             original_name, c_name, z_range, t, "jpg", folder_name)
@@ -218,7 +218,8 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
+    command = f'omero zarr -s "{conn.host}" -k "{
+        suuid}" --output {exp_dir} export Image:{image.getId()}'
     cmd = cmd1 + " && " + command
     logger.debug(cmd)
     process = subprocess.Popen(
@@ -317,15 +318,15 @@ def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
 def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str):
 
     # for params with default values, we can get the value directly
-    split_cs = script_params["Export_Individual_Channels"]
-    merged_cs = script_params["Export_Merged_Image"]
-    greyscale = script_params["Individual_Channels_Grey"]
-    data_type = script_params["Data_Type"]
-    folder_name = script_params["Folder_Name"]
+    split_cs = script_params[constants.transfer.CHANNELS]
+    merged_cs = script_params[constants.transfer.MERGED]
+    greyscale = script_params[constants.transfer.CHANNELS_GREY]
+    data_type = script_params[constants.transfer.DATA_TYPE]
+    folder_name = script_params[constants.transfer.FOLDER]
     folder_name = os.path.basename(folder_name)
-    format = script_params["Format"]
-    project_z = "Choose_Z_Section" in script_params and \
-        script_params["Choose_Z_Section"] == 'Max projection'
+    format = script_params[constants.transfer.FORMAT]
+    project_z = constants.transfer.Z in script_params and \
+        script_params[constants.transfer.Z] == constants.transfer.Z_MAXPROJ
 
     if (not split_cs) and (not merged_cs):
         log("Not chosen to save Individual Channels OR Merged Image")
@@ -333,29 +334,29 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
 
     # check if we have these params
     channel_names = []
-    if "Channel_Names" in script_params:
-        channel_names = script_params["Channel_Names"]
+    if constants.transfer.CHANNELS_NAMES in script_params:
+        channel_names = script_params[constants.transfer.CHANNELS_NAMES]
     zoom_percent = None
-    if "Zoom" in script_params and script_params["Zoom"] != "100%":
-        zoom_percent = int(script_params["Zoom"][:-1])
+    if constants.transfer.ZOOM in script_params and script_params[constants.transfer.ZOOM] != constants.transfer.ZOOM_100:
+        zoom_percent = int(script_params[constants.transfer.ZOOM][:-1])
 
     # functions used below for each imaage.
     def get_z_range(size_z, script_params):
         z_range = None
-        if "Choose_Z_Section" in script_params:
-            z_choice = script_params["Choose_Z_Section"]
+        if constants.transfer.Z in script_params:
+            z_choice = script_params[constants.transfer.Z]
             # NB: all Z indices in this script are 1-based
-            if z_choice == 'ALL Z planes':
+            if z_choice == constants.transfer.Z_ALL:
                 z_range = (1, size_z+1)
-            elif "OR_specify_Z_index" in script_params:
-                z_index = script_params["OR_specify_Z_index"]
+            elif constants.transfer.Z_IDX in script_params:
+                z_index = script_params[constants.transfer.Z_IDX]
                 z_index = min(z_index, size_z)
                 z_range = (z_index,)
-            elif "OR_specify_Z_start_AND..." in script_params and \
-                    "...specify_Z_end" in script_params:
-                start = script_params["OR_specify_Z_start_AND..."]
+            elif constants.transfer.Z_IDX_START in script_params and \
+                    constants.transfer.Z_IDX_END in script_params:
+                start = script_params[constants.transfer.Z_IDX_START]
                 start = min(start, size_z)
-                end = script_params["...specify_Z_end"]
+                end = script_params[constants.transfer.Z_IDX_END]
                 end = min(end, size_z)
                 # in case user got z_start and z_end mixed up
                 z_start = min(start, end)
@@ -368,20 +369,20 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
 
     def get_t_range(size_t, script_params):
         t_range = None
-        if "Choose_T_Section" in script_params:
-            t_choice = script_params["Choose_T_Section"]
+        if constants.transfer.T in script_params:
+            t_choice = script_params[constants.transfer.T]
             # NB: all T indices in this script are 1-based
-            if t_choice == 'ALL T planes':
+            if t_choice == constants.transfer.T_ALL:
                 t_range = (1, size_t+1)
-            elif "OR_specify_T_index" in script_params:
-                t_index = script_params["OR_specify_T_index"]
+            elif constants.transfer.T_IDX in script_params:
+                t_index = script_params[constants.transfer.T_IDX]
                 t_index = min(t_index, size_t)
                 t_range = (t_index,)
-            elif "OR_specify_T_start_AND..." in script_params and \
-                    "...specify_T_end" in script_params:
-                start = script_params["OR_specify_T_start_AND..."]
+            elif constants.transfer.T_IDX_START in script_params and \
+                    constants.transfer.T_IDX_END in script_params:
+                start = script_params[constants.transfer.T_IDX_START]
                 start = min(start, size_t)
-                end = script_params["...specify_T_end"]
+                end = script_params[constants.transfer.T_IDX_END]
                 end = min(end, size_t)
                 # in case user got t_start and t_end mixed up
                 t_start = min(start, end)
@@ -402,14 +403,14 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
     # Attach figure to the first image
     parent = objects[0]
 
-    if data_type == 'Dataset':
+    if data_type == constants.transfer.DATA_TYPE_DATASET:
         images = []
         for ds in objects:
             images.extend(list(ds.listChildren()))
         if not images:
             message += "No image found in dataset(s)"
             return None, message
-    elif data_type == 'Plate':
+    elif data_type == constants.transfer.DATA_TYPE_PLATE:
         images = []
         wells = []
         for plate in objects:
@@ -448,7 +449,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
             continue
         ids.append(pixels.getId())
 
-        if format == 'OME-TIFF':
+        if format == constants.transfer.FORMAT_OMETIFF:
             if img._prepareRE().requiresPixelsPyramid():
                 log("  ** Can't export a 'Big' image to OME-TIFF. **")
                 if len(images) == 1:
@@ -456,7 +457,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
                 continue
             else:
                 save_as_ome_tiff(conn, img, folder_name)
-        elif format == 'ZARR':
+        elif format == constants.transfer.FORMAT_ZARR:
             save_as_zarr(conn, suuid, img, folder_name)
         else:
             size_x = pixels.getSizeX()
@@ -524,7 +525,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
     if len(os.listdir(exp_dir)) == 0:
         return None, "No files exported. See 'info' for more details"
     # zip everything up (unless we've only got a single ome-tiff)
-    if format == 'OME-TIFF' and len(os.listdir(exp_dir)) == 1:
+    if format == constants.transfer.FORMAT_OMETIFF and len(os.listdir(exp_dir)) == 1:
         ometiff_ids = [t.id for t in parent.listAnnotations(ns=NSOMETIFF)]
         conn.deleteObjects("Annotation", ometiff_ids)
         export_file = os.path.join(folder_name, os.listdir(exp_dir)[0])
@@ -561,23 +562,29 @@ def run_script():
 
     with SlurmClient.from_config() as slurmClient:
 
-        data_types = [rstring('Dataset'), rstring('Image'), rstring('Plate')]
-        formats = [rstring('TIFF'),
-                   rstring('OME-TIFF'),
-                   rstring('ZARR')]
-        default_z_option = 'Default-Z (last-viewed)'
+        data_types = [rstring(constants.transfer.DATA_TYPE_DATASET),
+                      rstring(constants.transfer.DATA_TYPE_IMAGE),
+                      rstring(constants.transfer.DATA_TYPE_PLATE)]
+        formats = [rstring(constants.transfer.FORMAT_TIFF),
+                   rstring(constants.transfer.FORMAT_OMETIFF),
+                   rstring(constants.transfer.FORMAT_ZARR)]
+        default_z_option = constants.transfer.Z_DEFAULT
         z_choices = [rstring(default_z_option),
-                     rstring('ALL Z planes'),
+                     rstring(constants.transfer.Z_ALL),
                      # currently ImageWrapper only allows full Z-stack
                      # projection
-                     rstring('Max projection'),
-                     rstring('Other (see below)')]
-        default_t_option = 'Default-T (last-viewed)'
+                     rstring(constants.transfer.Z_MAXPROJ),
+                     rstring(constants.transfer.Z_OTHER)]
+        default_t_option = constants.transfer.T_DEFAULT
         t_choices = [rstring(default_t_option),
-                     rstring('ALL T planes'),
-                     rstring('Other (see below)')]
-        zoom_percents = omero.rtypes.wrap(["25%", "50%", "100%", "200%",
-                                           "300%", "400%"])
+                     rstring(constants.transfer.T_ALL),
+                     rstring(constants.transfer.T_OTHER)]
+        zoom_percents = omero.rtypes.wrap([constants.transfer.ZOOM_25,
+                                           constants.transfer.ZOOM_50,
+                                           constants.transfer.ZOOM_100,
+                                           constants.transfer.ZOOM_200,
+                                           constants.transfer.ZOOM_300,
+                                           constants.transfer.ZOOM_400])
 
         client = scripts.client(
             '_SLURM_Image_Transfer',
@@ -588,97 +595,99 @@ def run_script():
             Connection ready? {slurmClient.validate()}""",
 
             scripts.String(
-                "Data_Type", optional=False, grouping="1",
+                constants.transfer.DATA_TYPE, optional=False, grouping="1",
                 description="The data you want to work with.",
                 values=data_types,
-                default="Image"),
+                default=constants.transfer.DATA_TYPE_IMAGE),
 
             scripts.List(
-                "IDs", optional=False, grouping="2",
+                constants.transfer.IDS, optional=False, grouping="2",
                 description="List of Dataset IDs or Image IDs").ofType(
                     rlong(0)),
 
             scripts.Bool(
-                "Image settings (Optional)", grouping="5",
-                description="Settings for how to export your images",
+                constants.transfer.SETTINGS, grouping="5",
+                description="Select how to export your images",
+                optional=False,
                 default=True
             ),
 
             scripts.Bool(
-                "Export_Individual_Channels", grouping="5.6",
+                constants.transfer.CHANNELS, grouping="5.6",
                 description="Save individual channels as separate images",
                 default=False),
 
             scripts.Bool(
-                "Individual_Channels_Grey", grouping="5.6.1",
+                constants.transfer.CHANNELS_GREY, grouping="5.6.1",
                 description="If true, all individual channel images will be"
                 " grayscale", default=False),
 
             scripts.List(
-                "Channel_Names", grouping="5.6.2",
+                constants.transfer.CHANNELS_NAMES, grouping="5.6.2",
                 description="Names for saving individual channel images"),
 
             scripts.Bool(
-                "Export_Merged_Image", grouping="5.5",
+                constants.transfer.MERGED, grouping="5.5",
                 description="Save merged image, using current \
                     rendering settings",
                 default=True),
 
             scripts.String(
-                "Choose_Z_Section", grouping="5.7",
+                constants.transfer.Z, grouping="5.7",
                 description="Default Z is last viewed Z for each image\
                     , OR choose"
                 " Z below.", values=z_choices, default=default_z_option),
 
             scripts.Int(
-                "OR_specify_Z_index", grouping="5.7.1",
+                constants.transfer.Z_IDX, grouping="5.7.1",
                 description="Choose a specific Z-index to export", min=1),
 
             scripts.Int(
-                "OR_specify_Z_start_AND...", grouping="5.7.2",
+                constants.transfer.Z_IDX_START, grouping="5.7.2",
                 description="Choose a specific Z-index to export", min=1),
 
             scripts.Int(
-                "...specify_Z_end", grouping="5.7.3",
+                constants.transfer.Z_IDX_END, grouping="5.7.3",
                 description="Choose a specific Z-index to export", min=1),
 
             scripts.String(
-                "Choose_T_Section", grouping="5.8",
+                constants.transfer.T, grouping="5.8",
                 description="Default T is last viewed T for each image"
                 ", OR choose T below.", values=t_choices,
                 default=default_t_option),
 
             scripts.Int(
-                "OR_specify_T_index", grouping="5.8.1",
+                constants.transfer.T_IDX, grouping="5.8.1",
                 description="Choose a specific T-index to export", min=1),
 
             scripts.Int(
-                "OR_specify_T_start_AND...", grouping="5.8.2",
+                constants.transfer.T_IDX_START, grouping="5.8.2",
                 description="Choose a specific T-index to export", min=1),
 
             scripts.Int(
-                "...specify_T_end", grouping="5.8.3",
+                constants.transfer.T_IDX_END, grouping="5.8.3",
                 description="Choose a specific T-index to export", min=1),
 
             scripts.String(
-                "Zoom", grouping="5.9", values=zoom_percents,
+                constants.transfer.ZOOM, grouping="5.9", values=zoom_percents,
                 description="Zoom (jpeg, png or tiff) before saving with"
-                " ANTIALIAS interpolation", default="100%"),
+                " ANTIALIAS interpolation",
+                default=constants.transfer.ZOOM_100),
 
             scripts.String(
-                "Format", grouping="5.1",
+                constants.transfer.FORMAT, grouping="5.1",
                 description="Format to save image", values=formats,
-                default='ZARR'),
+                default=constants.transfer.FORMAT_ZARR),
 
             scripts.String(
-                "Folder_Name", grouping="3",
+                constants.transfer.FOLDER, grouping="3",
                 description="Name of folder (and zip file) to store images",
-                default='SLURM_IMAGES_'),
+                default=constants.transfer.FOLDER_DEFAULT),
 
-            version="0.0.4",
+            version="1.9.0",
             authors=["Torec Luik", "William Moore", "OME Team"],
             institutions=["Amsterdam UMC", "University of Dundee"],
-            contact="t.t.luik@amsterdamumc.nl",
+            contact='cellularimaging@amsterdamumc.nl',
             authorsInstitutions=[[1], [2]]
         )
 
@@ -735,7 +744,7 @@ if __name__ == "__main__":
                                 maxBytes=LOGSIZE,
                                 backupCount=LOGNUM)
                         ])
-       
+
     # Silence some of the DEBUG
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)

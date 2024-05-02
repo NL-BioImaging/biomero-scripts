@@ -25,20 +25,16 @@ from paramiko import SSHException
 
 logger = logging.getLogger(__name__)
 
-IMAGE_EXPORT_SCRIPT = "_SLURM_Image_Transfer.py"
-IMAGE_IMPORT_SCRIPT = "SLURM_Get_Results.py"
-EXPORT_SCRIPTS = [IMAGE_EXPORT_SCRIPT]
-IMPORT_SCRIPTS = [IMAGE_IMPORT_SCRIPT]
-DATATYPES = [rstring('Dataset'), rstring('Image'), rstring('Plate')]
-NO = "--NO THANK YOU--"
-OUTPUT_RENAME = "3c) Rename the imported images"
-OUTPUT_PARENT = "1) Zip attachment to parent"
-OUTPUT_ATTACH = "2) Attach to original images"
-OUTPUT_NEW_DATASET = "3a) Import into NEW Dataset"
-OUTPUT_DUPLICATES = "3b) Allow duplicate dataset (name)?"
-OUTPUT_CSV_TABLE = "4) Upload result CSVs as OMERO tables"
-OUTPUT_OPTIONS = [OUTPUT_RENAME, OUTPUT_PARENT, OUTPUT_NEW_DATASET,
-                  OUTPUT_ATTACH, OUTPUT_CSV_TABLE]
+EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
+IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
+             rstring(constants.transfer.DATA_TYPE_IMAGE),
+             rstring(constants.transfer.DATA_TYPE_PLATE)]
+OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
+                  constants.workflow.OUTPUT_PARENT,
+                  constants.workflow.OUTPUT_NEW_DATASET,
+                  constants.workflow.OUTPUT_ATTACH,
+                  constants.workflow.OUTPUT_CSV_TABLE]
 
 
 def runScript():
@@ -60,20 +56,20 @@ def runScript():
         # and populated with the currently selected Image(s)/Dataset(s)
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "1.5.0"
+        params.version = "1.9.0"
         params.description = f'''Script to run a workflow on the Slurm cluster.
 
         This runs a script remotely on your Slurm cluster.
         Connection ready? << {slurmClient.validate()} >>
-        
+
         Select one or more of the workflows below to run them on the given
         Datasets / Images / Plates.
-        
+
         Parameters for workflows are automatically generated from their Github.
-        Versions are only those currently available on your Slurm cluster.        
-        
+        Versions are only those currently available on your Slurm cluster.
+
         Results will be imported back into OMERO with the selected settings.
-        
+
         If you need different Slurm settings (like memory increase), ask your
         OMERO admin.
         '''
@@ -87,46 +83,46 @@ def runScript():
 
         input_list = [
             omscripts.String(
-                "Data_Type", optional=False, grouping="01.1",
+                constants.transfer.DATA_TYPE, optional=False, grouping="01.1",
                 description="The data you want to work with.",
                 values=DATATYPES,
-                default="Dataset"),
+                default=constants.transfer.DATA_TYPE_DATASET),
             omscripts.List(
-                "IDs", optional=False, grouping="01.2",
+                constants.transfer.IDS, optional=False, grouping="01.2",
                 description="List of Dataset IDs or Image IDs").ofType(
                     rlong(0)),
-            omscripts.Bool("E-mail", grouping="01.3",
+            omscripts.Bool(constants.workflow.EMAIL, grouping="01.3",
                            description=email_descr,
                            default=True),
-            omscripts.Bool("Select how to import your results (one or more)",
+            omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
                            description="Select one or more options below:",
                            default=True),
-            omscripts.String(OUTPUT_RENAME,
+            omscripts.String(constants.workflow.OUTPUT_RENAME,
                              optional=True,
                              grouping="02.7",
                              description="A new name for the imported images. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
-                             default=NO),
-            omscripts.Bool(OUTPUT_PARENT,
+                             default=constants.workflow.NO),
+            omscripts.Bool(constants.workflow.OUTPUT_PARENT,
                            optional=True, grouping="02.2",
                            description="Attach zip to parent project/plate",
                            default=True),
-            omscripts.Bool(OUTPUT_ATTACH,
+            omscripts.Bool(constants.workflow.OUTPUT_ATTACH,
                            optional=True,
                            grouping="02.4",
                            description="Attach all resulting images to original images as attachments",
                            default=False),
-            omscripts.String(OUTPUT_NEW_DATASET, optional=True,
+            omscripts.String(constants.workflow.OUTPUT_NEW_DATASET, optional=True,
                              grouping="02.5",
                              description="Name for the new dataset w/ result images",
-                             default=NO),
-            omscripts.Bool(OUTPUT_DUPLICATES,
+                             default=constants.workflow.NO),
+            omscripts.Bool(constants.workflow.OUTPUT_DUPLICATES,
                            optional=True,
                            grouping="02.6",
                            description="If a dataset already matches this name, still make a new one?",
                            default=False),
-            omscripts.Bool(OUTPUT_CSV_TABLE,
+            omscripts.Bool(constants.workflow.OUTPUT_CSV_TABLE,
                            optional=False,
                            grouping="02.8",
                            dsecription="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
@@ -222,12 +218,13 @@ def runScript():
             for output_option in OUTPUT_OPTIONS:
                 selected_op = unwrap(client.getInput(output_option))
                 if (not selected_op) or (
-                    selected_op == NO) or (
-                        type(selected_op) == list and NO in selected_op):
+                    selected_op == constants.workflow.NO) or (
+                        type(selected_op) == list and constants.workflow.NO in selected_op):
                     selected_output[output_option] = False
                 else:
                     selected_output[output_option] = True
-                    logger.debug(f"Selected: {output_option} >> [{selected_op}]")
+                    logger.debug(
+                        f"Selected: {output_option} >> [{selected_op}]")
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
                 client.setOutput("Message", rstring(errormsg))
@@ -269,27 +266,30 @@ def runScript():
                 # Quick git pull on Slurm for latest version of job scripts
                 update_result = slurmClient.update_slurm_scripts()
                 logger.debug(update_result.__dict__)
-                
+
                 logger.info('''
                 # --------------------------------------------
                 # :: 2b. Convert data on Slurm ::
                 # --------------------------------------------
                 ''')
-                slurmJob = slurmClient.run_conversion_workflow_job(zipfile, 'zarr', 'tiff')
+                slurmJob = slurmClient.run_conversion_workflow_job(
+                    zipfile, 'zarr', 'tiff')
                 logger.info(f"Conversion job: {slurmJob}")
                 if not slurmJob.ok:
-                    logger.warning(f"Error converting data: {slurmJob.get_error()}")
+                    logger.warning(f"Error converting data: {
+                                   slurmJob.get_error()}")
                 else:
                     try:
                         slurmJob.wait_for_completion(slurmClient, conn)
                         if not slurmJob.completed():
-                            raise Exception(f"Conversion is not completed: {slurmJob}")
+                            raise Exception(
+                                f"Conversion is not completed: {slurmJob}")
                         else:
                             slurmJob.cleanup(slurmClient)
                     except Exception as e:
                         UI_messages += f" ERROR WITH CONVERTING DATA: {e}"
                         raise e
-                        
+
                     logger.info('''
                     # --------------------------------------------
                     # :: 3. Create Slurm jobs for all workflows ::
@@ -343,19 +343,21 @@ def runScript():
                                 if rv_imp:
                                     try:
                                         if rv_imp['Message']:
-                                            log_msg = f"{rv_imp['Message'].getValue()}"
+                                            log_msg = f"{
+                                                rv_imp['Message'].getValue()}"
                                     except KeyError:
                                         log_msg += "Data import status unknown."
                                     try:
                                         if rv_imp['URL']:
-                                            client.setOutput("URL", rv_imp['URL'])
+                                            client.setOutput(
+                                                "URL", rv_imp['URL'])
                                     except KeyError:
                                         log_msg += "|No URL|"
                                     try:
                                         if rv_imp["File_Annotation"]:
                                             client.setOutput("File_Annotation",
-                                                            rv_imp[
-                                                                "File_Annotation"])
+                                                             rv_imp[
+                                                                 "File_Annotation"])
                                     except KeyError:
                                         log_msg += "|No Annotation|"
                                 else:
@@ -368,7 +370,8 @@ def runScript():
                                     or job_state == "FAILED"):
                                 # Remove from future checks
                                 log_msg = f"Job {slurm_job_id} is {job_state}."
-                                log_msg += f"You can get the logfile using `Slurm Get Update` on job {slurm_job_id}"
+                                log_msg += f"You can get the logfile using `Slurm Get Update` on job {
+                                    slurm_job_id}"
                                 logger.warning(log_msg)
                                 UI_messages += log_msg
                                 slurm_job_id_list.remove(slurm_job_id)
@@ -429,7 +432,8 @@ def run_workflow(slurmClient: SlurmClient,
             logger.debug(
                 f"{job_status_dict[slurm_job_id]}, {poll_result.stdout}")
             if not poll_result.ok:
-                logger.warning(f"Error checking job status: {poll_result.stderr}")
+                logger.warning(f"Error checking job status: {
+                               poll_result.stderr}")
             else:
                 log_msg = f"\n{job_status_dict[slurm_job_id]}"
                 logger.info(log_msg)
@@ -441,7 +445,7 @@ def run_workflow(slurmClient: SlurmClient,
 
 
 def getOmeroEmail(client, conn):
-    if unwrap(client.getInput("E-mail")):
+    if unwrap(client.getInput(constants.workflow.EMAIL)):
         try:
             # Retrieve information about the authenticated user
             user = conn.getUser()
@@ -472,16 +476,19 @@ def exportImageToSLURM(client: omscripts.client,
     # TODO: export nucleus channel only? that is individual channels,
     # but filtered...
     # Might require metadata: what does the WF want? What is in which channel?
-    inputs = {"Data_Type": client.getInput("Data_Type"),
-              "IDs": client.getInput("IDs"),
-              "Image settings (Optional)": rbool(True),
-              "Export_Individual_Channels": rbool(False),
-              "Export_Merged_Image": rbool(True),
-              "Choose_Z_Section": rstring('Max projection'),
-              "Choose_T_Section": rstring('Default-T (last-viewed)'),
-              "Format": rstring('ZARR'),
-              "Folder_Name": rstring(zipfile)
-              }
+    inputs = {
+        constants.transfer.DATA_TYPE: client.getInput(
+            constants.transfer.DATA_TYPE),
+        constants.transfer.IDS: client.getInput(constants.transfer.IDS),
+        constants.transfer.SETTINGS: rbool(True),
+        constants.transfer.CHANNELS: rbool(False),
+        constants.transfer.MERGED: rbool(True),
+        constants.transfer.Z: rstring(constants.transfer.Z_MAXPROJ),
+        constants.transfer.T: rstring(constants.transfer.T_DEFAULT),
+        constants.transfer.FORMAT: rstring(
+            constants.transfer.FORMAT_ZARR),
+        constants.transfer.FOLDER: rstring(zipfile)
+    }
     logger.debug(f"{inputs}, {script_ids}")
     rv = runOMEROScript(client, svc, script_ids, inputs)
     return rv
@@ -520,125 +527,132 @@ def importResultsToOmero(client: omscripts.client,
 
     script_ids = [unwrap(s.id)
                   for s in scripts if unwrap(s.getName()) in IMPORT_SCRIPTS]
-    first_id = unwrap(client.getInput("IDs"))[0]
-    data_type = unwrap(client.getInput("Data_Type"))
+    first_id = unwrap(client.getInput(constants.transfer.IDS))[0]
+    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
     logger.debug(f"{script_ids}, {first_id}, {data_type}")
-    opts = {}
     inputs = {
-        constants.RESULTS_OUTPUT_COMPLETED_JOB: rbool(True),
-        constants.RESULTS_OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id))
+        constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
+        constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id))
     }
 
     # Get a 'parent' dataset or plate of input images
     parent_id = first_id
     parent_data_type = data_type
-    if data_type == 'Image':
+    if data_type == constants.transfer.DATA_TYPE_IMAGE:
         datasets = [d.id for d in conn.getObjects(
-            'Dataset', opts={'image': first_id})]
+            constants.transfer.DATA_TYPE_DATASET, opts={'image': first_id})]
         plates = [d.id for d in conn.getObjects(
-            'Plate', opts={'image': first_id})]
+            constants.transfer.DATA_TYPE_PLATE, opts={'image': first_id})]
         logger.debug(f"Datasets:{datasets} Plates:{plates}")
         if len(plates) > len(datasets):
             parent_id = plates[0]
-            parent_data_type = 'Plate'
+            parent_data_type = constants.transfer.DATA_TYPE_PLATE
         else:
             parent_id = datasets[0]
-            parent_data_type = 'Dataset'
+            parent_data_type = constants.transfer.DATA_TYPE_DATASET
 
     logger.debug(f"Determined parent to be {parent_data_type}:{parent_id}")
 
-    if selected_output[OUTPUT_PARENT]:
+    if selected_output[constants.workflow.OUTPUT_PARENT]:
         # For now, there is no attaching to Dataset or Screen...
         # If we need that, build it ;) (in Get_Result script)
-        if parent_data_type == 'Dataset' or parent_data_type == 'Project':
+        if (parent_data_type == constants.transfer.DATA_TYPE_DATASET or
+                parent_data_type == constants.transfer.DATA_TYPE_PROJECT):
             logger.debug(f"Adding to dataset {parent_id}")
             projects = get_project_name_ids(conn, parent_id)
-            inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT_ID] = rlist(
+            inputs[constants.results.OUTPUT_ATTACH_PROJECT_ID] = rlist(
                 projects)
-        elif parent_data_type == 'Plate':
+        elif parent_data_type == constants.transfer.DATA_TYPE_PLATE:
             logger.debug(f"Adding to plate {parent_id}")
             plates = get_plate_name_ids(conn, parent_id)
-            inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT] = rbool(False)
-            inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE] = rbool(True)
-            inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE_ID] = rlist(plates)
+            inputs[constants.results.OUTPUT_ATTACH_PROJECT] = rbool(
+                False)
+            inputs[constants.results.OUTPUT_ATTACH_PLATE] = rbool(
+                True)
+            inputs[constants.results.OUTPUT_ATTACH_PLATE_ID] = rlist(
+                plates)
         else:
             raise ValueError(f"Cannot handle {parent_data_type}")
     else:
-        inputs[constants.RESULTS_OUTPUT_ATTACH_PROJECT] = rbool(False)
-        inputs[constants.RESULTS_OUTPUT_ATTACH_PLATE] = rbool(False)
+        inputs[constants.results.OUTPUT_ATTACH_PROJECT] = rbool(
+            False)
+        inputs[constants.results.OUTPUT_ATTACH_PLATE] = rbool(
+            False)
 
-    if selected_output[OUTPUT_RENAME]:
+    if selected_output[constants.workflow.OUTPUT_RENAME]:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME
         ] = rbool(True)
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME
-        ] = client.getInput(OUTPUT_RENAME)
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME
+        ] = client.getInput(constants.workflow.OUTPUT_RENAME)
     else:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_RENAME
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME
         ] = rbool(False)
 
-    if selected_output[OUTPUT_NEW_DATASET]:
-        inputs[constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET] = rbool(True)
+    if selected_output[constants.workflow.OUTPUT_NEW_DATASET]:
+        inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET] = rbool(
+            True)
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_NAME
-        ] = client.getInput(OUTPUT_NEW_DATASET)
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME
+        ] = client.getInput(constants.workflow.OUTPUT_NEW_DATASET)
         # duplicate dataset name check
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET_DUPLICATE
-        ] = client.getInput(OUTPUT_DUPLICATES)
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE
+        ] = client.getInput(constants.workflow.OUTPUT_DUPLICATES)
 
     else:
-        inputs[constants.RESULTS_OUTPUT_ATTACH_NEW_DATASET] = rbool(False)
+        inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET] = rbool(
+            False)
 
-    if selected_output[OUTPUT_ATTACH]:
+    if selected_output[constants.workflow.OUTPUT_ATTACH]:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+            constants.results.OUTPUT_ATTACH_OG_IMAGES
         ] = rbool(True)
     else:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+            constants.results.OUTPUT_ATTACH_OG_IMAGES
         ] = rbool(False)
 
-    if selected_output[OUTPUT_PARENT]:
+    if selected_output[constants.workflow.OUTPUT_PARENT]:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+            constants.results.OUTPUT_ATTACH_OG_IMAGES
         ] = rbool(True)
     else:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_OG_IMAGES
+            constants.results.OUTPUT_ATTACH_OG_IMAGES
         ] = rbool(False)
 
-    if selected_output[OUTPUT_CSV_TABLE]:
+    if selected_output[constants.workflow.OUTPUT_CSV_TABLE]:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_TABLE
+            constants.results.OUTPUT_ATTACH_TABLE
         ] = rbool(True)
-        if parent_data_type == 'Dataset':
+        if parent_data_type == constants.transfer.DATA_TYPE_DATASET:
             inputs[
-                constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET
+                constants.results.OUTPUT_ATTACH_TABLE_DATASET
             ] = rbool(True)
             inputs[
-                constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET_ID
+                constants.results.OUTPUT_ATTACH_TABLE_DATASET_ID
             ] = rlist(get_dataset_name_ids(conn, parent_id))
         else:
             inputs[
-                constants.RESULTS_OUTPUT_ATTACH_TABLE_DATASET
+                constants.results.OUTPUT_ATTACH_TABLE_DATASET
             ] = rbool(False)
-        if parent_data_type == 'Plate':
+        if parent_data_type == constants.transfer.DATA_TYPE_PLATE:
             inputs[
-                constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE
+                constants.results.OUTPUT_ATTACH_TABLE_PLATE
             ] = rbool(True)
             inputs[
-                constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE_ID
+                constants.results.OUTPUT_ATTACH_TABLE_PLATE_ID
             ] = rlist(get_plate_name_ids(conn, parent_id))
         else:
             inputs[
-                constants.RESULTS_OUTPUT_ATTACH_TABLE_PLATE
+                constants.results.OUTPUT_ATTACH_TABLE_PLATE
             ] = rbool(False)
     else:
         inputs[
-            constants.RESULTS_OUTPUT_ATTACH_TABLE
+            constants.results.OUTPUT_ATTACH_TABLE
         ] = rbool(False)
 
     logger.info(f"Running import script {script_ids} with inputs: {inputs}")
@@ -650,7 +664,7 @@ def get_project_name_ids(conn, parent_id):
     # Note different implementation XD
     # Call it 'legacy code', at version 1 already ;)
     projects = [rstring('%d: %s' % (d.id, d.getName()))
-                for d in conn.getObjects('Project',
+                for d in conn.getObjects(constants.transfer.DATA_TYPE_PROJECT,
                                          opts={'dataset': parent_id})]
     logger.debug(projects)
     return projects
@@ -658,34 +672,39 @@ def get_project_name_ids(conn, parent_id):
 
 def get_dataset_name_ids(conn, parent_id):
     dataset = [rstring('%d: %s' % (d.id, d.getName()))
-               for d in conn.getObjects('Dataset', [parent_id])]
+               for d in conn.getObjects(constants.transfer.DATA_TYPE_DATASET,
+                                        [parent_id])]
     logger.debug(dataset)
     return dataset
 
 
 def get_plate_name_ids(conn, parent_id):
     plates = [rstring('%d: %s' % (d.id, d.getName()))
-              for d in conn.getObjects('Plate', [parent_id])]
+              for d in conn.getObjects(constants.transfer.DATA_TYPE_PLATE,
+                                       [parent_id])]
     logger.debug(plates)
     return plates
 
 
 def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
     opts = {}
-    data_type = unwrap(client.getInput("Data_Type"))
-    if data_type == 'Image':
+    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
+    if data_type == constants.transfer.DATA_TYPE_IMAGE:
         # get parent dataset
-        opts['image'] = unwrap(client.getInput("IDs"))[0]
+        opts['image'] = unwrap(client.getInput(constants.transfer.IDS))[0]
         objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects('Dataset', opts=opts)]
-    elif data_type == 'Dataset':
+                     for d in conn.getObjects(
+                         constants.transfer.DATA_TYPE_DATASET, opts=opts)]
+    elif data_type == constants.transfer.DATA_TYPE_DATASET:
         objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects('Dataset',
-                                              unwrap(client.getInput("IDs")))]
-    elif data_type == 'Plate':
+                     for d in conn.getObjects(
+                         constants.transfer.DATA_TYPE_DATASET,
+                         unwrap(client.getInput(constants.transfer.IDS)))]
+    elif data_type == constants.transfer.DATA_TYPE_PLATE:
         objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects('Plate',
-                                              unwrap(client.getInput("IDs")))]
+                     for d in conn.getObjects(
+                         constants.transfer.DATA_TYPE_PLATE,
+                         unwrap(client.getInput(constants.transfer.IDS)))]
     else:
         raise ValueError(f"Can't handle {data_type}")
 
@@ -720,7 +739,7 @@ if __name__ == '__main__':
                                 maxBytes=LOGSIZE,
                                 backupCount=LOGNUM)
                         ])
-    
+
     # Silence some of the DEBUG
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)

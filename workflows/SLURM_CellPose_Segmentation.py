@@ -21,12 +21,11 @@ import sys
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap
 import omero.scripts as omscripts
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 import logging
 
 logger = logging.getLogger(__name__)
 
-_IMAGE_EXPORT_SCRIPT = "_SLURM_Image_transfer.py"
 _DEFAULT_MAIL = "No"
 _DEFAULT_TIME = "00:15:00"
 
@@ -40,9 +39,9 @@ def runScript():
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "1.5.0"
+        params.version = "1.9.0"
         params.description = f'''Script to run CellPose on slurm cluster.
-        First run the {_IMAGE_EXPORT_SCRIPT} script to export your data
+        First run the {constants.IMAGE_EXPORT_SCRIPT} script to export your data
         to the cluster.
 
         Specifically will run:
@@ -62,13 +61,13 @@ def runScript():
         _workflow_params = slurmClient.get_workflow_parameters('cellpose')
         logger.debug(_workflow_params)
         name_descr = f"Name of folder where images are stored, as provided\
-            with {_IMAGE_EXPORT_SCRIPT}"
+            with {constants.IMAGE_EXPORT_SCRIPT}"
         dur_descr = "Maximum time the script should run for. \
             Max is 8 hours. Notation is hh:mm:ss"
         email_descr = "Provide an e-mail if you want a mail \
             when your job is done or cancelled."
         input_list = [
-            omscripts.String("Folder_Name", grouping="01",
+            omscripts.String(constants.transfer.FOLDER, grouping="01",
                              description=name_descr,
                              values=_datafiles),
             omscripts.Bool("Slurm Job Parameters",
@@ -76,7 +75,7 @@ def runScript():
             omscripts.String("Duration", grouping="02.2",
                              description=dur_descr,
                              default=_DEFAULT_TIME),
-            omscripts.String("E-mail", grouping="02.3",
+            omscripts.String(constants.workflow.EMAIL, grouping="02.3",
                              description=email_descr,
                              default=_DEFAULT_MAIL)
         ]
@@ -116,8 +115,8 @@ def runScript():
 
         # Unpack script input values
         cellpose_version = unwrap(client.getInput("CellPose_Version"))
-        zipfile = unwrap(client.getInput("Folder_Name"))
-        email = unwrap(client.getInput("E-mail"))
+        zipfile = unwrap(client.getInput(constants.transfer.FOLDER))
+        email = unwrap(client.getInput(constants.workflow.EMAIL))
         if email == _DEFAULT_MAIL:
             email = None
         time = unwrap(client.getInput("Duration"))
