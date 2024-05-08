@@ -97,7 +97,7 @@ def runScript():
                                 pending[model] = [version]
                             else:
                                 pending[model].append(version)  
-                message += f">> These workflows already available now: {filtered_models}. \nThese are still pending: {pending}"
+                message += f">> These workflows are already available now: {filtered_models}. \nThese are still pending: {pending}"
 
         client.setOutput("Message", rstring(str(message)))
 
