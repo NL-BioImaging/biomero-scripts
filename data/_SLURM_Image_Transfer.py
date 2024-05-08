@@ -218,7 +218,7 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
+    command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output "{exp_dir}" export Image:{image.getId()}'
     cmd = cmd1 + " && " + command
     logger.debug(cmd)
     process = subprocess.Popen(
@@ -589,6 +589,19 @@ def run_script():
             '_SLURM_Image_Transfer',
             f"""Save multiple images as TIFF or ZARR
             in a zip file and export them to SLURM.
+            
+            Note that TIFF will be a rendered version of your image
+            as shown in OMERO.web currently: not the original pixel
+            values. This matters for e.g. Mask images, where each
+            ROI / mask should be a very specific pixel value.
+            
+            ZARR will use the specific pixel values of the original 
+            file, but you will need to convert it to a format that
+            the workflows can read (which is TIFF).
+            
+            Please use SLURM_Run_Workflow directly instead if you 
+            don't know how to convert ZARR to TIFF on Slurm!
+            Otherwise, use the conversion job on Slurm to convert.
 
             This runs a script remotely on your SLURM cluster.
             Connection ready? {slurmClient.validate()}""",
@@ -680,7 +693,7 @@ def run_script():
 
             scripts.String(
                 constants.transfer.FOLDER, grouping="3",
-                description="Name of folder (and zip file) to store images",
+                description="Name of folder (and zip file) to store images. Don't use spaces!",
                 default=constants.transfer.FOLDER_DEFAULT),
 
             version="1.9.0",

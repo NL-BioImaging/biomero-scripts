@@ -706,6 +706,8 @@ def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     filename = "_".join(objparams)
+    # Replace spaces with underscores in the filename
+    filename = filename.replace(" ", "_")
     full_filename = f"{filename}_{timestamp}"
     logger.debug("Filename: " + full_filename)
     return full_filename
