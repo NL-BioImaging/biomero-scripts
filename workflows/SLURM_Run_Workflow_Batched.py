@@ -128,7 +128,7 @@ def runScript():
             omscripts.Bool(constants.workflow.OUTPUT_CSV_TABLE,
                            optional=False,
                            grouping="02.8",
-                           dsecription="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
+                           description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
                            default=True)
         ]
         # Generate script parameters for all our workflows
