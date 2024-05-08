@@ -250,8 +250,7 @@ def runScript():
             if not script_ids:
                 raise ValueError(
                     f"Cannot process workflows: scripts ({PROC_SCRIPTS})\
-                        not found in ({[unwrap(
-                            s.getName()) for s in scripts]}) ")
+                        not found in ({[unwrap(s.getName()) for s in scripts]}) ")
             logger.info('''
             # --------------------------------------------
             # :: 1. Split data into batches ::
@@ -372,15 +371,13 @@ def runScript():
 
                             finished.append(i)
                             if return_code.getValue() == 0:
-                                msg = f"Batch {
-                                    i} - [{remaining_batches[i]}] finished."
+                                msg = f"Batch {i} - [{remaining_batches[i]}] finished."
                                 logger.info(
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
                             else:
-                                msg = f"Batch {
-                                    i} - [{remaining_batches[i]}] failed!"
+                                msg = f"Batch {i} - [{remaining_batches[i]}] failed!"
                                 logger.info(
                                     msg)
                                 UI_messages['Message'].extend(
