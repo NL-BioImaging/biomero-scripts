@@ -276,8 +276,7 @@ def runScript():
                     zipfile, 'zarr', 'tiff')
                 logger.info(f"Conversion job: {slurmJob}")
                 if not slurmJob.ok:
-                    logger.warning(f"Error converting data: {
-                                   slurmJob.get_error()}")
+                    logger.warning(f"Error converting data: {slurmJob.get_error()}")
                 else:
                     try:
                         slurmJob.wait_for_completion(slurmClient, conn)
@@ -343,8 +342,7 @@ def runScript():
                                 if rv_imp:
                                     try:
                                         if rv_imp['Message']:
-                                            log_msg = f"{
-                                                rv_imp['Message'].getValue()}"
+                                            log_msg = f"{rv_imp['Message'].getValue()}"
                                     except KeyError:
                                         log_msg += "Data import status unknown."
                                     try:
@@ -370,8 +368,7 @@ def runScript():
                                     or job_state == "FAILED"):
                                 # Remove from future checks
                                 log_msg = f"Job {slurm_job_id} is {job_state}."
-                                log_msg += f"You can get the logfile using `Slurm Get Update` on job {
-                                    slurm_job_id}"
+                                log_msg += f"You can get the logfile using `Slurm Get Update` on job {slurm_job_id}"
                                 logger.warning(log_msg)
                                 UI_messages += log_msg
                                 slurm_job_id_list.remove(slurm_job_id)
@@ -432,8 +429,7 @@ def run_workflow(slurmClient: SlurmClient,
             logger.debug(
                 f"{job_status_dict[slurm_job_id]}, {poll_result.stdout}")
             if not poll_result.ok:
-                logger.warning(f"Error checking job status: {
-                               poll_result.stderr}")
+                logger.warning(f"Error checking job status: {poll_result.stderr}")
             else:
                 log_msg = f"\n{job_status_dict[slurm_job_id]}"
                 logger.info(log_msg)

@@ -218,8 +218,7 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    command = f'omero zarr -s "{conn.host}" -k "{
-        suuid}" --output {exp_dir} export Image:{image.getId()}'
+    command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output {exp_dir} export Image:{image.getId()}'
     cmd = cmd1 + " && " + command
     logger.debug(cmd)
     process = subprocess.Popen(

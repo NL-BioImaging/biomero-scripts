@@ -274,8 +274,7 @@ def runScript():
                 for ds in objects:
                     images.extend(list(ds.listChildren()))
                 if not images:
-                    error = f"No image found in dataset(s) {
-                        data_ids} / {objects}"
+                    error = f"No image found in dataset(s) {data_ids} / {objects}"
                     UI_messages['Message'].extend(
                         [error])
                     raise ValueError(error)
@@ -298,8 +297,7 @@ def runScript():
                         image = well.getImage(index)
                         images.append(image)
                 if not images:
-                    error = f"No image found in plate(s) {
-                        data_ids} / {objects}"
+                    error = f"No image found in plate(s) {data_ids} / {objects}"
                     UI_messages['Message'].extend(
                         [error])
                     raise ValueError(error)
