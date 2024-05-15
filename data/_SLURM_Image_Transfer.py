@@ -545,7 +545,16 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
         message += f"'{folder_name}' succesfully copied to SLURM!\n"
     except Exception as e:
         message += f"Copying to SLURM failed: {e}\n"
-
+        
+    # Unpack on SLURM
+    try:
+        unpack_result = slurmClient.unpack_data(folder_name)
+        logger.debug(unpack_result.stdout)
+        if not unpack_result.ok:
+            logger.warning(f"Error unpacking data:{unpack_result.stderr}")
+    except Exception as e:
+        message += f"Unzipping on SLURM failed: {e}\n"
+    
     file_annotation, ann_message = script_utils.create_link_file_annotation(
         conn, export_file, parent, output=output_display_name,
         namespace=namespace, mimetype=mimetype)
@@ -694,13 +703,14 @@ def run_script():
             scripts.String(
                 constants.transfer.FOLDER, grouping="3",
                 description="Name of folder (and zip file) to store images. Don't use spaces!",
-                default=constants.transfer.FOLDER_DEFAULT),
+                default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
 
             version="1.9.0",
             authors=["Torec Luik", "William Moore", "OME Team"],
             institutions=["Amsterdam UMC", "University of Dundee"],
             contact='cellularimaging@amsterdamumc.nl',
-            authorsInstitutions=[[1], [2]]
+            authorsInstitutions=[[1], [2]],
+            namespaces=[omero.constants.namespaces.NSDYNAMIC],
         )
 
         try:

@@ -127,45 +127,41 @@ def runScript():
 
         try:
             # 3. Call SLURM (segmentation)
-            unpack_result = slurmClient.unpack_data(zipfile)
-            logger.debug(unpack_result.stdout)
-            if not unpack_result.ok:
-                logger.warning(f"Error unpacking data:{unpack_result.stderr}")
-            else:
-                # Quick git pull on Slurm for latest version of job scripts
-                try:
-                    update_result = slurmClient.update_slurm_scripts()
-                    logger.debug(update_result.__dict__)
-                except Exception as e:
-                    logger.warning(f"Error updating SLURM scripts:{e}")
+            # Note: Moved unzipping data to transfer script, removed from here
+            # Quick git pull on Slurm for latest version of job scripts
+            try:
+                update_result = slurmClient.update_slurm_scripts()
+                logger.debug(update_result.__dict__)
+            except Exception as e:
+                logger.warning(f"Error updating SLURM scripts:{e}")
 
-                cp_result, slurm_job_id = slurmClient.run_workflow(
-                    workflow_name='cellpose',
-                    workflow_version=cellpose_version,
-                    input_data=zipfile,
-                    email=email,
-                    time=time,
-                    **kwargs
-                )
-                if not cp_result.ok:
-                    logger.warning(f"Error running CellPose job: {cp_result.stderr}")
-                else:
-                    print_result = f"Submitted to Slurm as\
-                        batch job {slurm_job_id}."
-                    # 4. Poll SLURM results
-                    try:
-                        tup = slurmClient.check_job_status(
-                            [slurm_job_id])
-                        (job_status_dict, poll_result) = tup
-                        logger.debug(f"{poll_result.stdout},{job_status_dict}")
-                        if not poll_result.ok:
-                            logger.warning("Error checking job status:", 
-                                           poll_result.stderr)
-                        else:
-                            print_result += f"\n{job_status_dict}"
-                    except Exception as e:
-                        print_result += f" ERROR WITH JOB: {e}"
-                        logger.warning(print_result)
+            cp_result, slurm_job_id = slurmClient.run_workflow(
+                workflow_name='cellpose',
+                workflow_version=cellpose_version,
+                input_data=zipfile,
+                email=email,
+                time=time,
+                **kwargs
+            )
+            if not cp_result.ok:
+                logger.warning(f"Error running CellPose job: {cp_result.stderr}")
+            else:
+                print_result = f"Submitted to Slurm as\
+                    batch job {slurm_job_id}."
+                # 4. Poll SLURM results
+                try:
+                    tup = slurmClient.check_job_status(
+                        [slurm_job_id])
+                    (job_status_dict, poll_result) = tup
+                    logger.debug(f"{poll_result.stdout},{job_status_dict}")
+                    if not poll_result.ok:
+                        logger.warning("Error checking job status:", 
+                                        poll_result.stderr)
+                    else:
+                        print_result += f"\n{job_status_dict}"
+                except Exception as e:
+                    print_result += f" ERROR WITH JOB: {e}"
+                    logger.warning(print_result)
 
             # 7. Script output
             logger.info(print_result)
