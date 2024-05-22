@@ -41,7 +41,7 @@ def runScript():
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "1.9.0"
+        params.version = "1.10.0"
         params.description = f'''Example script to run on slurm cluster
 
         Runs a script remotely on SLURM.

@@ -25,7 +25,6 @@ This script takes a number of images and saves individual image planes in a
 zip file for download, then exports it to SLURM.
 
 @author Torec Luik
-@version 1.5.0
 """
 
 import shutil
@@ -705,7 +704,7 @@ def run_script():
                 description="Name of folder (and zip file) to store images. Don't use spaces!",
                 default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
 
-            version="1.9.0",
+            version="1.10.0",
             authors=["Torec Luik", "William Moore", "OME Team"],
             institutions=["Amsterdam UMC", "University of Dundee"],
             contact='cellularimaging@amsterdamumc.nl',
