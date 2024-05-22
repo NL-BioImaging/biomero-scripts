@@ -12,7 +12,7 @@
 import omero
 import omero.gateway
 from omero import scripts
-from omero.rtypes import rstring
+from omero.rtypes import rstring, wrap
 from biomero import SlurmClient
 import logging
 import os
@@ -60,11 +60,24 @@ def runScript():
                         else:
                             pending[model].append(version)    
             
-            message += f"\n>> Available Models: {models}"
-            message += f"\n>>> Pending Models: {pending}"
-            message += f"\n>> Available Data: {data}"
+            message += f"\n>> Available Models: {models}."
+            message += f"\n>>> Pending Models: {pending}."
+            message += f"\n>> Available Data: {data}."
             logger.info(message)
-            # TODO get sing.log too
+            # misuse get_logfile to get this sing.log
+            tup = slurmClient.get_logfile_from_slurm(slurm_job_id='',
+                                                     logfile=f"{slurmClient.slurm_images_path}/sing.log")
+            (dir, export_file, result) = tup
+            # little script hack here so we don't have to adjust the client
+            export_file = os.path.join(dir, "sing.log")
+            logger.debug(f"Pulled logfile {result.__dict__}")
+            # Upload logfile to Omero as Original File
+            mimetype = 'text/plain'
+            obj = client.upload(export_file, type=mimetype)
+            obj_id = obj.id.val
+            url = f"get_original_file/{obj_id}/"
+            client.setOutput("URL", wrap({"type": "URL", "href": url}))
+            message += f"\n>>Also pulled the singularity log, click the URL button above to view ({url})"
 
         client.setOutput("Message", rstring(str(message)))
 
