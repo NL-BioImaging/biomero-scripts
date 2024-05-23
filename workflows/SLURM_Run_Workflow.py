@@ -148,8 +148,11 @@ def runScript():
             # Get the workflow parameters (dynamically) from their repository
             _workflow_params[wf] = slurmClient.get_workflow_parameters(
                 wf)
+            json_descriptor = slurmClient.pull_descriptor_from_github(wf)
+            wf_descr = json_descriptor['description']
             # Main parameter to select this workflow for execution
-            wf_ = omscripts.Bool(wf, grouping=parameter_group, default=False)
+            wf_ = omscripts.Bool(wf, grouping=parameter_group, default=False, 
+                                 description=wf_descr)
             input_list.append(wf_)
             # Select an available container image version to execute on Slurm
             version_descr = f"Version of the container of {wf}"

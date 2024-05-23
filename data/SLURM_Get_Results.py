@@ -98,15 +98,17 @@ def saveCSVToOmeroAsTable(conn, folder, client,
 
     if not csv_files:
         return "No table files found in the folder."
-    try:
-        for csv_file in csv_files:
+    
+    for csv_file in csv_files:
+        try:
             csv_name = os.path.basename(csv_file)
             csv_path = os.path.join(folder, csv_file)
 
             objecti = getattr(omero.model, data_type + 'I')
             omero_object = objecti(int(object_id), False)
+            table_name = f"{job_id}_{csv_name}"
             ctx = ParsingContext(client, omero_object, "",
-                                 table_name=f"{job_id}_{csv_name}")
+                                 table_name=table_name)
 
             with open(csv_path, 'rt', encoding='utf-8-sig') as f1:
                 ctx.preprocess_from_handle(f1)
@@ -115,10 +117,37 @@ def saveCSVToOmeroAsTable(conn, folder, client,
 
             # Add the FileAnnotation to the script message
             message += f"\nCSV file {csv_name} data added as table for {data_type}: {object_id}"
-
-    except Exception as e:
-        message += f"\nError attaching CSV files to OMERO: {e}"
-
+        except Exception as e:
+            logger.warning(f"Error processing CSV file {csv_name}: {e}")
+            # If an exception is caught, attach the CSV file as an attachment
+            try:
+                mimetype = "text/csv"
+                namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
+                description = f"CSV file {csv_name} from SLURM job {job_id}"
+                logger.debug(f"Creating FileAnnotation for CSV file: {csv_path}")
+                origFName = os.path.join(folder, table_name)
+                csv_file_attachment = conn.createFileAnnfromLocalFile(
+                    csv_path, origFilePathAndName=origFName,
+                    mimetype=mimetype,
+                    ns=namespace, desc=description)
+                
+                logger.debug(f"FileAnnotation created: {csv_file_attachment}")
+                # Ensure the OMERO object is fully loaded
+                if data_type == 'Dataset':
+                    omero_object = conn.getObject("Dataset", int(object_id))
+                elif data_type == 'Project':
+                    omero_object = conn.getObject("Project", int(object_id))
+                else:
+                    raise ValueError(f"Unsupported data_type: {data_type}")
+                logger.debug(f"Linking FileAnnotation to OMERO object: {omero_object}")
+                omero_object.linkAnnotation(csv_file_attachment)
+                logger.debug("FileAnnotation linked successfully.")
+                message += f"\nCSV file {csv_name} failed to attach as table."
+                message += f"\nCSV file {csv_name} instead attached as an attachment to {data_type}: {object_id}"
+            except Exception as attachment_error:
+                message += f"\nError attaching CSV file {csv_name} as an attachment to OMERO: {attachment_error}"
+                message += f"\nOriginal error: {e}"
+            
     return message
 
 
