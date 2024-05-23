@@ -41,7 +41,7 @@ def runScript():
         scripts.String(extra_config_name, optional=True, grouping="01.1",
                        description="The path to your configuration file on the server. Optional."),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
-        version="1.10.0",
+        version="1.11.0",
         authors=["Torec Luik"],
         institutions=["Amsterdam UMC"],
         contact='cellularimaging@amsterdamumc.nl',
