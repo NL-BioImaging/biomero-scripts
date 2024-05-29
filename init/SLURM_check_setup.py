@@ -17,6 +17,7 @@ from biomero import SlurmClient
 import logging
 import os
 import sys
+import pkg_resources
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,9 @@ def runScript():
     try:
         message = ""
         with SlurmClient.from_config() as slurmClient:
-            message = f"Connected: {slurmClient.validate()}" + \
+            bio_version = pkg_resources.get_distribution("biomero").version
+            message = f"== BIOMERO v{bio_version} =="
+            message += f"\nConnected: {slurmClient.validate()}" + \
                     f"\n Slurm: {slurmClient}\n"
             models, data = slurmClient.get_all_image_versions_and_data_files()
             
