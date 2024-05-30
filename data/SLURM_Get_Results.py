@@ -101,12 +101,30 @@ def saveCSVToOmeroAsTable(conn, folder, client,
     
     for csv_file in csv_files:
         try:
+            # We use the omero-metadata plugin to populate a table
+            # See https://pypi.org/project/omero-metadata/
+            # It has ways to automatically detect types based on column names
+            # or a "# header" line.
+            # That is up to the user to format their csv.
+            #
+            # Default is StringColumn for everything.
+            # d: DoubleColumn, for floating point numbers
+            # l: LongColumn, for integer numbers
+            # s: StringColumn, for text 
+            # b: BoolColumn, for true/false
+            # plate, well, image, dataset, roi to specify objects
+            #
+            # e.g. # header image,dataset,d,l,s
+            # e.g. # header s,s,d,l,s
+            # e.g. # header well,plate,s,d,l,d
             csv_name = os.path.basename(csv_file)
             csv_path = os.path.join(folder, csv_file)
 
             objecti = getattr(omero.model, data_type + 'I')
             omero_object = objecti(int(object_id), False)
             table_name = f"{job_id}_{csv_name}"
+            # ParsingContext could be provided with 'column_types' kwarg here,
+            # if you know them already somehow.
             ctx = ParsingContext(client, omero_object, "",
                                  table_name=table_name)
 
