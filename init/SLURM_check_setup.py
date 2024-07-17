@@ -65,7 +65,11 @@ def runScript():
             
             message += f"\n>> Available Models: {models}."
             message += f"\n>>> Pending Models: {pending}."
+            # Check converters:
+            converters = slurmClient.list_available_converter_versions()
+            message += f"\n>> Available Converters: {converters}."
             message += f"\n>> Available Data: {data}."
+            
             logger.info(message)
             # misuse get_logfile to get this sing.log
             tup = slurmClient.get_logfile_from_slurm(slurm_job_id='',
