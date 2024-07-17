@@ -72,7 +72,7 @@ def runScript():
                          description=cleanup_descr,
                          default=True),            
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
-            version="1.9.1",
+            version="1.13.0",
             authors=["Torec Luik"],
             institutions=["Amsterdam UMC"],
             contact='cellularimaging@amsterdamumc.nl',

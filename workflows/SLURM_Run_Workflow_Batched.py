@@ -58,7 +58,7 @@ def runScript():
         # and populated with the currently selected Image(s)/Dataset(s)
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "1.12.0"
+        params.version = "1.13.0"
         params.description = f'''Script to run workflows on slurm
         cluster, in batches.
 
