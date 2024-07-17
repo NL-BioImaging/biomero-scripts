@@ -26,6 +26,7 @@ CONV_OPTIONS_TARGET = ['tiff']
 INPUT_DATA = "Input data"
 SOURCE = "Source format"
 TARGET = "Target format"
+CLEANUP = "Cleanup?"
 
 
 def runScript():
@@ -36,6 +37,7 @@ def runScript():
         name_descr = f"Name of folder where images are stored, as provided\
             with {constants.IMAGE_EXPORT_SCRIPT}"
         conversion_descr = "Convert from X to Y"
+        cleanup_descr = "Cleanup logfile (default) or not? Turn off for debugging."
         _, _datafiles = slurmClient.get_image_versions_and_data_files(
             'cellpose')
         client = scripts.client(
@@ -65,7 +67,10 @@ def runScript():
             scripts.String(TARGET, grouping="02.2",
                            description=conversion_descr,
                            values=CONV_OPTIONS_TARGET,
-                           default='tiff'),            
+                           default='tiff'),
+            scripts.Bool(CLEANUP, grouping="03",
+                         description=cleanup_descr,
+                         default=True),            
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
             version="1.9.1",
             authors=["Torec Luik"],
@@ -83,26 +88,30 @@ def runScript():
             zipfile = scriptParams[INPUT_DATA]
             convert_from = scriptParams[SOURCE]
             convert_to = scriptParams[TARGET]
-            slurmJob = slurmClient.run_conversion_workflow_job(
-                    zipfile, convert_from, convert_to)
-            logger.info(f"Conversion job submitted: {slurmJob}")
-            if not slurmJob.ok:
-                logger.warning(f"Error converting data: {slurmJob.get_error()}")
-            else:
-                try:
+            cleanup = scriptParams[CLEANUP]
+            try:
+                slurmJob = slurmClient.run_conversion_workflow_job(
+                        zipfile, convert_from, convert_to)
+                logger.info(f"Conversion job submitted: {slurmJob}")
+                if not slurmJob.ok:
+                    logger.error(f"Error converting data: {slurmJob.get_error()}")
+                else:
+                    
                     conn = BlitzGateway(client_obj=client)
                     slurmJob.wait_for_completion(slurmClient, conn)
                     if not slurmJob.completed():
                         raise Exception(
                             f"Conversion is not completed: {slurmJob}")
                     else:
-                        slurmJob.cleanup(slurmClient)
+                        if cleanup:
+                            slurmJob.cleanup(slurmClient)
                         msg = f"Converted {zipfile} from {convert_from} to {convert_to}"
                         logger.info(msg)
                         message += msg
-                except Exception as e:
-                    message += f" ERROR WITH CONVERTING DATA: {e}"
-                    raise e
+            except Exception as e:
+                message += f" ERROR WITH CONVERTING DATA: {e}"
+                logger.error(message)
+                raise e
 
             client.setOutput("Message", rstring(str(message)))
 

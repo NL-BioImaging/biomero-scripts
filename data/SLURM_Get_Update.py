@@ -56,7 +56,9 @@ def runScript():
 
         _slurmjobs = slurmClient.list_active_jobs()
         _alljobs = slurmClient.list_all_jobs()
-        _oldjobs = [job for job in _alljobs if job not in _slurmjobs]
+        # filters out active jobs, and job arrays (conversion jobs)
+        # conversion jobs have different log file name that will fail anyway
+        _oldjobs = [job for job in _alljobs if job not in _slurmjobs and ('_' not in job)]
         _projects = getUserProjects()
         client = scripts.client(
             'Slurm Get Update',
