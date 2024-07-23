@@ -180,6 +180,10 @@ def runScript():
                     grouping=f"{parameter_group}.{param_incr+1}",
                     optional=param['optional']
                 )
+                # To allow 'duplicate' params, add the wf to uniqueify them
+                # we have to remove this prefix later again, before passing
+                # them to BIOMERO (as the wf will not understand these params)
+                omtype_param._name = f"{wf}_|_{omtype_param._name}" 
                 input_list.append(omtype_param)
         # Finish setting up the Omero script UI
         inputs = {

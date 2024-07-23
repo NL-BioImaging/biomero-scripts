@@ -176,10 +176,14 @@ def runScript():
                     grouping=f"{parameter_group}.{param_incr+1}",
                     optional=param['optional']
                 )
+                # To allow 'duplicate' params, add the wf to uniqueify them
+                # we have to remove this prefix later again, before passing
+                # them to BIOMERO (as the wf will not understand these params)
+                omtype_param._name = f"{wf}_|_{omtype_param._name}" 
                 input_list.append(omtype_param)
         # Finish setting up the Omero script UI
         inputs = {
-            p._name: p for p in input_list
+            f"{p._name}": p for p in input_list
         }
         params.inputs = inputs
         # Reload instead of caching
@@ -400,7 +404,9 @@ def run_workflow(slurmClient: SlurmClient,
         client.getInput(f"{name}_Version"))
     kwargs = {}
     for k in workflow_params:
-        kwargs[k] = unwrap(client.getInput(k))  # kwarg dict
+        # Undo the added uniquefying prefix {name} |
+        # That is only for the OMERO UI, not for the wf
+        kwargs[k] = unwrap(client.getInput(f"{name}_|_{k}"))  # kwarg dict
     logger.info(f"Run workflow with: {kwargs}")
     try:
         cp_result, slurm_job_id = slurmClient.run_workflow(
