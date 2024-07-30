@@ -134,13 +134,13 @@ def runScript():
                 logger.debug(update_result.__dict__)
             except Exception as e:
                 logger.warning(f"Error updating SLURM scripts:{e}")
-
-            cp_result, slurm_job_id = slurmClient.run_workflow(
+            cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
                 workflow_name='cellpose',
                 workflow_version=cellpose_version,
                 input_data=zipfile,
                 email=email,
                 time=time,
+                wf_id=wf_id,
                 **kwargs
             )
             if not cp_result.ok:

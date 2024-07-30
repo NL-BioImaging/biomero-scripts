@@ -40,23 +40,21 @@ def runScript():
         cleanup_descr = "Cleanup logfile (default) or not? Turn off for debugging."
         _, _datafiles = slurmClient.get_image_versions_and_data_files(
             'cellpose')
-        client = scripts.client(
-            'SLURM Remote Conversion',
-            f'''Use Slurm to convert data on your remote slurm cluster.
-            
+        script_name = 'SLURM Remote Conversion'
+        script_descr = f'''Use Slurm to convert data on your remote slurm cluster.
             By default BIOMERO only supplies ZARR to TIFF conversion.
-            
             1. First transfer data (as ZARR) to Slurm.
-            
             2. Second, run this script to convert to TIFF.
-            
             3. Third, run some workflow that works with TIFF input data, like cellpose.
-            
             **NOTE!** This step is normally handeled automatically by Slurm_Run_Workflow.
             Only use these modular scripts if you have a good reason to do so.
-            
             Connection ready? << {slurmClient.validate()} >>
-            ''',
+            '''
+    
+        script_version = "1.14.0"
+        client = scripts.client(
+            script_name,
+            script_descr,
             scripts.String(INPUT_DATA, grouping="01",
                            description=name_descr,
                            values=_datafiles),
@@ -72,7 +70,7 @@ def runScript():
                          description=cleanup_descr,
                          default=True),            
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
-            version="1.14.0",
+            version=script_version,
             authors=["Torec Luik"],
             institutions=["Amsterdam UMC"],
             contact='cellularimaging@amsterdamumc.nl',
@@ -89,15 +87,25 @@ def runScript():
             convert_from = scriptParams[SOURCE]
             convert_to = scriptParams[TARGET]
             cleanup = scriptParams[CLEANUP]
+            
+            # Connect to Omero
+            conn = BlitzGateway(client_obj=client)
+            user = conn.getUserId()
+            group = conn.getGroupFromContext().id
+            # Start tracking the workflow on a unique ID
+            wf_id = slurmClient.workflowTracker.initiate_workflow(
+                script_name,
+                "\n".join([script_descr, script_version]),
+                user,
+                group
+            )
             try:
                 slurmJob = slurmClient.run_conversion_workflow_job(
-                        zipfile, convert_from, convert_to)
+                        zipfile, convert_from, convert_to, wf_id)
                 logger.info(f"Conversion job submitted: {slurmJob}")
                 if not slurmJob.ok:
                     logger.error(f"Error converting data: {slurmJob.get_error()}")
                 else:
-                    
-                    conn = BlitzGateway(client_obj=client)
                     slurmJob.wait_for_completion(slurmClient, conn)
                     if not slurmJob.completed():
                         raise Exception(
