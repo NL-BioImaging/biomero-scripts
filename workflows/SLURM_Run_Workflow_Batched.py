@@ -258,6 +258,17 @@ def runScript():
                 raise ValueError(
                     f"Cannot process workflows: scripts ({PROC_SCRIPTS})\
                         not found in ({[unwrap(s.getName()) for s in scripts]}) ")
+            script_id = script_ids[0]  # go away with your list...
+                
+            user = conn.getUserId()
+            group = conn.getGroupFromContext().id
+            # Start tracking the workflow on a unique ID
+            wf_id = slurmClient.workflowTracker.initiate_workflow(
+                params.name,
+                "\n".join([params.description, params.version]),
+                user,
+                group
+            )
             logger.info('''
             # --------------------------------------------
             # :: 1. Split data into batches ::
@@ -335,19 +346,34 @@ def runScript():
             # :: 2. Run workflow(s) per batch ::
             # --------------------------------------------
             ''')
+            task_ids = {}
             logger.info(f"Starting batch scripts at {datetime.datetime.now()}")
             for i, batch in remaining_batches.items():
                 inputs[constants.transfer.IDS] = rlist([rlong(x)
                                                         # override ids
                                                         for x in batch])
-                for k in script_ids:
-                    script_id = int(k)
-                    # The last parameter is how long to wait as an RInt
-                    proc = svc.runScript(script_id, inputs, None)
-                    processes[i] = proc
-                    logger.info(f"Started script {k} at\
-                        {datetime.datetime.now()}:\
-                        Omero Job ID {proc.getJob()._id}")
+                persist_dict = {key: unwrap(value) for key, value in inputs.items()}
+                # persist_dict[constants.transfer.IDS] = [unwrap(value) for value in persist_dict[constants.transfer.IDS]]
+                script_id = int(script_id)
+                # The last parameter is how long to wait as an RInt
+                proc = svc.runScript(script_id, inputs, None)
+                processes[i] = proc
+                omero_job_id = proc.getJob()._id
+                logger.info(f"Started script {script_id} at\
+                    {datetime.datetime.now()}:\
+                    Omero Job ID {omero_job_id}")
+                task_id = slurmClient.workflowTracker.add_task_to_workflow(
+                    wf_id,
+                    PROC_SCRIPTS[0],
+                    params.version,
+                    persist_dict[constants.transfer.IDS],
+                    persist_dict
+                )
+                task_ids[i] = task_id
+                slurmClient.workflowTracker.start_task(task_id)
+                slurmClient.workflowTracker.add_job_id(task_id, 
+                                                       unwrap(omero_job_id))
+                    
             logger.info('''
             # --------------------------------------------
             # :: 3. Track all the batch jobs ::
@@ -360,17 +386,22 @@ def runScript():
                     logger.debug(f"Remaining batches: {remaining_batches}")
                     # loop the remaining processes
                     for i, batch in remaining_batches.items():
+                        task_id = task_ids[i]
                         process = processes[i]
                         return_code = process.poll()
                         logger.debug(
                             f"Process {process} polled: {return_code}")
+                        slurmClient.workflowTracker.update_task_status(
+                            task_id, 
+                            f"{return_code}")
                         if return_code:  # None if not finished
                             results = process.getResults(0)  # 0 ms; RtypeDict
                             if 'Message' in results:
-                                logger.info(results['Message'].getValue())
+                                result_msg = results['Message'].getValue()
+                                logger.info(result_msg)
                                 UI_messages['Message'].extend(
                                     [f">> Batch {i}: ",
-                                     results['Message'].getValue()])
+                                     result_msg])
 
                             if 'File_Annotation' in results:
                                 UI_messages['File_Annotation'].append(
@@ -383,12 +414,16 @@ def runScript():
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
+                                slurmClient.workflowTracker.complete_task(
+                                    task_id, result_msg + msg)
                             else:
                                 msg = f"Batch {i} - [{remaining_batches[i]}] failed!"
                                 logger.info(
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
+                                slurmClient.workflowTracker.fail_task(
+                                    task_id, result_msg + msg)
                         else:
                             pass
 
@@ -413,6 +448,7 @@ def runScript():
             # 7. Script output
             client.setOutput("Message",
                              rstring("\n".join(UI_messages['Message'])))
+            slurmClient.workflowTracker.complete_workflow(wf_id)
             for i, ann in enumerate(UI_messages['File_Annotation']):
                 client.setOutput(f"File_Annotation_{i}", robject(ann))
         finally:

@@ -20,6 +20,7 @@ import os
 import sys
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap
+from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 from biomero import SlurmClient, constants
 import logging
@@ -119,6 +120,17 @@ def runScript():
         email = unwrap(client.getInput(constants.workflow.EMAIL))
         if email == _DEFAULT_MAIL:
             email = None
+        # Connect to Omero
+        conn = BlitzGateway(client_obj=client)
+        user = conn.getUserId()
+        group = conn.getGroupFromContext().id
+        # Start tracking the workflow on a unique ID
+        wf_id = slurmClient.workflowTracker.initiate_workflow(
+            params.name,
+            "\n".join([params.description, params.version]),
+            user,
+            group
+        )
         time = unwrap(client.getInput("Duration"))
         kwargs = {}
         for i, k in enumerate(_workflow_params):
@@ -159,6 +171,9 @@ def runScript():
                                         poll_result.stderr)
                     else:
                         print_result += f"\n{job_status_dict}"
+                    job_state = job_status_dict[slurm_job_id]
+                    slurmClient.workflowTracker.update_task_status(
+                        task_id, job_state)
                 except Exception as e:
                     print_result += f" ERROR WITH JOB: {e}"
                     logger.warning(print_result)
@@ -166,6 +181,7 @@ def runScript():
             # 7. Script output
             logger.info(print_result)
             client.setOutput("Message", rstring(print_result))
+            slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()
 

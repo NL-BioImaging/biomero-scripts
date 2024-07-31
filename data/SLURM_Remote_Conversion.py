@@ -108,21 +108,25 @@ def runScript():
                 else:
                     slurmJob.wait_for_completion(slurmClient, conn)
                     if not slurmJob.completed():
-                        raise Exception(
-                            f"Conversion is not completed: {slurmJob}")
+                        log_msg = f"Conversion is not completed: {slurmJob}"
+                        slurmClient.workflowTracker.fail_task(slurmJob.task_id, 
+                                                              log_msg)
+                        raise Exception(log_msg)
                     else:
                         if cleanup:
                             slurmJob.cleanup(slurmClient)
                         msg = f"Converted {zipfile} from {convert_from} to {convert_to}"
                         logger.info(msg)
                         message += msg
+                        slurmClient.workflowTracker.complete_task(
+                            slurmJob.task_id, msg)
             except Exception as e:
                 message += f" ERROR WITH CONVERTING DATA: {e}"
                 logger.error(message)
                 raise e
 
             client.setOutput("Message", rstring(str(message)))
-
+            slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()
 
