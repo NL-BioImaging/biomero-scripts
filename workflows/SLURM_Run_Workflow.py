@@ -247,6 +247,8 @@ def runScript():
             email = getOmeroEmail(client, conn)  
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
+            
+            logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             # Start tracking the workflow on a unique ID
             wf_id = slurmClient.workflowTracker.initiate_workflow(
                 params.name,
