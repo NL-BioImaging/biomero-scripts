@@ -362,6 +362,8 @@ def runScript():
                 logger.info(f"Started script {script_id} at\
                     {datetime.datetime.now()}:\
                     Omero Job ID {omero_job_id}")
+                # TODO: don't do this, use a different domain (driven design)
+                # Now, views will listen to events and not know what they get
                 task_id = slurmClient.workflowTracker.add_task_to_workflow(
                     wf_id,
                     PROC_SCRIPTS[0],
@@ -391,6 +393,7 @@ def runScript():
                         return_code = process.poll()
                         logger.debug(
                             f"Process {process} polled: {return_code}")
+                        # TODO don't
                         slurmClient.workflowTracker.update_task_status(
                             task_id, 
                             f"{return_code}")

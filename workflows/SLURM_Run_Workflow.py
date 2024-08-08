@@ -339,10 +339,15 @@ def runScript():
 
                     for slurm_job_id, job_state in job_status_dict.items():
                         logger.debug(f"Job {slurm_job_id} is {job_state}.")
+                        progress = slurmClient.get_active_job_progress(
+                            slurm_job_id)
                         task_id = task_ids[slurm_job_id]
                         slurmClient.workflowTracker.update_task_status(
                             task_id, 
-                            job_state)
+                            job_state) 
+                        slurmClient.workflowTracker.update_task_progress(
+                            task_id, 
+                            progress)                        
                         if job_state == "TIMEOUT":
                             log_msg = f"Job {slurm_job_id} is TIMEOUT."
                             UI_messages += log_msg

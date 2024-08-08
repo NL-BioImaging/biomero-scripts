@@ -105,7 +105,8 @@ def runScript():
             # Job log
             if unwrap(client.getInput(RUNNING_JOB)):
                 try:
-                    update = slurmClient.get_active_job_progress(slurm_job_id)
+                    latest_progress = slurmClient.get_active_job_progress(slurm_job_id)
+                    update = f"Progress: {latest_progress}\n"
                     message += update
                 except Exception as e:
                     message += f" Tailing logfile failed: {e}\n"

@@ -164,6 +164,8 @@ def runScript():
                 try:
                     tup = slurmClient.check_job_status(
                         [slurm_job_id])
+                    progress = slurmClient.get_active_job_progress(
+                        slurm_job_id)
                     (job_status_dict, poll_result) = tup
                     logger.debug(f"{poll_result.stdout},{job_status_dict}")
                     if not poll_result.ok:
@@ -174,6 +176,8 @@ def runScript():
                     job_state = job_status_dict[slurm_job_id]
                     slurmClient.workflowTracker.update_task_status(
                         task_id, job_state)
+                    slurmClient.workflowTracker.update_task_progress(
+                        task_id, progress)
                 except Exception as e:
                     print_result += f" ERROR WITH JOB: {e}"
                     logger.warning(print_result)
