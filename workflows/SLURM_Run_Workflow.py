@@ -295,7 +295,7 @@ def runScript():
                     if not slurmJob.completed():
                         log_msg = f"Conversion is not completed: {slurmJob}"
                         slurmClient.workflowTracker.fail_task(slurmJob.task_id, 
-                                                              log_msg)
+                                                              "Conversion failed")
                         raise Exception(log_msg)
                     else:
                         slurmJob.cleanup(slurmClient)
@@ -360,7 +360,7 @@ def runScript():
                             # log_string += log_msg
                             slurm_job_id_list.remove(slurm_job_id)
                             slurmClient.workflowTracker.fail_task(task_id, 
-                                                                  log_msg)
+                                                                  f"Slurm job state {job_state}")
                             # slurm_job_id_list.append(new_job_id)
                         elif job_state == "COMPLETED":
                             # 5. Retrieve SLURM images
@@ -407,7 +407,7 @@ def runScript():
                             UI_messages += log_msg
                             slurm_job_id_list.remove(slurm_job_id)
                             slurmClient.workflowTracker.fail_task(task_id, 
-                                                                  log_msg)
+                                                                  f"Slurm job state {job_state}")
                         elif (job_state == "PENDING"
                                 or job_state == "RUNNING"):
                             # expected
@@ -421,7 +421,7 @@ def runScript():
                             UI_messages += log_msg
                             slurm_job_id_list.remove(slurm_job_id)
                             slurmClient.workflowTracker.fail_task(task_id, 
-                                                                  log_msg)
+                                                                  f"Slurm job state {job_state}")
 
                     # wait for 10 seconds before checking again
                     conn.keepAlive()  # keep the connection alive
@@ -712,6 +712,9 @@ def importResultsToOmero(client: omscripts.client,
             constants.results.OUTPUT_ATTACH_TABLE
         ] = rbool(False)
 
+    # Wait for Slurm Accounting to update
+    wait_for_job_completion(slurmClient, slurm_job_id)
+
     logger.info(f"Running import script {script_id} with inputs: {inputs}")
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     task_id = slurmClient.workflowTracker.add_task_to_workflow(
@@ -723,9 +726,43 @@ def importResultsToOmero(client: omscripts.client,
     )
     slurmClient.workflowTracker.start_task(task_id)
     rv = runOMEROScript(client, svc, script_id, inputs)
-    msg = unwrap(rv['Message'])
+    try:
+        msg = unwrap(rv['Message'])
+    except KeyError as e:
+        slurmClient.workflowTracker.fail_task(task_id, 
+                                              "Import failed")
+        raise e
     slurmClient.workflowTracker.complete_task(task_id, msg)
     return rv
+
+
+def wait_for_job_completion(slurmClient, slurm_job_id, timeout=500, interval=15):
+    """
+    Waits for the slurm job to complete by polling at regular intervals.
+
+    Parameters:
+        slurmClient: The SLURM client used to query job status.
+        slurm_job_id: The ID of the SLURM job to wait for.
+        timeout (int): Maximum time to wait for the job to complete (in seconds).
+        interval (int): Time between each check (in seconds).
+
+    Raises:
+        TimeoutError: If the job does not complete within the timeout period.
+    """
+    start_time = timesleep.time()
+    
+    while True:
+        # Check if the job is completed
+        if str(slurm_job_id) in slurmClient.list_completed_jobs():
+            return  # Job is complete, exit the function
+        
+        # Check if we've hit the timeout
+        elapsed_time = timesleep.time() - start_time
+        if elapsed_time > timeout:
+            raise TimeoutError(f"Job {slurm_job_id} not found in Slurm Accounting within {timeout} seconds.")
+        
+        # Wait for the next interval before checking again
+        timesleep.sleep(interval)
 
 
 def get_project_name_ids(conn, parent_id):

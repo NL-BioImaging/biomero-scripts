@@ -110,7 +110,7 @@ def runScript():
                     if not slurmJob.completed():
                         log_msg = f"Conversion is not completed: {slurmJob}"
                         slurmClient.workflowTracker.fail_task(slurmJob.task_id, 
-                                                              log_msg)
+                                                              "Conversion failed")
                         raise Exception(log_msg)
                     else:
                         if cleanup:

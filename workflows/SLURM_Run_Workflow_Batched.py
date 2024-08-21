@@ -373,8 +373,7 @@ def runScript():
                 )
                 task_ids[i] = task_id
                 slurmClient.workflowTracker.start_task(task_id)
-                slurmClient.workflowTracker.add_job_id(task_id, 
-                                                       unwrap(omero_job_id))
+                # slurmClient.workflowTracker.add_job_id(task_id, unwrap(omero_job_id))
                     
             logger.info('''
             # --------------------------------------------
@@ -426,7 +425,7 @@ def runScript():
                                 UI_messages['Message'].extend(
                                     [msg])
                                 slurmClient.workflowTracker.fail_task(
-                                    task_id, result_msg + msg)
+                                    task_id, "Batch failed")
                         else:
                             pass
 
