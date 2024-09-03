@@ -36,6 +36,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
+VERSION = "1.14.0"
 
 
 def runScript():
@@ -56,8 +57,8 @@ def runScript():
         # These parameters will be recognised by the Insight and web clients
         # and populated with the currently selected Image(s)/Dataset(s)
         params = JobParams()
-        params.authors = ["Torec Luik"]
-        params.version = "1.14.0"
+        params.authors = ["Torec Luik"]        
+        params.version = VERSION
         params.description = f'''Script to run a workflow on the Slurm cluster.
 
         This runs a script remotely on your Slurm cluster.
@@ -252,7 +253,7 @@ def runScript():
             # Start tracking the workflow on a unique ID
             wf_id = slurmClient.workflowTracker.initiate_workflow(
                 params.name,
-                "\n".join([params.description, params.version]),
+                "\n".join([params.description, VERSION]),
                 user,
                 group
             )
@@ -512,7 +513,7 @@ def exportImageToSLURM(client: omscripts.client,
     svc = conn.getScriptService()
     scripts = svc.getScripts()
     # force just one script, why is it an array?
-    script_id, script_version, script_name = [(unwrap(s.id), unwrap(s.getVersion()), unwrap(s.getName())) 
+    script_id, biomero, script_name = [(unwrap(s.id), unwrap(s.getVersion()), unwrap(s.getName())) 
                                  for s in scripts if unwrap(s.getName()) in EXPORT_SCRIPTS][0]
     if not script_id:
         raise ValueError(
@@ -539,7 +540,7 @@ def exportImageToSLURM(client: omscripts.client,
     task_id = slurmClient.workflowTracker.add_task_to_workflow(
         wf_id,
         script_name,
-        script_version,
+        VERSION,
         persist_dict[constants.transfer.IDS],
         persist_dict
     )
@@ -720,7 +721,7 @@ def importResultsToOmero(client: omscripts.client,
     task_id = slurmClient.workflowTracker.add_task_to_workflow(
         wf_id,
         script_name,
-        script_version,
+        VERSION,
         {constants.transfer.IDS: unwrap(client.getInput(constants.transfer.IDS))},
         persist_dict
     )
