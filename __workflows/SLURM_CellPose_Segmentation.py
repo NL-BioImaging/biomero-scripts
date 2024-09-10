@@ -47,7 +47,9 @@ def runScript():
         2. Second, run the {constants.CONVERSION_SCRIPT} script to convert to TIFF.
         3. Third, run this workflow for Cellpose Segmentation.
         4. Finally, retrieve your data with {constants.IMAGE_IMPORT_SCRIPT}.
-        
+        **NOTE!** This step is normally handeled automatically by Slurm_Run_Workflow.
+            Only use these modular scripts if you have a good reason to do so.
+            
         Specifically will run:
         https://hub.docker.com/r/torecluik/t_nucleisegmentation-cellpose
 
