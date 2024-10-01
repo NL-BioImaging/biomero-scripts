@@ -307,7 +307,7 @@ def saveImagesToOmeroAsDataset(conn, folder, client, dataset_id, new_dataset=Tru
 
                 img_data = to_5d(img_data)
 
-                logger.debug("Reshaped:", img_data.shape)
+                logger.debug(f"Reshaped:{img_data.shape}")
 
                 if unwrap(client.getInput(
                         constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME)):
