@@ -194,9 +194,21 @@ def save_as_ome_tiff(conn, image, folder_name=None):
             f.write(piece)
 
 
-def save_as_zarr(conn, suuid, image, folder_name=None):
+def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None):
+    # TODO use raw converter directly
+    # (1) find out the plate's file
+    # (2) (a) if not zarr: subprocess raw on that file 
+    # (2) (b) if zarr: copy/scp directly
+    save_as_zarr(conn, suuid, plate, folder_name, constants.transfer.DATA_TYPE_PLATE)
+
+
+def save_image_as_zarr(conn, suuid, image, folder_name=None):
+    save_as_zarr(conn, suuid, image, folder_name, constants.transfer.DATA_TYPE_IMAGE)
+    
+
+def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
     extension = "zarr"
-    name = os.path.basename(image.getName())
+    name = os.path.basename(object.getName())
     img_name = "%s.%s" % (name, extension)
     if folder_name is not None:
         img_name = os.path.join(folder_name, img_name)
@@ -217,7 +229,13 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output "{exp_dir}" export Image:{image.getId()}'
+    if data_type == constants.transfer.DATA_TYPE_PLATE:
+        command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output "{exp_dir}" export Plate:{object.getId()}'
+    elif data_type == constants.transfer.DATA_TYPE_IMAGE:
+        command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output "{exp_dir}" export Image:{object.getId()}'
+    else:
+        raise ValueError(f"No OMERO ZARR command known for data_type: {data_type}")
+    log(f"OMERO ZARR command for {data_type}: {command}")
     cmd = cmd1 + " && " + command
     logger.debug(cmd)
     process = subprocess.Popen(
@@ -232,7 +250,7 @@ def save_as_zarr(conn, suuid, image, folder_name=None):
     if process.returncode == 0:
         log(f"OME ZARR CLI: {stdout}")
         logger.debug(img_name)
-        os.rename(f"{exp_dir}/{image.getId()}.zarr", img_name)
+        os.rename(f"{exp_dir}/{object.getId()}.zarr", img_name)
     return  # shortcut
 
 
@@ -313,7 +331,7 @@ def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
                                c, g_scale, zoom_percent, folder_name)
 
 
-def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str):
+def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str, client):
 
     # for params with default values, we can get the value directly
     split_cs = script_params[constants.transfer.CHANNELS]
@@ -409,18 +427,23 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
             message += "No image found in dataset(s)"
             return None, message
     elif data_type == constants.transfer.DATA_TYPE_PLATE:
-        images = []
-        wells = []
-        for plate in objects:
-            wells.extend(list(plate.listChildren()))
-        for well in wells:
-            nr_samples = well.countWellSample()
-            for index in range(0, nr_samples):
-                image = well.getImage(index)
-                images.append(image)
-        if not images:
-            message += "No image found in plate(s)"
-            return None, message
+        if format == constants.transfer.FORMAT_ZARR:
+            log("Processing %s Plates to ZARR, not individual images." % len(objects))         
+            images = []  # skip the rest of the processing below
+            wells = []
+        else:
+            images = []
+            wells = []
+            for plate in objects:
+                wells.extend(list(plate.listChildren()))
+            for well in wells:
+                nr_samples = well.countWellSample()
+                for index in range(0, nr_samples):
+                    image = well.getImage(index)
+                    images.append(image)
+            if not images:
+                message += "No image found in plate(s)"
+                return None, message
     else:
         images = objects
 
@@ -439,7 +462,13 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
 
     ids = []
     # do the saving to disk
-
+    
+    if format == constants.transfer.FORMAT_ZARR:
+        for plate in objects:
+            log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
+            save_plate_as_zarr(conn, suuid, plate, folder_name, client)
+            write_logfile(exp_dir)
+            
     for img in images:
         log("Processing image: ID %s: %s" % (img.id, img.getName()))
         pixels = img.getPrimaryPixels()
@@ -456,7 +485,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_ZARR:
-            save_as_zarr(conn, suuid, img, folder_name)
+            save_image_as_zarr(conn, suuid, img, folder_name)
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -514,11 +543,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
                 img._re.close()
 
         # write log for exported images (not needed for ome-tiff)
-        name = 'Batch_Image_Export.txt'
-        with open(os.path.join(exp_dir, name), 'w') as log_file:
-            for s in log_strings:
-                log_file.write(s)
-                log_file.write("\n")
+        write_logfile(exp_dir)
 
     if len(os.listdir(exp_dir)) == 0:
         return None, "No files exported. See 'info' for more details"
@@ -559,6 +584,13 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
         namespace=namespace, mimetype=mimetype)
     message += ann_message
     return file_annotation, message
+
+def write_logfile(exp_dir):
+    name = 'Batch_Image_Export.txt'
+    with open(os.path.join(exp_dir, name), 'w') as log_file:
+        for s in log_strings:
+            log_file.write(s)
+            log_file.write("\n")
 
 
 def run_script():
@@ -726,7 +758,7 @@ def run_script():
 
             # call the main script - returns a file annotation wrapper
             file_annotation, message = batch_image_export(
-                conn, script_params, slurmClient, suuid)
+                conn, script_params, slurmClient, suuid, client)
 
             stop_time = datetime.now()
             log("Duration: %s" % str(stop_time-start_time))
