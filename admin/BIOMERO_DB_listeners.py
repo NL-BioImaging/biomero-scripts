@@ -51,26 +51,26 @@ def runScript():
         message = ""
         enable_job_accounting = unwrap(client.getInput("Job Accounting"))
         if enable_job_accounting: 
-            message += "|| Enabled Job Accounting listening"
+            message += " || Enabled Job Accounting listening"
         enable_job_progress = unwrap(client.getInput("Job Progress"))
         if enable_job_progress: 
-            message += "|| Enabled Job Progress listening"
+            message += " || Enabled Job Progress listening"
         enable_workflow_analytics = unwrap(client.getInput("Workflow Analytics"))
         if enable_workflow_analytics: 
-            message += "|| Enabled Workflow Analytics listening"
+            message += " || Enabled Workflow Analytics listening"
         keep_listening = unwrap(client.getInput("Keep listening"))
         if keep_listening:
             refresh_rate = unwrap(client.getInput("Refresh rate (seconds)"))
-            message += f"|| Will keep listening while script runs ({refresh_rate}s)"
+            message += f" || Will keep listening while script runs ({refresh_rate}s)"
         repop = unwrap(client.getInput("Repopulate all tables"))
         if repop:
-            message += "|| Will repopulate all view tables"
+            message += " || Will repopulate all view tables"
         logger.info("Listening for BIOMERO DB: "+message)
-        with SlurmClient(track_workflows=True,
-                         enable_job_accounting=enable_job_accounting,
-                         enable_job_progress=enable_job_progress,
-                         enable_workflow_analytics=enable_workflow_analytics
-                         ) as slurmClient:
+        with SlurmClient.from_config() as slurmClient:
+            slurmClient.track_workflows = True,
+            slurmClient.enable_job_accounting = enable_job_accounting,
+            slurmClient.enable_job_progress = enable_job_progress,
+            slurmClient.enable_workflow_analytics = enable_workflow_analytics
             slurmClient.initialize_analytics_system(repop)
             logger.info("Repopulated BIOMERO DB view tables")
             listeners = []
@@ -91,7 +91,7 @@ def runScript():
                 logger.debug("Updated BIOMERO DB view tables")
                 time.sleep(refresh_rate)
 
-        message += "Stopping listening"
+        message += " || Done"
         client.setOutput("Message", rstring(str(message)))
 
     finally:
