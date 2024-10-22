@@ -16,6 +16,7 @@ from uuid import UUID
 import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
+from omero.sys import Parameters
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
@@ -597,16 +598,33 @@ def importResultsToOmero(client: omscripts.client,
     parent_id = first_id
     parent_data_type = data_type
     if data_type == constants.transfer.DATA_TYPE_IMAGE:
-        datasets = [d.id for d in conn.getObjects(
-            constants.transfer.DATA_TYPE_DATASET, opts={'image': first_id})]
-        plates = [d.id for d in conn.getObjects(
-            constants.transfer.DATA_TYPE_PLATE, opts={'image': first_id})]
-        logger.debug(f"Datasets:{datasets} Plates:{plates}")
-        if len(plates) > len(datasets):
-            parent_id = plates[0]
+        q = conn.getQueryService()
+        params = Parameters()
+        params.map = {"image_id": rlong(first_id)}
+        logger.debug(params)
+        resultPlates = q.projection(
+            "SELECT DISTINCT p.id FROM Plate p "
+            " JOIN p.wells w "
+            " JOIN w.wellSamples ws "
+            " JOIN ws.image i "
+            " WHERE i.id = :image_id",
+            params,
+            conn.SERVICE_OPTS
+        )
+        resultDatasets = q.projection(
+            "SELECT DISTINCT d.id FROM Dataset d "
+            " JOIN d.imageLinks dil "
+            " JOIN dil.child i "
+            " WHERE i.id = :image_id",
+            params,
+            conn.SERVICE_OPTS
+        )
+        logger.debug(f"Projects:{resultDatasets} Plates:{resultPlates}")
+        if len(resultPlates) > len(resultDatasets):
+            parent_id = resultPlates[0][0]
             parent_data_type = constants.transfer.DATA_TYPE_PLATE
         else:
-            parent_id = datasets[0]
+            parent_id = resultDatasets[0][0]
             parent_data_type = constants.transfer.DATA_TYPE_DATASET
 
     logger.debug(f"Determined parent to be {parent_data_type}:{parent_id}")
