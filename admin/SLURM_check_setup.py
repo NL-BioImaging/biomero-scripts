@@ -32,7 +32,7 @@ def runScript():
         '''Check Slurm setup, e.g. available workflows.
         ''',
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
-        version="1.14.0",
+        version="2.0.0-alpha",
         authors=["Torec Luik"],
         institutions=["Amsterdam UMC"],
         contact='cellularimaging@amsterdamumc.nl',

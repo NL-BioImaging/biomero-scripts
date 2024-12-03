@@ -40,7 +40,7 @@ def runScript():
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "1.14.0"
+        params.version = "2.0.0-alpha"
         params.description = f'''Script to run CellPose on slurm cluster.
         1. First run the {constants.IMAGE_EXPORT_SCRIPT} script to export your data
         to the cluster.
