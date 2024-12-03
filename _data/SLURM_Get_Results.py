@@ -263,99 +263,119 @@ def to_5d(*arys):
 
 
 def add_image_annotations(conn, slurmClient, object_id, job_id):
-    try:
-        task_id = slurmClient.jobAccounting.get_task_id(job_id)
-        task = slurmClient.workflowTracker.repository.get(task_id)
-        wf_id = task.workflow_id
-        wf = slurmClient.workflowTracker.repository.get(wf_id)
-        
-        map_ann_ids = []
-        
-        # Extract version from the description using regex
-        version_match = re.search(r'\d+\.\d+\.\d+', wf.description)
-        workflow_version = version_match.group(0) if version_match else "Unknown"
-        
-        workflow_annotation_dict = {
-            'Workflow_ID': str(wf_id),
-            'Name': wf.name,
-            'Version': str(workflow_version),
-            'Created_On': wf._created_on.isoformat(),
-            'Modified_On': wf._modified_on.isoformat(),
-            'Task_IDs': ", ".join([str(tid) for tid in wf.tasks]),
-        }        
-        object_type = "Image"  # Set to Image when it's a dataset
-        ns_wf = "biomero/workflow"
-        map_ann_id = ezomero.post_map_annotation(
-            conn=conn,
-            object_type=object_type,
-            object_id=object_id,
-            kv_dict=workflow_annotation_dict,
-            ns=ns_wf,
-            across_groups=False  # Set to False if you don't want cross-group behavior
-        )       
-        map_ann_ids.append(map_ann_id)
-        
-        for tid in wf.tasks:
-            task = slurmClient.workflowTracker.repository.get(tid)
-            # Add FAIR metadata
-            task_annotation_dict = {
-                'Task_ID': str(task._id),
+    object_type = "Image"  # Set to Image when it's a dataset
+    ns_wf = "biomero/workflow"
+    if slurmClient.track_workflows:
+        try:
+            task_id = slurmClient.jobAccounting.get_task_id(job_id)
+            task = slurmClient.workflowTracker.repository.get(task_id)
+            wf_id = task.workflow_id
+            wf = slurmClient.workflowTracker.repository.get(wf_id)
+            
+            map_ann_ids = []
+            
+            # Extract version from the description using regex
+            version_match = re.search(r'\d+\.\d+\.\d+', wf.description)
+            workflow_version = version_match.group(0) if version_match else "Unknown"
+            
+            workflow_annotation_dict = {
                 'Workflow_ID': str(wf_id),
-                'Workflow_Name': wf.name,
-                'Name': task.task_name,
-                'Version': task.task_version,
-                'Created_On': task._created_on.isoformat(),
-                'Modified_On': task._modified_on.isoformat(),
-                'Status': task.status,
-                'Input_Data': task.input_data,
-                'Job_IDs': ", ".join([str(jid) for jid in task.job_ids]),
-            }
-            # Add parameters
-            if task.params:
-                task_annotation_dict.update({f"Param_{key}": str(value) for key, value in task.params.items()})
-            # task metadata
-            ns_task = ns_wf + "/task" + f"/{task.task_name}"
+                'Name': wf.name,
+                'Version': str(workflow_version),
+                'Created_On': wf._created_on.isoformat(),
+                'Modified_On': wf._modified_on.isoformat(),
+                'Task_IDs': ", ".join([str(tid) for tid in wf.tasks]),
+            }        
+            logger.debug(f"Adding metadata: {workflow_annotation_dict}")
             map_ann_id = ezomero.post_map_annotation(
                 conn=conn,
                 object_type=object_type,
                 object_id=object_id,
-                kv_dict=task_annotation_dict,
-                ns=ns_task,
+                kv_dict=workflow_annotation_dict,
+                ns=ns_wf,
                 across_groups=False  # Set to False if you don't want cross-group behavior
-            )
+            )       
             map_ann_ids.append(map_ann_id)
             
-            for jid in task.job_ids:
-                job_dict = {
-                    'Job_ID': str(jid),
-                    'Task_ID': str(task_id),
+            for tid in wf.tasks:
+                task = slurmClient.workflowTracker.repository.get(tid)
+                # Add FAIR metadata
+                task_annotation_dict = {
+                    'Task_ID': str(task._id),
                     'Workflow_ID': str(wf_id),
-                    'Result_Message': task.result_message,
+                    'Workflow_Name': wf.name,
+                    'Name': task.task_name,
+                    'Version': task.task_version,
+                    'Created_On': task._created_on.isoformat(),
+                    'Modified_On': task._modified_on.isoformat(),
+                    'Status': task.status,
+                    'Input_Data': task.input_data,
+                    'Job_IDs': ", ".join([str(jid) for jid in task.job_ids]),
                 }
-                # Add the specific job-script command
-                if task.results and "command" in task.results[0]:
-                    job_dict['Command'] = task.results[0]['command']
-                # and environment variables
-                if task.results and "env" in task.results[0]:
-                    job_dict.update({f"Env_{key}": str(value) for key, value in task.results[0]['env'].items()})
-                # job metadata
-                ns_task_job = ns_task + "/job"
+                # Add parameters
+                if task.params:
+                    task_annotation_dict.update({f"Param_{key}": str(value) for key, value in task.params.items()})
+                # task metadata
+                ns_task = ns_wf + "/task" + f"/{task.task_name}"
+                logger.debug(f"Adding metadata: {task_annotation_dict}")
                 map_ann_id = ezomero.post_map_annotation(
                     conn=conn,
                     object_type=object_type,
                     object_id=object_id,
-                    kv_dict=job_dict,
-                    ns=ns_task_job,
+                    kv_dict=task_annotation_dict,
+                    ns=ns_task,
                     across_groups=False  # Set to False if you don't want cross-group behavior
                 )
                 map_ann_ids.append(map_ann_id)
-        
-        if map_ann_ids:
-            logger.info(f"Successfully added annotations to {object_type} ID: {object_id}. MapAnnotation IDs: {map_ann_ids}")
-        else:
-            logger.warning(f"MapAnnotation created for {object_type} ID: {object_id}, but no ID was returned.")
-    except Exception as e:
-        logger.error(f"Failed to add annotations to {object_type} ID: {object_id}. Error: {str(e)}")
+                
+                for jid in task.job_ids:
+                    job_dict = {
+                        'Job_ID': str(jid),
+                        'Task_ID': str(task_id),
+                        'Workflow_ID': str(wf_id),
+                        'Result_Message': task.result_message,
+                    }
+                    # Add the specific job-script command
+                    if task.results and "command" in task.results[0]:
+                        job_dict['Command'] = task.results[0]['command']
+                    # and environment variables
+                    if task.results and "env" in task.results[0]:
+                        job_dict.update({f"Env_{key}": str(value) for key, value in task.results[0]['env'].items()})
+                    # job metadata
+                    ns_task_job = ns_task + "/job"
+                    logger.debug(f"Adding metadata: {job_dict}")
+                    map_ann_id = ezomero.post_map_annotation(
+                        conn=conn,
+                        object_type=object_type,
+                        object_id=object_id,
+                        kv_dict=job_dict,
+                        ns=ns_task_job,
+                        across_groups=False  # Set to False if you don't want cross-group behavior
+                    )
+                    map_ann_ids.append(map_ann_id)
+            
+            if map_ann_ids:
+                logger.info(f"Successfully added annotations to {object_type} ID: {object_id}. MapAnnotation IDs: {map_ann_ids}")
+            else:
+                logger.warning(f"MapAnnotation created for {object_type} ID: {object_id}, but no ID was returned.")
+        except Exception as e:
+            logger.error(f"Failed to add annotations to {object_type} ID: {object_id}. Error: {str(e)}")
+    else:  # We have no access to workflow tracking, log very limited metadata
+        ns_task = ns_wf + "/task"
+        ns_task_job = ns_task + "/job"
+        job_dict = {
+            'Job_ID': str(job_id),
+        }
+        # job metadata
+        logger.debug(f"Track workflows is off. Adding only limited metadata: {job_dict}")
+        map_ann_id = ezomero.post_map_annotation(
+            conn=conn,
+            object_type=object_type,
+            object_id=object_id,
+            kv_dict=job_dict,
+            ns=ns_task_job,
+            across_groups=False  # Set to False if you don't want cross-group behavior
+        )
 
 
 def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, new_dataset=True):
