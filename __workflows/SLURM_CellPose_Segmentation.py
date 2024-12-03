@@ -20,6 +20,7 @@ import os
 import sys
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap
+from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 from biomero import SlurmClient, constants
 import logging
@@ -41,12 +42,16 @@ def runScript():
         params.authors = ["Torec Luik"]
         params.version = "1.14.0"
         params.description = f'''Script to run CellPose on slurm cluster.
-        First run the {constants.IMAGE_EXPORT_SCRIPT} script to export your data
+        1. First run the {constants.IMAGE_EXPORT_SCRIPT} script to export your data
         to the cluster.
-
+        2. Second, run the {constants.CONVERSION_SCRIPT} script to convert to TIFF.
+        3. Third, run this workflow for Cellpose Segmentation.
+        4. Finally, retrieve your data with {constants.IMAGE_IMPORT_SCRIPT}.
+        **NOTE!** This step is normally handeled automatically by Slurm_Run_Workflow.
+            Only use these modular scripts if you have a good reason to do so.
+            
         Specifically will run:
         https://hub.docker.com/r/torecluik/t_nucleisegmentation-cellpose
-
 
         This runs a script remotely on the Slurm cluster.
         Connection ready? {slurmClient.validate()}
@@ -94,7 +99,7 @@ def runScript():
                                     values=versions)
             input_list.append(wf_v)
             for i, (k, param) in enumerate(wfparams.items()):
-                logger.debug(i, k, param)
+                logger.debug(f"{i}, {k}, {param}")
                 logging.info(param)
                 p = slurmClient.convert_cytype_to_omtype(
                     param["cytype"],
@@ -119,6 +124,17 @@ def runScript():
         email = unwrap(client.getInput(constants.workflow.EMAIL))
         if email == _DEFAULT_MAIL:
             email = None
+        # Connect to Omero
+        conn = BlitzGateway(client_obj=client)
+        user = conn.getUserId()
+        group = conn.getGroupFromContext().id
+        # Start tracking the workflow on a unique ID
+        wf_id = slurmClient.workflowTracker.initiate_workflow(
+            params.name,
+            "\n".join([params.description, params.version]),
+            user,
+            group
+        )
         time = unwrap(client.getInput("Duration"))
         kwargs = {}
         for i, k in enumerate(_workflow_params):
@@ -134,13 +150,13 @@ def runScript():
                 logger.debug(update_result.__dict__)
             except Exception as e:
                 logger.warning(f"Error updating SLURM scripts:{e}")
-
-            cp_result, slurm_job_id = slurmClient.run_workflow(
+            cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
                 workflow_name='cellpose',
                 workflow_version=cellpose_version,
                 input_data=zipfile,
                 email=email,
                 time=time,
+                wf_id=wf_id,
                 **kwargs
             )
             if not cp_result.ok:
@@ -152,6 +168,8 @@ def runScript():
                 try:
                     tup = slurmClient.check_job_status(
                         [slurm_job_id])
+                    progress = slurmClient.get_active_job_progress(
+                        slurm_job_id)
                     (job_status_dict, poll_result) = tup
                     logger.debug(f"{poll_result.stdout},{job_status_dict}")
                     if not poll_result.ok:
@@ -159,6 +177,11 @@ def runScript():
                                         poll_result.stderr)
                     else:
                         print_result += f"\n{job_status_dict}"
+                    job_state = job_status_dict[slurm_job_id]
+                    slurmClient.workflowTracker.update_task_status(
+                        task_id, job_state)
+                    slurmClient.workflowTracker.update_task_progress(
+                        task_id, progress)
                 except Exception as e:
                     print_result += f" ERROR WITH JOB: {e}"
                     logger.warning(print_result)
@@ -166,6 +189,7 @@ def runScript():
             # 7. Script output
             logger.info(print_result)
             client.setOutput("Message", rstring(print_result))
+            slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()
 

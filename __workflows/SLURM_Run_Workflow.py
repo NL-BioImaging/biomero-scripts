@@ -12,6 +12,7 @@
 from __future__ import print_function
 import sys
 import os
+from uuid import UUID
 import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
@@ -36,6 +37,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
+VERSION = "1.14.0"
 
 
 def runScript():
@@ -56,8 +58,8 @@ def runScript():
         # These parameters will be recognised by the Insight and web clients
         # and populated with the currently selected Image(s)/Dataset(s)
         params = JobParams()
-        params.authors = ["Torec Luik"]
-        params.version = "1.14.0"
+        params.authors = ["Torec Luik"]        
+        params.version = VERSION
         params.description = f'''Script to run a workflow on the Slurm cluster.
 
         This runs a script remotely on your Slurm cluster.
@@ -243,8 +245,20 @@ def runScript():
             # Connect to Omero
             conn = BlitzGateway(client_obj=client)
             conn.SERVICE_OPTS.setOmeroGroup(-1)
-            email = getOmeroEmail(client, conn)  # retrieve an email for Slurm
-
+            # retrieve user data: email for Slurm, user, group
+            email = getOmeroEmail(client, conn)  
+            user = conn.getUserId()
+            group = conn.getGroupFromContext().id
+            
+            logger.debug(f"User: {user} - Group: {group} - Email: {email}")
+            # Start tracking the workflow on a unique ID
+            wf_id = slurmClient.workflowTracker.initiate_workflow(
+                params.name,
+                "\n".join([params.description, VERSION]),
+                user,
+                group
+            )
+            
             logger.info('''
             # --------------------------------------------
             # :: 1. Push selected data to Slurm ::
@@ -254,7 +268,8 @@ def runScript():
             zipfile = createFileName(client, conn)
             # Send data to Slurm, zipped, over SSH
             # Uses _SLURM_Image_Transfer script from Omero
-            rv = exportImageToSLURM(client, conn, zipfile)
+            rv, task_id = exportImageToSLURM(client, conn, slurmClient, 
+                                             zipfile, wf_id)
             logger.debug(f"Ran data export: {rv.keys()}, {rv}")
             if 'Message' in rv:
                 logger.info(rv['Message'].getValue())  # log
@@ -267,11 +282,12 @@ def runScript():
             ''')
             # Note: Moved unzipping data to transfer script, removed from here            
             slurm_job_ids = {}
+            task_ids = {}
             # Quick git pull on Slurm for latest version of job scripts
             update_result = slurmClient.update_slurm_scripts()
             logger.debug(update_result.__dict__)
             slurmJob = slurmClient.run_conversion_workflow_job(
-                zipfile, 'zarr', 'tiff')
+                zipfile, 'zarr', 'tiff', wf_id)
             logger.info(f"Conversion job: {slurmJob}")
             if not slurmJob.ok:
                 logger.warning(f"Error converting data: {slurmJob.get_error()}")
@@ -279,10 +295,15 @@ def runScript():
                 try:
                     slurmJob.wait_for_completion(slurmClient, conn)
                     if not slurmJob.completed():
-                        raise Exception(
-                            f"Conversion is not completed: {slurmJob}")
+                        log_msg = f"Conversion is not completed: {slurmJob}"
+                        slurmClient.workflowTracker.fail_task(slurmJob.task_id, 
+                                                              "Conversion failed")
+                        raise Exception(log_msg)
                     else:
                         slurmJob.cleanup(slurmClient)
+                        msg = f"Conversion completed: {slurmJob}"
+                        slurmClient.workflowTracker.complete_task(
+                            slurmJob.task_id, msg)
                 except Exception as e:
                     UI_messages += f" ERROR WITH CONVERTING DATA: {e}"
                     raise e
@@ -294,15 +315,17 @@ def runScript():
                 ''')
                 for wf_name in workflows:
                     if unwrap(client.getInput(wf_name)):
-                        UI_messages, slurm_job_id = run_workflow(
+                        UI_messages, slurm_job_id, wf_id, task_id = run_workflow(
                             slurmClient,
                             _workflow_params[wf_name],
                             client,
                             UI_messages,
                             zipfile,
                             email,
-                            wf_name)
+                            wf_name,
+                            wf_id)
                         slurm_job_ids[wf_name] = slurm_job_id
+                        task_ids[slurm_job_id] = task_id
 
                 # 4. Poll SLURM results
                 slurm_job_id_list = [
@@ -318,6 +341,15 @@ def runScript():
 
                     for slurm_job_id, job_state in job_status_dict.items():
                         logger.debug(f"Job {slurm_job_id} is {job_state}.")
+                        progress = slurmClient.get_active_job_progress(
+                            slurm_job_id)
+                        task_id = task_ids[slurm_job_id]
+                        slurmClient.workflowTracker.update_task_status(
+                            task_id, 
+                            job_state) 
+                        slurmClient.workflowTracker.update_task_progress(
+                            task_id, 
+                            progress)                        
                         if job_state == "TIMEOUT":
                             log_msg = f"Job {slurm_job_id} is TIMEOUT."
                             UI_messages += log_msg
@@ -329,13 +361,19 @@ def runScript():
                             logger.warning(log_msg)
                             # log_string += log_msg
                             slurm_job_id_list.remove(slurm_job_id)
+                            slurmClient.workflowTracker.fail_task(task_id, 
+                                                                  f"Slurm job state {job_state}")
                             # slurm_job_id_list.append(new_job_id)
                         elif job_state == "COMPLETED":
                             # 5. Retrieve SLURM images
                             # 6. Store results in OMERO
                             log_msg = f"Job {slurm_job_id} is COMPLETED."
+                            slurmClient.workflowTracker.complete_task(task_id, 
+                                                                      log_msg)
                             rv_imp = importResultsToOmero(
-                                client, conn, slurm_job_id, selected_output)
+                                client, conn, slurmClient, 
+                                slurm_job_id, selected_output,
+                                wf_id)
 
                             if rv_imp:
                                 try:
@@ -370,6 +408,8 @@ def runScript():
                             logger.warning(log_msg)
                             UI_messages += log_msg
                             slurm_job_id_list.remove(slurm_job_id)
+                            slurmClient.workflowTracker.fail_task(task_id, 
+                                                                  f"Slurm job state {job_state}")
                         elif (job_state == "PENDING"
                                 or job_state == "RUNNING"):
                             # expected
@@ -382,12 +422,15 @@ def runScript():
                             logger.warning(log_msg)
                             UI_messages += log_msg
                             slurm_job_id_list.remove(slurm_job_id)
+                            slurmClient.workflowTracker.fail_task(task_id, 
+                                                                  f"Slurm job state {job_state}")
 
                     # wait for 10 seconds before checking again
                     conn.keepAlive()  # keep the connection alive
                     timesleep.sleep(10)
 
             # 7. Script output
+            slurmClient.workflowTracker.complete_workflow(wf_id)
             client.setOutput("Message", rstring(UI_messages))
         finally:
             client.closeSession()
@@ -399,7 +442,8 @@ def run_workflow(slurmClient: SlurmClient,
                  UI_messages: str,
                  zipfile,
                  email,
-                 name):
+                 name,
+                 wf_id):
     logger.info(f"Running {name}")
     workflow_version = unwrap(
         client.getInput(f"{name}_Version"))
@@ -410,12 +454,13 @@ def run_workflow(slurmClient: SlurmClient,
         kwargs[k] = unwrap(client.getInput(f"{name}_|_{k}"))  # kwarg dict
     logger.info(f"Run workflow with: {kwargs}")
     try:
-        cp_result, slurm_job_id = slurmClient.run_workflow(
+        cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,
             input_data=zipfile,
             email=email,
             time=None,
+            wf_id=wf_id,
             **kwargs)
         logger.debug(cp_result.stdout)
         if not cp_result.ok:
@@ -426,18 +471,21 @@ def run_workflow(slurmClient: SlurmClient,
 
             job_status_dict, poll_result = slurmClient.check_job_status(
                 [slurm_job_id])
+            job_state = job_status_dict[slurm_job_id]
             logger.debug(
-                f"{job_status_dict[slurm_job_id]}, {poll_result.stdout}")
+                f"{job_state}, {poll_result.stdout}")
             if not poll_result.ok:
                 logger.warning(f"Error checking job status: {poll_result.stderr}")
             else:
-                log_msg = f"\n{job_status_dict[slurm_job_id]}"
+                log_msg = f"\n{job_state}"
                 logger.info(log_msg)
+                slurmClient.workflowTracker.update_task_status(task_id, 
+                                                               job_state)
     except Exception as e:
         UI_messages += f" ERROR WITH JOB: {e}"
         logger.warning(UI_messages)
         raise SSHException(UI_messages)
-    return UI_messages, slurm_job_id
+    return UI_messages, slurm_job_id, wf_id, task_id
 
 
 def getOmeroEmail(client, conn):
@@ -460,12 +508,15 @@ def getOmeroEmail(client, conn):
 
 def exportImageToSLURM(client: omscripts.client,
                        conn: BlitzGateway,
-                       zipfile: str):
+                       slurmClient: SlurmClient,
+                       zipfile: str,
+                       wf_id: UUID):
     svc = conn.getScriptService()
     scripts = svc.getScripts()
-    script_ids = [unwrap(s.id)
-                  for s in scripts if unwrap(s.getName()) in EXPORT_SCRIPTS]
-    if not script_ids:
+    # force just one script, why is it an array?
+    script_id, biomero, script_name = [(unwrap(s.id), unwrap(s.getVersion()), unwrap(s.getName())) 
+                                 for s in scripts if unwrap(s.getName()) in EXPORT_SCRIPTS][0]
+    if not script_id:
         raise ValueError(
             f"Cannot export images to Slurm: scripts ({EXPORT_SCRIPTS})\
                 not found in ({[unwrap(s.getName()) for s in scripts]}) ")
@@ -485,34 +536,46 @@ def exportImageToSLURM(client: omscripts.client,
             constants.transfer.FORMAT_ZARR),
         constants.transfer.FOLDER: rstring(zipfile)
     }
-    logger.debug(f"{inputs}, {script_ids}")
-    rv = runOMEROScript(client, svc, script_ids, inputs)
-    return rv
+    persist_dict = {key: unwrap(value) for key, value in inputs.items()}
+    logger.debug(f"{inputs}, {script_id}")
+    task_id = slurmClient.workflowTracker.add_task_to_workflow(
+        wf_id,
+        script_name,
+        VERSION,
+        persist_dict[constants.transfer.IDS],
+        persist_dict
+    )
+    slurmClient.workflowTracker.start_task(task_id)
+    rv = runOMEROScript(client, svc, script_id, inputs)
+    slurmClient.workflowTracker.complete_task(task_id, unwrap(rv['Message']))
+    return rv, task_id
 
 
-def runOMEROScript(client: omscripts.client, svc, script_ids, inputs):
+def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
     rv = None
-    for k in script_ids:
-        script_id = int(k)
-        # params = svc.getParams(script_id) # we can dynamically get them
+    
+    script_id = int(script_id)
+    # params = svc.getParams(script_id) # we can dynamically get them
 
-        # The last parameter is how long to wait as an RInt
-        proc = svc.runScript(script_id, inputs, None)
-        try:
-            cb = omero.scripts.ProcessCallbackI(client, proc)
-            while not cb.block(1000):  # ms.
-                pass
-            cb.close()
-            rv = proc.getResults(0)
-        finally:
-            proc.close(False)
+    # The last parameter is how long to wait as an RInt
+    proc = svc.runScript(script_id, inputs, None)
+    try:
+        cb = omero.scripts.ProcessCallbackI(client, proc)
+        while not cb.block(1000):  # ms.
+            pass
+        cb.close()
+        rv = proc.getResults(0)
+    finally:
+        proc.close(False)
     return rv
 
 
 def importResultsToOmero(client: omscripts.client,
                          conn: BlitzGateway,
+                         slurmClient: SlurmClient,
                          slurm_job_id: int,
-                         selected_output: list) -> str:
+                         selected_output: list,
+                         wf_id: UUID) -> str:
     if conn.keepAlive():
         svc = conn.getScriptService()
         scripts = svc.getScripts()
@@ -520,12 +583,12 @@ def importResultsToOmero(client: omscripts.client,
         msg = f"Lost connection with OMERO. Slurm done @ {slurm_job_id}"
         logger.error(msg)
         raise ConnectionError(msg)
-
-    script_ids = [unwrap(s.id)
-                  for s in scripts if unwrap(s.getName()) in IMPORT_SCRIPTS]
+    # Force one script
+    script_id, script_version, script_name = [(unwrap(s.id), unwrap(s.getVersion()), unwrap(s.getName())) 
+                                 for s in scripts if unwrap(s.getName()) in IMPORT_SCRIPTS][0]
     first_id = unwrap(client.getInput(constants.transfer.IDS))[0]
     data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
-    logger.debug(f"{script_ids}, {first_id}, {data_type}")
+    logger.debug(f"{script_id}, {first_id}, {data_type}")
     inputs = {
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
         constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id))
@@ -668,9 +731,57 @@ def importResultsToOmero(client: omscripts.client,
             constants.results.OUTPUT_ATTACH_TABLE
         ] = rbool(False)
 
-    logger.info(f"Running import script {script_ids} with inputs: {inputs}")
-    rv = runOMEROScript(client, svc, script_ids, inputs)
+    # Wait for Slurm Accounting to update
+    wait_for_job_completion(slurmClient, slurm_job_id)
+
+    logger.info(f"Running import script {script_id} with inputs: {inputs}")
+    persist_dict = {key: unwrap(value) for key, value in inputs.items()}
+    task_id = slurmClient.workflowTracker.add_task_to_workflow(
+        wf_id,
+        script_name,
+        VERSION,
+        {constants.transfer.IDS: unwrap(client.getInput(constants.transfer.IDS))},
+        persist_dict
+    )
+    slurmClient.workflowTracker.start_task(task_id)
+    rv = runOMEROScript(client, svc, script_id, inputs)
+    try:
+        msg = unwrap(rv['Message'])
+    except KeyError as e:
+        slurmClient.workflowTracker.fail_task(task_id, 
+                                              "Import failed")
+        raise e
+    slurmClient.workflowTracker.complete_task(task_id, msg)
     return rv
+
+
+def wait_for_job_completion(slurmClient, slurm_job_id, timeout=500, interval=15):
+    """
+    Waits for the slurm job to complete by polling at regular intervals.
+
+    Parameters:
+        slurmClient: The SLURM client used to query job status.
+        slurm_job_id: The ID of the SLURM job to wait for.
+        timeout (int): Maximum time to wait for the job to complete (in seconds).
+        interval (int): Time between each check (in seconds).
+
+    Raises:
+        TimeoutError: If the job does not complete within the timeout period.
+    """
+    start_time = timesleep.time()
+    
+    while True:
+        # Check if the job is completed
+        if str(slurm_job_id) in slurmClient.list_completed_jobs():
+            return  # Job is complete, exit the function
+        
+        # Check if we've hit the timeout
+        elapsed_time = timesleep.time() - start_time
+        if elapsed_time > timeout:
+            raise TimeoutError(f"Job {slurm_job_id} not found in Slurm Accounting within {timeout} seconds.")
+        
+        # Wait for the next interval before checking again
+        timesleep.sleep(interval)
 
 
 def get_project_name_ids(conn, parent_id):

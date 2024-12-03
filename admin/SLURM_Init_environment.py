@@ -20,6 +20,7 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
+VERSION = "1.14.0"
 
 
 def runScript():
@@ -41,7 +42,7 @@ def runScript():
         scripts.String(extra_config_name, optional=True, grouping="01.1",
                        description="The path to your configuration file on the server. Optional."),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
-        version="1.14.0",
+        version=VERSION,
         authors=["Torec Luik"],
         institutions=["Amsterdam UMC"],
         contact='cellularimaging@amsterdamumc.nl',
@@ -58,6 +59,7 @@ def runScript():
                 configfile = ''
             with SlurmClient.from_config(configfile=configfile) as slurmClient:
                 conn.keepAlive()
+                # We are kind of duplicating code here, so we can keep the conn alive.
                 if slurmClient.validate():
                     # 1. Create directories
                     slurmClient.setup_directories()
