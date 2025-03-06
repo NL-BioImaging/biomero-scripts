@@ -25,7 +25,7 @@ from biomero import SlurmClient, constants
 import logging
 import ezomero
 # from aicsimageio import AICSImage
-from tifffile import imread
+from tifffile import imread, TiffFile
 import numpy as np
 from omero_metadata.populate import ParsingContext
 OBJECT_TYPES = (
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _LOGFILE_PATH_PATTERN_GROUP = "DATA_PATH"
 _LOGFILE_PATH_PATTERN = "Running [\w-]+? Job w\/ .+? \| .+? \| (?P<DATA_PATH>.+?) \|.*"
-SUPPORTED_IMAGE_EXTENSIONS = ['.tif', '.tiff', '.png']
+SUPPORTED_IMAGE_EXTENSIONS = ['.tif', '.tiff', '.png', '.ome.tif']
 SUPPORTED_TABLE_EXTENSIONS = ['.csv']
 
 
@@ -233,35 +233,64 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
     return message
 
 
-def to_5d(*arys):
+def to_5d(*arys, axes=None):
     '''
-    Implementation extended from Numpy `atleast_3d`.
+    Convert arrays to 5D format (x,y,z,c,t) handling various input dimensions.
+   
+    Parameters:
+    -----------
+    *arys : numpy.ndarray
+        One or more input arrays to be converted to 5D
+    axes : str, required
+        String indicating the order of dimensions (e.g., 'CYX')
+   
+    Returns:
+    --------
+    numpy.ndarray or list
+        Single 5D array or list of 5D arrays in XYZCT order
     '''
+    if not arys:
+        return None
+    
+    target_axes = 'XYZCT'  # Target order
     res = []
+    
     for ary in arys:
-        ary = np.asanyarray(ary)
-        if ary.ndim == 0:
-            result = ary.reshape(1, 1, 1, 1, 1)
-        elif ary.ndim == 1:
-            result = ary[np.newaxis, :, np.newaxis, np.newaxis, np.newaxis]
-        elif ary.ndim == 2:
-            result = ary[:, :, np.newaxis, np.newaxis, np.newaxis]
-        elif ary.ndim == 3:
-            result = ary[:, :, :, np.newaxis, np.newaxis]
-        elif ary.ndim == 4:
-            result = ary[:, :, :, :, np.newaxis]
-        elif ary.ndim == 5:
-            result = ary
-        else:
-            logger.warning("Randomly reducing import down to first 5d")
-            result = np.resize(ary, (ary.shape[0:5]))
-        res.append(result)
-    if len(res) == 1:
-        return res[0]
-    else:
-        return res
-
-
+        if not isinstance(ary, np.ndarray):
+            continue
+        
+        # Validate we have axes specified
+        if axes is None:
+            raise ValueError("The 'axes' parameter is required - dimension order cannot be guessed")
+        
+        # Standardize to uppercase and validate
+        current_axes = axes.upper()
+        if len(current_axes) != ary.ndim:
+            raise ValueError(f"Axes string '{current_axes}' does not match array dimensions {ary.ndim}")
+        
+        # Create a 5D array by adding missing dimensions
+        img_5d = ary
+        current_order = current_axes
+        
+        # Add missing dimensions
+        for dim in "XYZCT":
+            if dim not in current_order:
+                img_5d = np.expand_dims(img_5d, axis=-1)
+                current_order += dim
+        
+        # Reorder dimensions if needed
+        if current_order != target_axes:
+            # Create list of current positions for each dimension
+            current_positions = []
+            for dim in target_axes:
+                current_positions.append(current_order.index(dim))
+            
+            # Rearrange dimensions
+            img_5d = np.moveaxis(img_5d, current_positions, range(len(target_axes)))
+        
+        res.append(img_5d)
+    
+    return res[0] if len(res) == 1 else res
 def add_image_annotations(conn, slurmClient, object_id, job_id):
     object_type = "Image"  # Set to Image when it's a dataset
     ns_wf = "biomero/workflow"
@@ -413,31 +442,34 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
             logger.debug(images)
             try:
                 # import the masked image for now
-                img_data = imread(name)
+                with TiffFile(name) as tif:
+                    img_data = tif.asarray()
+                    axes = tif.series[0].axes           
                 try:
                     source_image_id = images[0].getId()
                 except IndexError:
                     source_image_id = None
-                logger.debug(f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
-                logger.debug(
+                logger.info(f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
+                logger.info(
                     f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
-
-                img_data = to_5d(img_data)
-
-                logger.debug(f"Reshaped:{img_data.shape}")
+                
+                logger.info("axes: " + str(axes))
+                img_data = to_5d(img_data,axes=axes)
+                logger.info(f"Reshaped:{img_data.shape}")
 
                 if unwrap(client.getInput(
                         constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME)):
                     renamed = rename_import_file(client, name, og_name)
                 else:
-                    renamed = name
+                    #only keep filename not entire filepath
+                    renamed = os.path.basename(name)
 
-                logger.debug(
+                logger.info(
                     f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape} | dtype: {img_data.dtype}")
                 img_id = ezomero.post_image(conn, img_data,
                                             renamed,
                                             dataset_id=dataset_id,
-                                            dim_order="yxzct",
+                                            #dim_order="xyzct",
                                             # source_image_id=source_image_id,
                                             description=f"Result from job {job_id} | analysis {folder}")
                 
@@ -1024,7 +1056,7 @@ if __name__ == '__main__':
     log_filename = 'biomero.log'
     # Create a stream handler with INFO level (for OMERO.web output)
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(logging.INFO)
+    stream_handler.setLevel(logging.DEBUG)
     # Create DEBUG logging to rotating logfile at var/log
     logging.basicConfig(level=logging.DEBUG,
                         format=LOGFORMAT,
