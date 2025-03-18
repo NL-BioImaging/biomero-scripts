@@ -233,7 +233,7 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
     return message
 
 
-def to_5d(*arys, axes=None):
+def to_5d(*arys, axes):
     '''
     Convert arrays to 5D format (x,y,z,c,t) handling various input dimensions.
    
@@ -449,13 +449,14 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                     source_image_id = images[0].getId()
                 except IndexError:
                     source_image_id = None
-                logger.info(f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
-                logger.info(
-                    f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}")
+                logger.debug(f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
+                logger.debug(
+                    f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}"
+                )
                 
-                logger.info("axes: " + str(axes))
+                logger.debug("axes: " + str(axes))
                 img_data = to_5d(img_data,axes=axes)
-                logger.info(f"Reshaped:{img_data.shape}")
+                logger.debug(f"Reshaped:{img_data.shape}")
 
                 if unwrap(client.getInput(
                         constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME)):
@@ -464,12 +465,13 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                     #only keep filename not entire filepath
                     renamed = os.path.basename(name)
 
-                logger.info(
-                    f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape} | dtype: {img_data.dtype}")
+                logger.debug(
+                    f"B4 posting to Omero -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape} | dtype: {img_data.dtype}"
+                )
                 img_id = ezomero.post_image(conn, img_data,
                                             renamed,
                                             dataset_id=dataset_id,
-                                            #dim_order="xyzct",
+                                            dim_order="xyzct",
                                             # source_image_id=source_image_id,
                                             description=f"Result from job {job_id} | analysis {folder}")
                 
@@ -1056,7 +1058,7 @@ if __name__ == '__main__':
     log_filename = 'biomero.log'
     # Create a stream handler with INFO level (for OMERO.web output)
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(logging.DEBUG)
+    stream_handler.setLevel(logging.INFO)
     # Create DEBUG logging to rotating logfile at var/log
     logging.basicConfig(level=logging.DEBUG,
                         format=LOGFORMAT,
