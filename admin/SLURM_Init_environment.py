@@ -20,7 +20,7 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
-VERSION = "2.0.0-alpha"
+VERSION = "2.0.0-alpha.4"
 
 
 def runScript():

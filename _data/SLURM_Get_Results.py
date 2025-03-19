@@ -930,7 +930,7 @@ def runScript():
 
 
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
-            version="2.0.0-alpha",
+            version="2.0.0-alpha.4",
             authors=["Torec Luik"],
             institutions=["Amsterdam UMC"],
             contact='cellularimaging@amsterdamumc.nl',
