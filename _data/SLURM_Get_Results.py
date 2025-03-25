@@ -74,13 +74,16 @@ def getOriginalFilename(name):
 
 
 def saveCSVToOmeroAsTable(conn, folder, client,
-                          data_type='Dataset', object_id=651):
+                          data_type='Dataset', object_id=651, wf_id=None):
     """Save CSV files from a (unzipped) folder to OMERO as OMERO.tables
 
     Args:
         conn (_type_): Connection to OMERO
         folder (String): Unzipped folder
         client : OMERO client to attach output
+        data_type (str, optional): Type of OMERO object. Defaults to 'Dataset'.
+        object_id (_type_, optional): ID of OMERO object. Defaults to 651.
+        wf_id (str, optional): Workflow ID if available. Defaults to None.
 
     Returns:
         String: Message to add to script output
@@ -98,7 +101,7 @@ def saveCSVToOmeroAsTable(conn, folder, client,
 
     if not csv_files:
         return "No table files found in the folder."
-    
+
     for csv_file in csv_files:
         try:
             # We use the omero-metadata plugin to populate a table
@@ -110,7 +113,7 @@ def saveCSVToOmeroAsTable(conn, folder, client,
             # Default is StringColumn for everything.
             # d: DoubleColumn, for floating point numbers
             # l: LongColumn, for integer numbers
-            # s: StringColumn, for text 
+            # s: StringColumn, for text
             # b: BoolColumn, for true/false
             # plate, well, image, dataset, roi to specify objects
             #
@@ -123,6 +126,9 @@ def saveCSVToOmeroAsTable(conn, folder, client,
             objecti = getattr(omero.model, data_type + 'I')
             omero_object = objecti(int(object_id), False)
             table_name = f"{job_id}_{csv_name}"
+            if wf_id:
+                table_name += f"_{wf_id}"
+
             # ParsingContext could be provided with 'column_types' kwarg here,
             # if you know them already somehow.
             ctx = ParsingContext(client, omero_object, "",
@@ -142,13 +148,16 @@ def saveCSVToOmeroAsTable(conn, folder, client,
                 mimetype = "text/csv"
                 namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
                 description = f"CSV file {csv_name} from SLURM job {job_id}"
-                logger.debug(f"Creating FileAnnotation for CSV file: {csv_path}")
+                if wf_id:
+                    description += f" from Workflow {wf_id}"
+                logger.debug(
+                    f"Creating FileAnnotation for CSV file: {csv_path}")
                 origFName = os.path.join(folder, table_name)
                 csv_file_attachment = conn.createFileAnnfromLocalFile(
                     csv_path, origFilePathAndName=origFName,
                     mimetype=mimetype,
                     ns=namespace, desc=description)
-                
+
                 logger.debug(f"FileAnnotation created: {csv_file_attachment}")
                 # Ensure the OMERO object is fully loaded
                 if data_type == 'Dataset':
@@ -157,7 +166,8 @@ def saveCSVToOmeroAsTable(conn, folder, client,
                     omero_object = conn.getObject("Project", int(object_id))
                 else:
                     raise ValueError(f"Unsupported data_type: {data_type}")
-                logger.debug(f"Linking FileAnnotation to OMERO object: {omero_object}")
+                logger.debug(
+                    f"Linking FileAnnotation to OMERO object: {omero_object}")
                 omero_object.linkAnnotation(csv_file_attachment)
                 logger.debug("FileAnnotation linked successfully.")
                 message += f"\nCSV file {csv_name} failed to attach as table."
@@ -165,11 +175,11 @@ def saveCSVToOmeroAsTable(conn, folder, client,
             except Exception as attachment_error:
                 message += f"\nError attaching CSV file {csv_name} as an attachment to OMERO: {attachment_error}"
                 message += f"\nOriginal error: {e}"
-            
+
     return message
 
 
-def saveImagesToOmeroAsAttachments(conn, folder, client):
+def saveImagesToOmeroAsAttachments(conn, folder, client, wf_id=None):
     """Save image from a (unzipped) folder to OMERO as attachments
 
     Args:
@@ -211,13 +221,14 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
 
                 file_ann = conn.createFileAnnfromLocalFile(
                     name, mimetype=f"image/{ext}",
-                    ns=namespace, desc=f"Result from job {job_id} | analysis {folder}")
+                    ns=namespace, desc=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
                 logger.info(f"Attaching {name} to image {og_name}")
                 # image = load_image(conn, image_id)
                 for image in images:
                     image.linkAnnotation(file_ann)
 
-                logger.debug(f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
+                logger.debug(
+                    f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
                 client.setOutput("File_Annotation", robject(file_ann._obj))
             except Exception as e:
@@ -236,14 +247,14 @@ def saveImagesToOmeroAsAttachments(conn, folder, client):
 def to_5d(*arys, axes):
     '''
     Convert arrays to 5D format (x,y,z,c,t) handling various input dimensions.
-   
+
     Parameters:
     -----------
     *arys : numpy.ndarray
         One or more input arrays to be converted to 5D
     axes : str, required
         String indicating the order of dimensions (e.g., 'CYX')
-   
+
     Returns:
     --------
     numpy.ndarray or list
@@ -251,62 +262,65 @@ def to_5d(*arys, axes):
     '''
     if not arys:
         return None
-    
+
     target_axes = 'XYZCT'  # Target order
     res = []
-    
+
     for ary in arys:
         if not isinstance(ary, np.ndarray):
             continue
-        
+
         # Validate we have axes specified
         if axes is None:
-            raise ValueError("The 'axes' parameter is required - dimension order cannot be guessed")
-        
+            raise ValueError(
+                "The 'axes' parameter is required - dimension order cannot be guessed")
+
         # Standardize to uppercase and validate
         current_axes = axes.upper()
         if len(current_axes) != ary.ndim:
-            raise ValueError(f"Axes string '{current_axes}' does not match array dimensions {ary.ndim}")
-        
+            raise ValueError(
+                f"Axes string '{current_axes}' does not match array dimensions {ary.ndim}")
+
         # Create a 5D array by adding missing dimensions
         img_5d = ary
         current_order = current_axes
-        
+
         # Add missing dimensions
         for dim in "XYZCT":
             if dim not in current_order:
                 img_5d = np.expand_dims(img_5d, axis=-1)
                 current_order += dim
-        
+
         # Reorder dimensions if needed
         if current_order != target_axes:
             # Create list of current positions for each dimension
             current_positions = []
             for dim in target_axes:
                 current_positions.append(current_order.index(dim))
-            
+
             # Rearrange dimensions
-            img_5d = np.moveaxis(img_5d, current_positions, range(len(target_axes)))
-        
+            img_5d = np.moveaxis(img_5d, current_positions,
+                                 range(len(target_axes)))
+
         res.append(img_5d)
-    
+
     return res[0] if len(res) == 1 else res
-def add_image_annotations(conn, slurmClient, object_id, job_id):
+
+
+def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
     object_type = "Image"  # Set to Image when it's a dataset
     ns_wf = "biomero/workflow"
-    if slurmClient.track_workflows:
+    if slurmClient.track_workflows and wf_id:
         try:
-            task_id = slurmClient.jobAccounting.get_task_id(job_id)
-            task = slurmClient.workflowTracker.repository.get(task_id)
-            wf_id = task.workflow_id
             wf = slurmClient.workflowTracker.repository.get(wf_id)
-            
+
             map_ann_ids = []
-            
+
             # Extract version from the description using regex
             version_match = re.search(r'\d+\.\d+\.\d+', wf.description)
-            workflow_version = version_match.group(0) if version_match else "Unknown"
-            
+            workflow_version = version_match.group(
+                0) if version_match else "Unknown"
+
             workflow_annotation_dict = {
                 'Workflow_ID': str(wf_id),
                 'Name': wf.name,
@@ -314,7 +328,7 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
                 'Created_On': wf._created_on.isoformat(),
                 'Modified_On': wf._modified_on.isoformat(),
                 'Task_IDs': ", ".join([str(tid) for tid in wf.tasks]),
-            }        
+            }
             logger.debug(f"Adding metadata: {workflow_annotation_dict}")
             map_ann_id = ezomero.post_map_annotation(
                 conn=conn,
@@ -323,9 +337,9 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
                 kv_dict=workflow_annotation_dict,
                 ns=ns_wf,
                 across_groups=False  # Set to False if you don't want cross-group behavior
-            )       
+            )
             map_ann_ids.append(map_ann_id)
-            
+
             for tid in wf.tasks:
                 task = slurmClient.workflowTracker.repository.get(tid)
                 # Add FAIR metadata
@@ -343,7 +357,8 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
                 }
                 # Add parameters
                 if task.params:
-                    task_annotation_dict.update({f"Param_{key}": str(value) for key, value in task.params.items()})
+                    task_annotation_dict.update({f"Param_{key}": str(
+                        value) for key, value in task.params.items()})
                 # task metadata
                 ns_task = ns_wf + "/task" + f"/{task.task_name}"
                 logger.debug(f"Adding metadata: {task_annotation_dict}")
@@ -356,7 +371,7 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
                     across_groups=False  # Set to False if you don't want cross-group behavior
                 )
                 map_ann_ids.append(map_ann_id)
-                
+
                 for jid in task.job_ids:
                     job_dict = {
                         'Job_ID': str(jid),
@@ -369,7 +384,8 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
                         job_dict['Command'] = task.results[0]['command']
                     # and environment variables
                     if task.results and "env" in task.results[0]:
-                        job_dict.update({f"Env_{key}": str(value) for key, value in task.results[0]['env'].items()})
+                        job_dict.update({f"Env_{key}": str(value)
+                                        for key, value in task.results[0]['env'].items()})
                     # job metadata
                     ns_task_job = ns_task + "/job"
                     logger.debug(f"Adding metadata: {job_dict}")
@@ -382,13 +398,16 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
                         across_groups=False  # Set to False if you don't want cross-group behavior
                     )
                     map_ann_ids.append(map_ann_id)
-            
+
             if map_ann_ids:
-                logger.info(f"Successfully added annotations to {object_type} ID: {object_id}. MapAnnotation IDs: {map_ann_ids}")
+                logger.info(
+                    f"Successfully added annotations to {object_type} ID: {object_id}. MapAnnotation IDs: {map_ann_ids}")
             else:
-                logger.warning(f"MapAnnotation created for {object_type} ID: {object_id}, but no ID was returned.")
+                logger.warning(
+                    f"MapAnnotation created for {object_type} ID: {object_id}, but no ID was returned.")
         except Exception as e:
-            logger.error(f"Failed to add annotations to {object_type} ID: {object_id}. Error: {str(e)}")
+            logger.error(
+                f"Failed to add annotations to {object_type} ID: {object_id}. Error: {str(e)}")
     else:  # We have no access to workflow tracking, log very limited metadata
         ns_task = ns_wf + "/task"
         ns_task_job = ns_task + "/job"
@@ -396,7 +415,8 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
             'Job_ID': str(job_id),
         }
         # job metadata
-        logger.debug(f"Track workflows is off. Adding only limited metadata: {job_dict}")
+        logger.debug(
+            f"Track workflows is off. Adding only limited metadata: {job_dict}")
         map_ann_id = ezomero.post_map_annotation(
             conn=conn,
             object_type=object_type,
@@ -407,7 +427,7 @@ def add_image_annotations(conn, slurmClient, object_id, job_id):
         )
 
 
-def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, new_dataset=True):
+def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, new_dataset=True, wf_id=None):
     """Save image from a (unzipped) folder to OMERO as dataset
 
     Args:
@@ -444,25 +464,26 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                 # import the masked image for now
                 with TiffFile(name) as tif:
                     img_data = tif.asarray()
-                    axes = tif.series[0].axes           
+                    axes = tif.series[0].axes
                 try:
                     source_image_id = images[0].getId()
                 except IndexError:
                     source_image_id = None
-                logger.debug(f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
+                logger.debug(
+                    f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
                 logger.debug(
                     f"B4 turning to yxzct -- Number of unique values: {np.unique(img_data)} | shape: {img_data.shape}"
                 )
-                
+
                 logger.debug("axes: " + str(axes))
-                img_data = to_5d(img_data,axes=axes)
+                img_data = to_5d(img_data, axes=axes)
                 logger.debug(f"Reshaped:{img_data.shape}")
 
                 if unwrap(client.getInput(
                         constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME)):
                     renamed = rename_import_file(client, name, og_name)
                 else:
-                    #only keep filename not entire filepath
+                    # only keep filename not entire filepath
                     renamed = os.path.basename(name)
 
                 logger.debug(
@@ -473,11 +494,11 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                                             dataset_id=dataset_id,
                                             dim_order="xyzct",
                                             # source_image_id=source_image_id,
-                                            description=f"Result from job {job_id} | analysis {folder}")
-                
+                                            description=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
+
                 # Add metadata
-                add_image_annotations(conn, slurmClient, img_id, job_id)
-                
+                add_image_annotations(conn, slurmClient, img_id, job_id, wf_id)
+
                 del img_data
                 omero_img, img_data = ezomero.get_image(
                     conn, img_id, pyramid_level=0, xyzct=True)
@@ -513,7 +534,8 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                 parent_project = parent_dataset.getParent()
             if parent_project and parent_project.canLink():
                 # and put it in the current project
-                logger.debug(f"{parent_dataset}, {parent_project}, {parent_project.getId()}, {dataset_id}")
+                logger.debug(
+                    f"{parent_dataset}, {parent_project}, {parent_project.getId()}, {dataset_id}")
                 project_link = omero.model.ProjectDatasetLinkI()
                 project_link.parent = omero.model.ProjectI(
                     parent_project.getId(), False)
@@ -624,7 +646,7 @@ def cleanup_tmp_files_locally(message: str, folder: str, log_file: str) -> str:
     return message
 
 
-def upload_contents_to_omero(client, conn, slurmClient, message, folder):
+def upload_contents_to_omero(client, conn, slurmClient, message, folder, wf_id=None):
     """Upload contents of folder to OMERO
 
     Args:
@@ -633,12 +655,13 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder):
         slurmClient (SlurmClient): BIOMERO client
         message (String): Script output
         folder (String): Path to folder with content
+        wf_id (str, optional): Workflow ID if available. Defaults to None.
     """
     try:
         if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)):
             # upload and link individual images
             msg = saveImagesToOmeroAsAttachments(conn=conn, folder=folder,
-                                                 client=client)
+                                                 client=client, wf_id=wf_id)
             message += msg
         if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_TABLE)):
             if unwrap(client.getInput(
@@ -651,7 +674,7 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder):
                     object_id = d_id.split(":")[0]
                     msg = saveCSVToOmeroAsTable(
                         conn=conn, folder=folder, client=client,
-                        data_type=data_type, object_id=object_id)
+                        data_type=data_type, object_id=object_id, wf_id=wf_id)
                     message += msg
             if unwrap(client.getInput(
                     constants.results.OUTPUT_ATTACH_TABLE_PLATE)):
@@ -663,7 +686,7 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder):
                     object_id = p_id.split(":")[0]
                     msg = saveCSVToOmeroAsTable(
                         conn=conn, folder=folder, client=client,
-                        data_type=data_type, object_id=object_id)
+                        data_type=data_type, object_id=object_id, wf_id=wf_id)
                     message += msg
         if unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_NEW_DATASET)):
@@ -690,6 +713,8 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder):
                 desc = "Images in this Dataset are label masks of job:\n"\
                     "  Id: %s" % (unwrap(client.getInput(
                         constants.results.OUTPUT_SLURM_JOB_ID)))
+                if wf_id:
+                    desc += f"\n  Workflow: {wf_id}"
                 dataset.description = rstring(desc)
                 update_service = conn.getUpdateService()
                 dataset = update_service.saveAndReturnObject(dataset)
@@ -700,7 +725,8 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder):
                                              folder=folder,
                                              client=client,
                                              dataset_id=dataset_id,
-                                             new_dataset=create_new_dataset)
+                                             new_dataset=create_new_dataset,
+                                             wf_id=wf_id)
             message += msg
 
     except Exception as e:
@@ -729,7 +755,7 @@ def unzip_zip_locally(message, folder):
     return message
 
 
-def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file):
+def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_id=None):
     """ Upload a (log/text)file to omero 
 
     Args:
@@ -746,6 +772,8 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file):
         mimetype = "text/plain"
         namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
         description = f"Log from SLURM job {slurm_job_id}"
+        if wf_id:
+            description += f" (Workflow {wf_id})"
         annotation = conn.createFileAnnfromLocalFile(
             file, mimetype=mimetype,
             ns=namespace, desc=description)
@@ -769,7 +797,7 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file):
     return message
 
 
-def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder):
+def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, wf_id=None):
     """ Upload a zip to omero (without unpacking)
 
     Args:
@@ -786,6 +814,8 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder):
         mimetype = "application/zip"
         namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
         description = f"Results from SLURM job {slurm_job_id}"
+        if wf_id:
+            description += f" (Workflow {wf_id})"
         zip_annotation = conn.createFileAnnfromLocalFile(
             f"{folder}.zip", mimetype=mimetype,
             ns=namespace, desc=description)
@@ -948,6 +978,18 @@ def runScript():
             slurm_job_id = unwrap(client.getInput(
                 constants.results.OUTPUT_SLURM_JOB_ID)).strip()
 
+            # Get workflow ID if available
+            wf_id = None
+            if slurmClient.track_workflows:
+                try:
+                    task_id = slurmClient.jobAccounting.get_task_id(
+                        slurm_job_id)
+                    task = slurmClient.workflowTracker.repository.get(task_id)
+                    wf_id = task.workflow_id
+                except Exception as e:
+                    logger.error(
+                        f"Failed to get workflow ID from job {slurm_job_id}. Error: {str(e)}")
+
             # Ask job State
             if unwrap(client.getInput(constants.results.OUTPUT_COMPLETED_JOB)):
                 _, result = slurmClient.check_job_status([slurm_job_id])
@@ -984,7 +1026,7 @@ def runScript():
                     # Upload logfile to Omero as Original File
                     message = upload_log_to_omero(
                         client, conn, message,
-                        slurm_job_id, projects, log_file)
+                        slurm_job_id, projects, log_file, wf_id=wf_id)
 
                     # Read file for data location
                     data_location = slurmClient.extract_data_location_from_log(
@@ -1020,12 +1062,12 @@ def runScript():
                                         constants.results.OUTPUT_ATTACH_PLATE))):
                                 message = upload_zip_to_omero(
                                     client, conn, message,
-                                    slurm_job_id, projects, folder)
+                                    slurm_job_id, projects, folder, wf_id=wf_id)
 
                             message = unzip_zip_locally(message, folder)
 
                             message = upload_contents_to_omero(
-                                client, conn, slurmClient, message, folder)
+                                client, conn, slurmClient, message, folder, wf_id=wf_id)
 
                             clean_result = slurmClient.cleanup_tmp_files(
                                 slurm_job_id,
@@ -1069,7 +1111,7 @@ if __name__ == '__main__':
                                 maxBytes=LOGSIZE,
                                 backupCount=LOGNUM)
                         ])
-       
+
     # Silence some of the DEBUG
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
