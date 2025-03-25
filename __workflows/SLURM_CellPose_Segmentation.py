@@ -161,9 +161,10 @@ def runScript():
             )
             if not cp_result.ok:
                 logger.warning(f"Error running CellPose job: {cp_result.stderr}")
+                slurmClient.workflowTracker.fail_workflow(wf_id)
+                client.setOutput("Message", rstring(f"Failed to submit job: {cp_result.stderr}"))
             else:
-                print_result = f"Submitted to Slurm as\
-                    batch job {slurm_job_id}."
+                print_result = f"Submitted to Slurm as batch job {slurm_job_id}."
                 # 4. Poll SLURM results
                 try:
                     tup = slurmClient.check_job_status(
@@ -185,11 +186,14 @@ def runScript():
                 except Exception as e:
                     print_result += f" ERROR WITH JOB: {e}"
                     logger.warning(print_result)
+                    slurmClient.workflowTracker.fail_workflow(wf_id)
+                    client.setOutput("Message", rstring(print_result))
 
             # 7. Script output
             logger.info(print_result)
-            client.setOutput("Message", rstring(print_result))
-            slurmClient.workflowTracker.complete_workflow(wf_id)
+            if not 'ERROR' in print_result:
+                client.setOutput("Message", rstring(print_result))
+                slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()
 

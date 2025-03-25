@@ -105,12 +105,14 @@ def runScript():
                 logger.info(f"Conversion job submitted: {slurmJob}")
                 if not slurmJob.ok:
                     logger.error(f"Error converting data: {slurmJob.get_error()}")
+                    slurmClient.workflowTracker.fail_workflow(wf_id)
                 else:
                     slurmJob.wait_for_completion(slurmClient, conn)
                     if not slurmJob.completed():
                         log_msg = f"Conversion is not completed: {slurmJob}"
                         slurmClient.workflowTracker.fail_task(slurmJob.task_id, 
                                                               "Conversion failed")
+                        slurmClient.workflowTracker.fail_workflow(wf_id)
                         raise Exception(log_msg)
                     else:
                         if cleanup:
@@ -120,13 +122,15 @@ def runScript():
                         message += msg
                         slurmClient.workflowTracker.complete_task(
                             slurmJob.task_id, msg)
+                        slurmClient.workflowTracker.complete_workflow(wf_id)
             except Exception as e:
                 message += f" ERROR WITH CONVERTING DATA: {e}"
                 logger.error(message)
+                slurmClient.workflowTracker.fail_workflow(wf_id)
                 raise e
 
             client.setOutput("Message", rstring(str(message)))
-            slurmClient.workflowTracker.complete_workflow(wf_id)
+            # slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()
 

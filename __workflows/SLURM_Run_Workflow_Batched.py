@@ -381,6 +381,8 @@ def runScript():
             # --------------------------------------------
             ''')
             finished = []
+            # Check if any tasks failed by tracking failure status 
+            wf_failed = False
             try:
                 # 4. Poll results
                 while remaining_batches:
@@ -426,6 +428,7 @@ def runScript():
                                     [msg])
                                 slurmClient.workflowTracker.fail_task(
                                     task_id, "Batch failed")
+                                wf_failed = True
                         else:
                             pass
 
@@ -450,7 +453,12 @@ def runScript():
             # 7. Script output
             client.setOutput("Message",
                              rstring("\n".join(UI_messages['Message'])))
-            slurmClient.workflowTracker.complete_workflow(wf_id)
+                    
+            if wf_failed:
+                slurmClient.workflowTracker.fail_workflow(wf_id)
+            else:
+                slurmClient.workflowTracker.complete_workflow(wf_id)
+                
             for i, ann in enumerate(UI_messages['File_Annotation']):
                 client.setOutput(f"File_Annotation_{i}", robject(ann))
         finally:
