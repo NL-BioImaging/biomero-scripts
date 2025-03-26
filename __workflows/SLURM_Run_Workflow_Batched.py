@@ -455,7 +455,7 @@ def runScript():
                              rstring("\n".join(UI_messages['Message'])))
                     
             if wf_failed:
-                slurmClient.workflowTracker.fail_workflow(wf_id)
+                slurmClient.workflowTracker.fail_workflow(wf_id, "One or more workflow batches failed")
             else:
                 slurmClient.workflowTracker.complete_workflow(wf_id)
                 

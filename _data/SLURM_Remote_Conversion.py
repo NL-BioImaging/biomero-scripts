@@ -50,7 +50,7 @@ def runScript():
             Only use these modular scripts if you have a good reason to do so.
             Connection ready? << {slurmClient.validate()} >>
             '''
-    
+
         script_version = "2.0.0-alpha.4"
         client = scripts.client(
             script_name,
@@ -68,7 +68,7 @@ def runScript():
                            default='tiff'),
             scripts.Bool(CLEANUP, grouping="03",
                          description=cleanup_descr,
-                         default=True),            
+                         default=True),
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
             version=script_version,
             authors=["Torec Luik"],
@@ -87,7 +87,7 @@ def runScript():
             convert_from = scriptParams[SOURCE]
             convert_to = scriptParams[TARGET]
             cleanup = scriptParams[CLEANUP]
-            
+
             # Connect to Omero
             conn = BlitzGateway(client_obj=client)
             user = conn.getUserId()
@@ -101,18 +101,21 @@ def runScript():
             )
             try:
                 slurmJob = slurmClient.run_conversion_workflow_job(
-                        zipfile, convert_from, convert_to, wf_id)
+                    zipfile, convert_from, convert_to, wf_id)
                 logger.info(f"Conversion job submitted: {slurmJob}")
                 if not slurmJob.ok:
-                    logger.error(f"Error converting data: {slurmJob.get_error()}")
-                    slurmClient.workflowTracker.fail_workflow(wf_id)
+                    logger.error(
+                        f"Error converting data: {slurmJob.get_error()}")
+                    slurmClient.workflowTracker.fail_workflow(
+                        wf_id, "Conversion job submission failed")
                 else:
                     slurmJob.wait_for_completion(slurmClient, conn)
                     if not slurmJob.completed():
                         log_msg = f"Conversion is not completed: {slurmJob}"
-                        slurmClient.workflowTracker.fail_task(slurmJob.task_id, 
+                        slurmClient.workflowTracker.fail_task(slurmJob.task_id,
                                                               "Conversion failed")
-                        slurmClient.workflowTracker.fail_workflow(wf_id)
+                        slurmClient.workflowTracker.fail_workflow(
+                            wf_id, "Conversion failed")
                         raise Exception(log_msg)
                     else:
                         if cleanup:
@@ -126,7 +129,7 @@ def runScript():
             except Exception as e:
                 message += f" ERROR WITH CONVERTING DATA: {e}"
                 logger.error(message)
-                slurmClient.workflowTracker.fail_workflow(wf_id)
+                slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
                 raise e
 
             client.setOutput("Message", rstring(str(message)))
@@ -159,7 +162,7 @@ if __name__ == '__main__':
                                 maxBytes=LOGSIZE,
                                 backupCount=LOGNUM)
                         ])
-       
+
     # Silence some of the DEBUG
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)

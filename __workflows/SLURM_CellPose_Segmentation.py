@@ -160,9 +160,12 @@ def runScript():
                 **kwargs
             )
             if not cp_result.ok:
-                logger.warning(f"Error running CellPose job: {cp_result.stderr}")
-                slurmClient.workflowTracker.fail_workflow(wf_id)
-                client.setOutput("Message", rstring(f"Failed to submit job: {cp_result.stderr}"))
+                logger.warning(
+                    f"Error running CellPose job: {cp_result.stderr}")
+                slurmClient.workflowTracker.fail_workflow(
+                    wf_id, "CellPose job submission failed")
+                client.setOutput("Message", rstring(
+                    f"Failed to submit job: {cp_result.stderr}"))
             else:
                 print_result = f"Submitted to Slurm as batch job {slurm_job_id}."
                 # 4. Poll SLURM results
@@ -174,8 +177,8 @@ def runScript():
                     (job_status_dict, poll_result) = tup
                     logger.debug(f"{poll_result.stdout},{job_status_dict}")
                     if not poll_result.ok:
-                        logger.warning("Error checking job status:", 
-                                        poll_result.stderr)
+                        logger.warning("Error checking job status:",
+                                       poll_result.stderr)
                     else:
                         print_result += f"\n{job_status_dict}"
                     job_state = job_status_dict[slurm_job_id]
@@ -186,7 +189,8 @@ def runScript():
                 except Exception as e:
                     print_result += f" ERROR WITH JOB: {e}"
                     logger.warning(print_result)
-                    slurmClient.workflowTracker.fail_workflow(wf_id)
+                    slurmClient.workflowTracker.fail_workflow(
+                        wf_id, "Error checking job status")
                     client.setOutput("Message", rstring(print_result))
 
             # 7. Script output
@@ -222,7 +226,7 @@ if __name__ == '__main__':
                                 maxBytes=LOGSIZE,
                                 backupCount=LOGNUM)
                         ])
-       
+
     # Silence some of the DEBUG
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
