@@ -125,9 +125,16 @@ def saveCSVToOmeroAsTable(conn, folder, client,
 
             objecti = getattr(omero.model, data_type + 'I')
             omero_object = objecti(int(object_id), False)
-            table_name = f"{job_id}_{csv_name}"
+            
+            # Split name and extension
+            name_parts = os.path.splitext(csv_name)
+            table_name = f"{name_parts[0]}"
+            if job_id:
+                table_name += f"_{job_id}"
             if wf_id:
                 table_name += f"_{wf_id}"
+            # Add back extension
+            table_name += name_parts[1]
 
             # ParsingContext could be provided with 'column_types' kwarg here,
             # if you know them already somehow.
