@@ -403,7 +403,7 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
                 for jid in task.job_ids:
                     job_dict = {
                         'Job_ID': str(jid),
-                        'Task_ID': str(task_id),
+                        'Task_ID': str(tid),
                         'Workflow_ID': str(wf_id),
                         'Result_Message': task.result_message,
                     }
