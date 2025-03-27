@@ -51,7 +51,7 @@ def runScript():
             Connection ready? << {slurmClient.validate()} >>
             '''
 
-        script_version = "2.0.0-alpha.5"
+        script_version = "2.0.0-alpha.6"
         client = scripts.client(
             script_name,
             script_descr,

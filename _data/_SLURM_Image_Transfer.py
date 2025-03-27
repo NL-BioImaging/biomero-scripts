@@ -736,7 +736,7 @@ def run_script():
                 description="Name of folder (and zip file) to store images. Don't use spaces!",
                 default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
 
-            version="2.0.0-alpha.5",
+            version="2.0.0-alpha.6",
             authors=["Torec Luik", "William Moore", "OME Team"],
             institutions=["Amsterdam UMC", "University of Dundee"],
             contact='cellularimaging@amsterdamumc.nl',
