@@ -267,7 +267,7 @@ def runScript():
             # --------------------------------------------
             ''')
             # Generate a filename for the input data
-            zipfile = createFileName(client, conn)
+            zipfile = createFileName(client, conn, wf_id)
             # Send data to Slurm, zipped, over SSH
             # Uses _SLURM_Image_Transfer script from Omero
             rv, task_id = exportImageToSLURM(client, conn, slurmClient,
@@ -839,7 +839,7 @@ def get_plate_name_ids(conn, parent_id):
     return plates
 
 
-def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
+def createFileName(client: omscripts.client, conn: BlitzGateway, wf_id: UUID) -> str:
     opts = {}
     data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
     if data_type == constants.transfer.DATA_TYPE_IMAGE:
@@ -861,11 +861,11 @@ def createFileName(client: omscripts.client, conn: BlitzGateway) -> str:
     else:
         raise ValueError(f"Can't handle {data_type}")
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    # timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     filename = "_".join(objparams)
     # Replace spaces with underscores in the filename
     filename = filename.replace(" ", "_")
-    full_filename = f"{filename}_{timestamp}"
+    full_filename = f"{filename}_{wf_id}"
     logger.debug("Filename: " + full_filename)
     return full_filename
 

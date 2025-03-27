@@ -218,17 +218,38 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, wf_id=None):
 
         if images:
             try:
-                # attach the masked image to the original image
+                original_name = name  # Store original name
+                # Rename file with workflow ID before first extension
+                if wf_id:
+                    filename = os.path.basename(name)
+                    first_dot = filename.find('.')
+                    if first_dot != -1:
+                        # Insert wf_id before the first dot
+                        new_name = os.path.join(
+                            os.path.dirname(name),
+                            f"{filename[:first_dot]}.{wf_id}{filename[first_dot:]}"
+                        )
+                        try:
+                            os.rename(name, new_name)
+                            name = new_name  # Update name for the rest of the process
+                            logger.debug(f"Renamed file to: {name}")
+                        except OSError as e:
+                            logger.warning(f"Could not rename file {name}: {e}")
+
+                # Create annotation with renamed file
                 ext = os.path.splitext(name)[1][1:]
-
-                # if unwrap(client.getInput(_OUTPUT_RENAME)):
-                #     renamed = rename_import_file(client, name, og_name)
-                # TODO: API doesn't allow changing filename when uploading.
-                # Maybe afterward? Update the originalFile name?
-
                 file_ann = conn.createFileAnnfromLocalFile(
                     name, mimetype=f"image/{ext}",
                     ns=namespace, desc=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
+                
+                # Restore original filename after annotation is created
+                if name != original_name:
+                    try:
+                        os.rename(name, original_name)
+                        logger.debug(f"Restored original filename: {original_name}")
+                    except OSError as e:
+                        logger.warning(f"Could not restore original filename {original_name}: {e}")
+                
                 logger.info(f"Attaching {name} to image {og_name}")
                 # image = load_image(conn, image_id)
                 for image in images:
