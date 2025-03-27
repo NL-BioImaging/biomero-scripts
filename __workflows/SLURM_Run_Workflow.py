@@ -667,8 +667,12 @@ def importResultsToOmero(client: omscripts.client,
                 parent_data_type == constants.transfer.DATA_TYPE_PROJECT):
             logger.debug(f"Adding to dataset {parent_id}")
             projects = get_project_name_ids(conn, parent_id)
+            inputs[constants.results.OUTPUT_ATTACH_PROJECT] = rbool(
+                True)
             inputs[constants.results.OUTPUT_ATTACH_PROJECT_ID] = rlist(
                 projects)
+            inputs[constants.results.OUTPUT_ATTACH_PLATE] = rbool(
+                False)
         elif parent_data_type == constants.transfer.DATA_TYPE_PLATE:
             logger.debug(f"Adding to plate {parent_id}")
             plates = get_plate_name_ids(conn, parent_id)
@@ -714,15 +718,6 @@ def importResultsToOmero(client: omscripts.client,
             False)
 
     if selected_output[constants.workflow.OUTPUT_ATTACH]:
-        inputs[
-            constants.results.OUTPUT_ATTACH_OG_IMAGES
-        ] = rbool(True)
-    else:
-        inputs[
-            constants.results.OUTPUT_ATTACH_OG_IMAGES
-        ] = rbool(False)
-
-    if selected_output[constants.workflow.OUTPUT_PARENT]:
         inputs[
             constants.results.OUTPUT_ATTACH_OG_IMAGES
         ] = rbool(True)
