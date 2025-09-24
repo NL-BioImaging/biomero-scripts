@@ -1,22 +1,62 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-#
+# 
 # Original work Copyright (C) 2014 University of Dundee
 #                                   & Open Microscopy Environment.
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
+
+"""
+BIOMERO Minimal SLURM Script Example (Admin Only)
+
+This example script demonstrates basic SLURM integration capabilities
+and serves as a template for developing custom BIOMERO-SLURM workflows.
+
+**ADMIN ONLY**: This script requires OMERO administrator privileges.
+
+Key Features:
+- Simple Python command execution on SLURM cluster
+- SLURM cluster status checking (squeue, sinfo)
+- Custom Linux command execution
+- Basic SLURM client validation and connection testing
+- Minimal example structure for custom script development
+
+Example Capabilities:
+- Run Python: Execute Python commands remotely on cluster
+- Check SLURM Status: Query cluster queue and node information
+- Run Linux Commands: Execute arbitrary shell commands on cluster
+- Connection Testing: Validate SLURM client configuration
+
+Educational Purpose:
+This script serves as:
+- Introduction to BIOMERO-SLURM integration
+- Template for custom workflow development
+- Testing tool for SLURM connectivity
+- Example of OMERO script parameter handling
+
+Use this script as a starting point for developing more complex
+workflows or for testing basic SLURM cluster connectivity.
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
+
 
 from __future__ import print_function
 from omero.grid import JobParams
 from omero.rtypes import rstring
+from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import subprocess
 from biomero import SlurmClient
 import logging
 import os
 import sys
+
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +73,28 @@ _DEFAULT_SCMD = "ls -la"
 
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for minimal SLURM script example.
+    
+    Demonstrates basic SLURM integration capabilities including Python
+    command execution, cluster status checking, and custom Linux commands.
+    Serves as template for developing custom BIOMERO-SLURM workflows.
+    
+    The function provides:
+        - Python command execution on SLURM cluster
+        - SLURM cluster status queries (squeue, sinfo)
+        - Custom Linux command execution
+        - SLURM client validation and testing
+        - Basic parameter handling examples
     """
 
     with SlurmClient.from_config() as slurmClient:
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "2.0.0-alpha.6"
-        params.description = f'''Example script to run on slurm cluster
+        params.version = VERSION
+        params.description = f'''Admin-only example script for SLURM cluster
 
+        **ADMIN ONLY**: Requires OMERO administrator privileges.
         Runs a script remotely on SLURM.
 
         Connection ready? {slurmClient.validate()}
@@ -75,6 +126,24 @@ def runScript():
         try:
             scriptParams = client.getInputs(unwrap=True)
             logger.info(f"Params: {scriptParams}")
+            
+            # Check if user is admin - simple approach using BlitzGateway
+            conn = BlitzGateway(client_obj=client)
+            user = conn.getUser()
+            is_admin = user.isAdmin()
+            user_id = conn.getUserId()
+            
+            logger.info(f"User ID {user_id} admin status: {is_admin}")
+            
+            if not is_admin:
+                logger.warning("Access denied: Admin privileges required")
+                client.setOutput("Message", rstring(
+                    f"ACCESS DENIED: This script requires OMERO administrator "
+                    f"privileges. User ID {user_id} is not an admin."
+                ))
+                return
+            
+            logger.info("Admin access confirmed, proceeding with SLURM ops")
             logger.info(f"Validating slurm connection:\
                 {slurmClient.validate()} for {slurmClient.__dict__}")
 

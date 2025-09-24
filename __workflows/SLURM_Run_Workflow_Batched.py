@@ -6,8 +6,39 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# Example OMERO.script to run multiple segmentation images on Slurm.
+
+"""
+BIOMERO SLURM Batched Workflow Execution Script
+
+This script provides batch processing capabilities for running workflows
+on SLURM clusters, allowing users to process multiple datasets efficiently
+with automatic job management and result importing.
+
+Key Features:
+- Batch processing of multiple datasets/images/plates
+- Configurable batch sizes to optimize cluster resource usage
+- Automatic workflow parameter discovery from GitHub repositories
+- Support for all available workflow versions on SLURM cluster
+- Intelligent job scheduling and status monitoring
+- Automatic result importing back to OMERO
+- Email notifications for job completion/failure
+- Comprehensive error handling and logging
+
+Batch Processing Workflow:
+1. Divide selected data into configurable batch sizes
+2. Submit each batch as separate SLURM jobs
+3. Monitor job execution and status
+4. Import results back to OMERO upon completion
+5. Provide comprehensive status reporting
+
+This script is designed for processing large datasets where individual
+job submission would be inefficient. It complements SLURM_Run_Workflow.py
+by adding batch processing capabilities.
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
 
 from __future__ import print_function
 import sys
@@ -38,10 +69,27 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
 
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
+
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for SLURM batched workflow execution script.
+    
+    Orchestrates batch processing of workflows on SLURM clusters by dividing
+    selected datasets into manageable batches, submitting jobs, monitoring
+    execution, and importing results back to OMERO.
+    
+    The function handles:
+        - SLURM client setup and validation
+        - Dynamic workflow parameter discovery
+        - Batch size optimization and job submission
+        - Job status monitoring and error handling
+        - Result importing and user notification
+        - Comprehensive workflow tracking
+    
+    Batch processing improves efficiency for large datasets by optimizing
+    cluster resource usage and reducing individual job overhead.
     """
     # --------------------------------------------
     # :: Slurm Client ::
@@ -58,7 +106,7 @@ def runScript():
         # and populated with the currently selected Image(s)/Dataset(s)
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "2.0.0-alpha.6"
+        params.version = VERSION
         params.description = f'''Script to run workflows on slurm
         cluster, in batches.
 

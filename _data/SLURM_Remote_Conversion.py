@@ -6,8 +6,32 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2024 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# Example OMERO.script to convert remote data on Slurm
+
+"""
+BIOMERO SLURM Remote Data Conversion Script
+
+This script provides intelligent data format conversion on SLURM clusters
+with optimization for same-format operations (no-op conversion).
+
+Key Features:
+- Support for ZARR and TIFF format conversion
+- Smart no-op logic: skips conversion when source equals target format
+- Integration with BIOMERO workflow tracking system
+- Automatic cleanup of temporary files
+- Robust error handling and logging
+
+The script is typically called automatically by SLURM_Run_Workflow.py
+but can be used standalone for specific conversion needs.
+
+Supported Conversions:
+- ZARR → TIFF (full conversion using bioformats2raw + raw2ometiff)
+- ZARR → ZARR (no-op, data unzipped only)
+- TIFF → TIFF (no-op, data unzipped only)
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
 
 import omero
 import omero.gateway
@@ -22,16 +46,39 @@ import sys
 logger = logging.getLogger(__name__)
 
 CONV_OPTIONS_SOURCE = ['zarr']
-CONV_OPTIONS_TARGET = ['tiff']
+CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 INPUT_DATA = "Input data"
 SOURCE = "Source format"
 TARGET = "Target format"
 CLEANUP = "Cleanup?"
 
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
+
 
 def runScript():
     """
-    The main entry point of the script
+    Main entry point for SLURM remote data conversion script.
+    
+    This function orchestrates data format conversion on SLURM clusters
+    with intelligent optimization for same-format operations:
+    
+    1. Validates available data files and conversion options
+    2. Sets up OMERO script parameters for user input
+    3. Checks if conversion is needed (source != target format)
+    4. If conversion needed: submits conversion job to SLURM
+    5. If no conversion needed: performs unzip-only operation
+    6. Updates workflow tracking with results
+    
+    The script automatically handles:
+    - ZARR to TIFF conversion using bioformats tools
+    - No-op operations for same-format requests (optimization)
+    - Workflow task tracking and status updates
+    - Error handling and cleanup
+    
+    Raises:
+        Exception: Various exceptions during conversion process,
+                  all tracked in workflow status
     """
     with SlurmClient.from_config() as slurmClient:
         name_descr = f"Name of folder where images are stored, as provided\
@@ -51,7 +98,7 @@ def runScript():
             Connection ready? << {slurmClient.validate()} >>
             '''
 
-        script_version = "2.0.0-alpha.6"
+        script_version = VERSION
         client = scripts.client(
             script_name,
             script_descr,
@@ -100,32 +147,40 @@ def runScript():
                 group
             )
             try:
-                slurmJob = slurmClient.run_conversion_workflow_job(
-                    zipfile, convert_from, convert_to, wf_id)
-                logger.info(f"Conversion job submitted: {slurmJob}")
-                if not slurmJob.ok:
-                    logger.error(
-                        f"Error converting data: {slurmJob.get_error()}")
-                    slurmClient.workflowTracker.fail_workflow(
-                        wf_id, "Conversion job submission failed")
+                # Check if conversion is needed (no-op if source == target)
+                if convert_from == convert_to:
+                    msg = f"No conversion needed: {zipfile} already in " \
+                          f"{convert_to} format"
+                    logger.info(msg)
+                    message += msg
+                    slurmClient.workflowTracker.complete_workflow(wf_id)
                 else:
-                    slurmJob.wait_for_completion(slurmClient, conn)
-                    if not slurmJob.completed():
-                        log_msg = f"Conversion is not completed: {slurmJob}"
-                        slurmClient.workflowTracker.fail_task(slurmJob.task_id,
-                                                              "Conversion failed")
+                    slurmJob = slurmClient.run_conversion_workflow_job(
+                        zipfile, convert_from, convert_to, wf_id)
+                    logger.info(f"Conversion job submitted: {slurmJob}")
+                    if not slurmJob.ok:
+                        logger.error(
+                            f"Error converting data: {slurmJob.get_error()}")
                         slurmClient.workflowTracker.fail_workflow(
-                            wf_id, "Conversion failed")
-                        raise Exception(log_msg)
+                            wf_id, "Conversion job submission failed")
                     else:
-                        if cleanup:
-                            slurmJob.cleanup(slurmClient)
-                        msg = f"Converted {zipfile} from {convert_from} to {convert_to}"
-                        logger.info(msg)
-                        message += msg
-                        slurmClient.workflowTracker.complete_task(
-                            slurmJob.task_id, msg)
-                        slurmClient.workflowTracker.complete_workflow(wf_id)
+                        slurmJob.wait_for_completion(slurmClient, conn)
+                        if not slurmJob.completed():
+                            log_msg = f"Conversion is not completed: {slurmJob}"
+                            slurmClient.workflowTracker.fail_task(slurmJob.task_id,
+                                                                  "Conversion failed")
+                            slurmClient.workflowTracker.fail_workflow(
+                                wf_id, "Conversion failed")
+                            raise Exception(log_msg)
+                        else:
+                            if cleanup:
+                                slurmJob.cleanup(slurmClient)
+                            msg = f"Converted {zipfile} from {convert_from} to {convert_to}"
+                            logger.info(msg)
+                            message += msg
+                            slurmClient.workflowTracker.complete_task(
+                                slurmJob.task_id, msg)
+                            slurmClient.workflowTracker.complete_workflow(wf_id)
             except Exception as e:
                 message += f" ERROR WITH CONVERTING DATA: {e}"
                 logger.error(message)

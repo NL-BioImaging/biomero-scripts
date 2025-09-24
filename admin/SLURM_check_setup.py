@@ -6,33 +6,90 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# Example OMERO.script to check wf creation progress.
+
+"""
+BIOMERO SLURM Setup Validation Script (Admin Only)
+
+This administrative script provides comprehensive validation and monitoring
+of SLURM cluster setup for BIOMERO workflow execution.
+
+**ADMIN ONLY**: This script requires OMERO administrator privileges.
+
+Key Features:
+- Validate SLURM cluster connectivity and configuration
+- Check availability of workflow container images
+- Monitor pending image downloads and builds
+- Verify converter tool availability
+- Display available data files on cluster
+- Retrieve and display cluster setup logs
+
+Setup Validation:
+- BIOMERO version information
+- SLURM connection status
+- Available workflow models and versions
+- Pending model downloads/builds
+- Converter tool availability
+- Data file inventory
+- Container build logs (sing.log)
+
+Administrative Use:
+- Initial setup verification after installation
+- Troubleshooting connection or configuration issues
+- Monitoring workflow image availability
+- Checking setup progress during initialization
+
+This script is primarily used by OMERO administrators to verify
+and monitor the BIOMERO-SLURM integration setup.
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
 
 import omero
 import omero.gateway
 from omero import scripts
 from omero.rtypes import rstring, wrap
+from omero.gateway import BlitzGateway
 from biomero import SlurmClient
 import logging
 import os
 import sys
 import pkg_resources
 
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
+
 logger = logging.getLogger(__name__)
 
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for SLURM setup validation script.
+    
+    Performs comprehensive validation of BIOMERO-SLURM integration
+    including connectivity testing, workflow availability checking,
+    converter verification, and setup log retrieval.
+    
+    Validation includes:
+        - BIOMERO version information
+        - SLURM cluster connectivity
+        - Available workflow models and pending downloads
+        - Converter tool availability
+        - Data file inventory
+        - Container build log retrieval and attachment
+    
+    Results are displayed to user and optionally attached as log files
+    to OMERO for administrative review.
     """
 
     client = scripts.client(
-        'Slurm Check Setup',
+        'Slurm Check Setup (Admin Only)',
         '''Check Slurm setup, e.g. available workflows.
+        
+        **ADMIN ONLY**: Requires OMERO administrator privileges.
         ''',
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
-        version="2.0.0-alpha.6",
+        version=VERSION,
         authors=["Torec Luik"],
         institutions=["Amsterdam UMC"],
         contact='cellularimaging@amsterdamumc.nl',
@@ -40,6 +97,23 @@ def runScript():
     )
 
     try:
+        # Check if user is admin
+        conn = BlitzGateway(client_obj=client)
+        user = conn.getUser()
+        is_admin = user.isAdmin()
+        user_id = conn.getUserId()
+        
+        logger.info(f"User ID {user_id} admin status: {is_admin}")
+        
+        if not is_admin:
+            logger.warning("Access denied: Admin privileges required")
+            client.setOutput("Message", rstring(
+                f"ACCESS DENIED: This administrative script requires OMERO "
+                f"administrator privileges. User ID {user_id} is not an admin."
+            ))
+            return
+        
+        logger.info("Admin access confirmed, proceeding with setup check")
         message = ""
         with SlurmClient.from_config() as slurmClient:
             bio_version = pkg_resources.get_distribution("biomero").version

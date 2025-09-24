@@ -6,13 +6,38 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# This script is used to run the CellPose segmentation algorithm on a Slurm
-# cluster, using data exported from an Omero server.
-#
-# This script requires the SlurmClient and Fabric Python modules to be
-# installed, as well as access to a Slurm cluster running the
-# CellPose Singularity image.
+
+"""
+BIOMERO CellPose Segmentation Workflow Script
+
+This script provides direct access to CellPose segmentation on SLURM clusters
+as part of the BIOMERO modular workflow system. Designed for advanced users
+who need fine-grained control over the segmentation process.
+
+Key Features:
+- Direct CellPose segmentation execution on SLURM
+- Configurable workflow parameters from GitHub repository
+- Version selection for CellPose Singularity images
+- Job time and email notification configuration
+- Integration with BIOMERO data transfer pipeline
+
+Workflow Steps (Manual Process):
+1. Export data using _SLURM_Image_Transfer script
+2. Convert data format using SLURM_Remote_Conversion script
+3. Run this CellPose segmentation workflow
+4. Import results using SLURM_Get_Results script
+
+Note: For most users, SLURM_Run_Workflow provides automated execution
+of this entire pipeline. This script is for advanced usage requiring
+specific parameter control or debugging.
+
+Container: torecluik/t_nucleisegmentation-cellpose (Docker Hub)
+Requirements: SlurmClient, Fabric, SLURM cluster with CellPose image
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
 
 from __future__ import print_function
 import omero
@@ -25,6 +50,9 @@ import omero.scripts as omscripts
 from biomero import SlurmClient, constants
 import logging
 
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAIL = "No"
@@ -32,15 +60,26 @@ _DEFAULT_TIME = "00:15:00"
 
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for CellPose segmentation workflow on SLURM.
+    
+    Executes CellPose segmentation algorithm on SLURM cluster using
+    pre-exported data. Provides direct access to workflow parameters
+    and version selection for advanced users requiring fine control.
+    
+    The function handles:
+        - SLURM client setup and validation
+        - CellPose parameter configuration from GitHub
+        - Version and data file discovery
+        - Job submission with custom time limits
+        - Email notification setup
+        - Workflow execution monitoring
     """
 
     with SlurmClient.from_config() as slurmClient:
 
         params = JobParams()
         params.authors = ["Torec Luik"]
-        params.version = "2.0.0-alpha.6"
+        params.version = VERSION
         params.description = f'''Script to run CellPose on slurm cluster.
         1. First run the {constants.IMAGE_EXPORT_SCRIPT} script to export your data
         to the cluster.

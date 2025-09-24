@@ -6,8 +6,44 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# Example OMERO.script to run multiple segmentation images on Slurm.
+
+"""
+BIOMERO SLURM Workflow Runner.
+
+This script provides a comprehensive OMERO interface for running computational
+workflows on SLURM clusters. It supports both traditional TIFF and modern ZARR
+data formats, with automatic data transfer, conversion, and result import.
+
+The script orchestrates the complete workflow lifecycle from data export
+through result import, with intelligent optimization for ZARR format handling
+and automatic cleanup of temporary artifacts.
+
+Workflow Process:
+    1. Export selected data (Images/Datasets/Plates) to SLURM cluster
+    2. Convert data format if needed (with ZARR bypass option)
+    3. Execute selected computational workflows on SLURM
+    4. Monitor job completion and retrieve results
+    5. Import results back to OMERO with specified organization
+    6. Clean up temporary artifacts
+
+Key Features:
+    - Multi-format support: TIFF, OME-TIFF, and ZARR
+    - Smart format conversion with no-op optimization
+    - Configurable workflow execution with parameter validation
+    - Comprehensive workflow tracking and logging
+    - Automatic temporary file cleanup
+
+Usage:
+    Select data in OMERO, choose workflows and parameters, then run the script.
+    Results are automatically imported based on selected output options.
+
+Authors:
+    Torec Luik (Amsterdam UMC)
+    OMERO Team (University of Dundee)
+
+License:
+    GPL v2+ (see LICENSE.txt)
+"""
 
 from __future__ import print_function
 import sys
@@ -29,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+CONVERSION_SCRIPTS = [constants.CONVERSION_SCRIPT]
 DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
              rstring(constants.transfer.DATA_TYPE_IMAGE),
              rstring(constants.transfer.DATA_TYPE_PLATE)]
@@ -37,12 +74,30 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
-VERSION = "2.0.0-alpha.6"
+VERSION = "2.0.0-alpha.7"
 
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for the SLURM workflow execution script.
+    
+    Orchestrates the complete workflow lifecycle including SLURM client setup,
+    OMERO script parameter configuration, user input validation, and the full
+    data processing pipeline from export through import.
+    
+    The processing pipeline includes:
+        - Export data from OMERO to SLURM
+        - Convert data formats if needed (with ZARR optimization)
+        - Execute selected computational workflows
+        - Monitor job completion
+        - Import results back to OMERO
+        - Handle cleanup and error recovery
+    
+    Uses the biomero framework to maintain persistent connections to both
+    OMERO and SLURM for robust data transfer and job management.
+    
+    Raises:
+        Exception: Various exceptions during workflow execution, all logged
+            and handled gracefully.
     """
     # --------------------------------------------
     # :: Slurm Client ::
@@ -97,6 +152,11 @@ def runScript():
             omscripts.Bool(constants.workflow.EMAIL, grouping="01.3",
                            description=email_descr,
                            default=True),
+            omscripts.Bool("Use_ZARR_Format", grouping="01.4",
+                           description="Skip TIFF conversion and run "
+                           "workflows directly on ZARR data (experimental). "
+                           "Use this for workflows that support ZARR input.",
+                           default=False),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
@@ -250,8 +310,11 @@ def runScript():
             email = getOmeroEmail(client, conn)
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
+            # Get ZARR format preference
+            use_zarr_format = unwrap(client.getInput("Use_ZARR_Format"))
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
+            logger.debug(f"Use ZARR format: {use_zarr_format}")
             # Start tracking the workflow on a unique ID
             wf_id = slurmClient.workflowTracker.initiate_workflow(
                 params.name,
@@ -288,31 +351,32 @@ def runScript():
             # Quick git pull on Slurm for latest version of job scripts
             update_result = slurmClient.update_slurm_scripts()
             logger.debug(update_result.__dict__)
-            slurmJob = slurmClient.run_conversion_workflow_job(
-                zipfile, 'zarr', 'tiff', wf_id)
-            logger.info(f"Conversion job: {slurmJob}")
-            if not slurmJob.ok:
-                logger.warning(
-                    f"Error converting data: {slurmJob.get_error()}")
-                wf_failed = True
+            
+            # Determine conversion format based on ZARR preference
+            if use_zarr_format:
+                # No-op conversion: zarr to zarr (skipped in conversion script)
+                source_format = 'zarr'
+                target_format = 'zarr'
+                UI_messages += "Using ZARR format (no conversion needed). "
             else:
-                try:
-                    slurmJob.wait_for_completion(slurmClient, conn)
-                    if not slurmJob.completed():
-                        log_msg = f"Conversion is not completed: {slurmJob}"
-                        slurmClient.workflowTracker.fail_task(slurmJob.task_id,
-                                                              "Conversion failed")
-                        wf_failed = True
-                        raise Exception(log_msg)
-                    else:
-                        slurmJob.cleanup(slurmClient)
-                        msg = f"Conversion completed: {slurmJob}"
-                        slurmClient.workflowTracker.complete_task(
-                            slurmJob.task_id, msg)
-                except Exception as e:
-                    UI_messages += f" ERROR WITH CONVERTING DATA: {e}"
-                    raise e
+                # Traditional conversion: zarr to tiff
+                source_format = 'zarr'
+                target_format = 'tiff'
+                UI_messages += "Converting ZARR to TIFF. "
+                
+            # Run conversion using the SLURM_Remote_Conversion script
+            rv_conv, task_id = convertDataOnSLURM(
+                client, conn, slurmClient, zipfile, source_format,
+                target_format, wf_id)
+            logger.debug(f"Ran data conversion: {rv_conv.keys()}, {rv_conv}")
+            if 'Message' in rv_conv:
+                logger.info(rv_conv['Message'].getValue())  # log
+                UI_messages += rv_conv['Message'].getValue() + " "
 
+            slurm_job_ids = {}
+            task_ids = {}
+
+            if not wf_failed:
                 logger.info('''
                 # --------------------------------------------
                 # :: 3. Create Slurm jobs for all workflows ::
@@ -445,6 +509,7 @@ def runScript():
                     wf_id, "Workflow execution failed")
             else:
                 slurmClient.workflowTracker.complete_workflow(wf_id)
+            
             client.setOutput("Message", rstring(UI_messages))
 
         except Exception as e:
@@ -470,6 +535,29 @@ def run_workflow(slurmClient: SlurmClient,
                  email,
                  name,
                  wf_id):
+    """Execute a specific workflow on the SLURM cluster.
+    
+    Submits a named workflow to SLURM with user-specified parameters and
+    monitors initial job submission status. Handles parameter extraction
+    from OMERO UI inputs and manages workflow tracking state.
+    
+    Args:
+        slurmClient (SlurmClient): Active SLURM client connection.
+        workflow_params: Dictionary of workflow-specific parameters.
+        client: OMERO script client for parameter access.
+        UI_messages (str): Accumulated user interface messages.
+        zipfile: Name of input data file on SLURM.
+        email: User email for job notifications.
+        name: Workflow name to execute.
+        wf_id: Workflow UUID for tracking.
+    
+    Returns:
+        tuple: (UI_messages, slurm_job_id, wf_id, task_id) containing
+            updated messages, SLURM job ID, workflow ID, and task ID.
+    
+    Raises:
+        SSHException: If job submission or status checking fails.
+    """
     logger.info(f"Running {name}")
     workflow_version = unwrap(
         client.getInput(f"{name}_Version"))
@@ -520,6 +608,19 @@ def run_workflow(slurmClient: SlurmClient,
 
 
 def getOmeroEmail(client, conn):
+    """Retrieve the authenticated user's email address from OMERO.
+    
+    Attempts to get the email address of the currently authenticated OMERO
+    user if email notifications are enabled in the script parameters.
+    
+    Args:
+        client: OMERO script client for parameter access.
+        conn: OMERO BlitzGateway connection.
+    
+    Returns:
+        str or None: User's email address if available and enabled,
+            None otherwise.
+    """
     if unwrap(client.getInput(constants.workflow.EMAIL)):
         try:
             # Retrieve information about the authenticated user
@@ -537,11 +638,88 @@ def getOmeroEmail(client, conn):
     return use_email
 
 
+def convertDataOnSLURM(client: omscripts.client,
+                       conn: BlitzGateway,
+                       slurmClient: SlurmClient,
+                       zipfile: str,
+                       source_format: str,
+                       target_format: str,
+                       wf_id: UUID):
+    """
+    Convert data format on SLURM cluster using the remote conversion script.
+    
+    This function delegates format conversion to the SLURM_Remote_Conversion.py
+    script, which includes smart no-op logic for same-format conversions
+    (e.g., zarr->zarr operations are skipped for efficiency).
+    
+    Args:
+        client: OMERO script client for parameter access
+        conn: OMERO BlitzGateway connection
+        slurmClient: Active SLURM client connection
+        zipfile: Name of the data file on SLURM to convert
+        source_format: Input data format (e.g., 'zarr', 'tiff')
+        target_format: Desired output format (e.g., 'zarr', 'tiff')
+        wf_id: Workflow UUID for tracking
+        
+    Raises:
+        Exception: If conversion script not found or conversion fails
+    """
+    svc = conn.getScriptService()
+    scripts = svc.getScripts()
+    # force just one script, why is it an array?
+    script_id, biomero, script_name = [(unwrap(s.id), unwrap(s.getVersion()), unwrap(s.getName()))
+                                       for s in scripts if unwrap(s.getName()) in CONVERSION_SCRIPTS][0]
+    if not script_id:
+        raise Exception(f"Conversion script not found: {CONVERSION_SCRIPTS}")
+    
+    inputs = {
+        "Input data": rstring(zipfile),
+        "Source format": rstring(source_format),
+        "Target format": rstring(target_format),
+        "Cleanup?": rbool(True)
+    }
+    persist_dict = {key: unwrap(value) for key, value in inputs.items()}
+    logger.debug(f"{inputs}, {script_id}")
+    task_id = slurmClient.workflowTracker.add_task_to_workflow(
+        wf_id,
+        script_name,
+        VERSION,
+        zipfile,
+        persist_dict
+    )
+    slurmClient.workflowTracker.start_task(task_id)
+    rv = runOMEROScript(client, svc, script_id, inputs)
+    slurmClient.workflowTracker.complete_task(task_id, unwrap(rv['Message']))
+    return rv, task_id
+
+
 def exportImageToSLURM(client: omscripts.client,
                        conn: BlitzGateway,
                        slurmClient: SlurmClient,
                        zipfile: str,
                        wf_id: UUID):
+    """
+    Export selected OMERO data to SLURM cluster for processing.
+    
+    This function delegates to the _SLURM_Image_Transfer.py script to export
+    selected images, datasets, or plates from OMERO to the SLURM cluster.
+    The exported data is automatically transferred and unpacked on SLURM,
+    with temporary file annotations cleaned up after successful transfer.
+    
+    Args:
+        client: OMERO script client for accessing user inputs
+        conn: OMERO BlitzGateway connection
+        slurmClient: Active SLURM client connection
+        zipfile: Target filename for the exported data
+        wf_id: Workflow UUID for tracking
+        
+    Returns:
+        tuple: (export_result_dict, task_id) containing script results and task ID
+        
+    Raises:
+        ValueError: If export script not found
+        Exception: If export process fails
+    """
     svc = conn.getScriptService()
     scripts = svc.getScripts()
     # force just one script, why is it an array?
@@ -583,6 +761,18 @@ def exportImageToSLURM(client: omscripts.client,
 
 
 def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
+    """
+    Execute an OMERO script and return its results.
+    
+    Args:
+        client: OMERO script client
+        svc: OMERO script service
+        script_id: ID of the script to execute
+        inputs: Dictionary of input parameters for the script
+        
+    Returns:
+        dict: Script execution results
+    """
     rv = None
 
     script_id = int(script_id)
@@ -607,6 +797,27 @@ def importResultsToOmero(client: omscripts.client,
                          slurm_job_id: int,
                          selected_output: list,
                          wf_id: UUID) -> str:
+    """
+    Import workflow results from SLURM back into OMERO.
+    
+    This function delegates to the SLURM_Get_Results.py script to retrieve
+    completed workflow results from SLURM and import them into OMERO
+    according to the user's selected output options.
+    
+    Args:
+        client: OMERO script client for accessing user inputs
+        conn: OMERO BlitzGateway connection
+        slurmClient: Active SLURM client connection
+        slurm_job_id: SLURM job ID of the completed workflow
+        selected_output: Dictionary of selected output organization options
+        wf_id: Workflow UUID for tracking
+        
+    Returns:
+        str: Import result message
+        
+    Raises:
+        Exception: If import script not found or import fails
+    """
     if conn.keepAlive():
         svc = conn.getScriptService()
         scripts = svc.getScripts()
@@ -784,17 +995,19 @@ def importResultsToOmero(client: omscripts.client,
 
 
 def wait_for_job_completion(slurmClient, slurm_job_id, timeout=500, interval=15):
-    """
-    Waits for the slurm job to complete by polling at regular intervals.
-
-    Parameters:
-        slurmClient: The SLURM client used to query job status.
-        slurm_job_id: The ID of the SLURM job to wait for.
-        timeout (int): Maximum time to wait for the job to complete (in seconds).
-        interval (int): Time between each check (in seconds).
-
+    """Wait for SLURM job completion by polling at regular intervals.
+    
+    Continuously polls the SLURM accounting system to determine when a job
+    has completed, with configurable timeout and polling intervals.
+    
+    Args:
+        slurmClient: SLURM client used to query job status.
+        slurm_job_id: ID of the SLURM job to wait for.
+        timeout (int): Maximum wait time in seconds. Defaults to 500.
+        interval (int): Polling interval in seconds. Defaults to 15.
+    
     Raises:
-        TimeoutError: If the job does not complete within the timeout period.
+        TimeoutError: If job does not complete within timeout period.
     """
     start_time = timesleep.time()
 
@@ -814,6 +1027,15 @@ def wait_for_job_completion(slurmClient, slurm_job_id, timeout=500, interval=15)
 
 
 def get_project_name_ids(conn, parent_id):
+    """Get formatted project name/ID strings for a given dataset.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        parent_id: Dataset ID to find parent projects for.
+    
+    Returns:
+        list: Formatted strings of "ID: Name" for each project.
+    """
     # Note different implementation XD
     # Call it 'legacy code', at version 1 already ;)
     projects = [rstring('%d: %s' % (d.id, d.getName()))
@@ -824,6 +1046,15 @@ def get_project_name_ids(conn, parent_id):
 
 
 def get_dataset_name_ids(conn, parent_id):
+    """Get formatted dataset name/ID strings for given dataset IDs.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        parent_id: Dataset ID to retrieve information for.
+    
+    Returns:
+        list: Formatted strings of "ID: Name" for each dataset.
+    """
     dataset = [rstring('%d: %s' % (d.id, d.getName()))
                for d in conn.getObjects(constants.transfer.DATA_TYPE_DATASET,
                                         [parent_id])]
@@ -832,6 +1063,15 @@ def get_dataset_name_ids(conn, parent_id):
 
 
 def get_plate_name_ids(conn, parent_id):
+    """Get formatted plate name/ID strings for given plate IDs.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        parent_id: Plate ID to retrieve information for.
+    
+    Returns:
+        list: Formatted strings of "ID: Name" for each plate.
+    """
     plates = [rstring('%d: %s' % (d.id, d.getName()))
               for d in conn.getObjects(constants.transfer.DATA_TYPE_PLATE,
                                        [parent_id])]
@@ -839,7 +1079,24 @@ def get_plate_name_ids(conn, parent_id):
     return plates
 
 
-def createFileName(client: omscripts.client, conn: BlitzGateway, wf_id: UUID) -> str:
+def createFileName(client: omscripts.client, conn: BlitzGateway,
+                   wf_id: UUID) -> str:
+    """Generate a unique filename for workflow data transfer.
+    
+    Creates a descriptive filename based on selected OMERO objects (images,
+    datasets, or plates) combined with the workflow UUID for uniqueness.
+    
+    Args:
+        client: OMERO script client for parameter access.
+        conn: OMERO BlitzGateway connection.
+        wf_id: Workflow UUID for filename uniqueness.
+    
+    Returns:
+        str: Generated filename incorporating object names and workflow ID.
+    
+    Raises:
+        ValueError: If unsupported data type is provided.
+    """
     opts = {}
     data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
     if data_type == constants.transfer.DATA_TYPE_IMAGE:

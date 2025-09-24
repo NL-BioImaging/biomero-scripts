@@ -6,8 +6,42 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# Example OMERO.script to get results from a Slurm job.
+
+"""
+BIOMERO SLURM Results Import Script
+
+This script handles the import of completed workflow results from SLURM
+clusters back into OMERO with flexible organization options and metadata
+preservation.
+
+Key Features:
+- Import results from completed SLURM jobs
+- Flexible result organization (attach to original data, new datasets, etc.)
+- Support for multiple file formats (TIFF, OME-TIFF, PNG)
+- CSV data import as OMERO tables
+- Metadata preservation and linking
+- Configurable naming and dataset organization
+- Comprehensive error handling and logging
+
+Import Options:
+- Attach results to original images as attachments
+- Create new datasets with custom naming
+- Import into parent dataset/plate structure
+- Convert CSV files to OMERO tables
+- Rename imported images with custom patterns
+
+File Support:
+- Images: TIFF, OME-TIFF, PNG formats
+- Tables: CSV files converted to OMERO.tables
+- Metadata: Preserved through import process
+
+This script is typically called automatically by SLURM_Run_Workflow.py
+but can be used standalone for manual result importing.
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
 
 import shutil
 import sys
@@ -28,6 +62,10 @@ import ezomero
 from tifffile import imread, TiffFile
 import numpy as np
 from omero_metadata.populate import ParsingContext
+
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
+
 OBJECT_TYPES = (
     'Plate',
     'Screen',
@@ -45,26 +83,30 @@ SUPPORTED_TABLE_EXTENSIONS = ['.csv']
 
 
 def load_image(conn, image_id):
-    """Load the Image object.
+    """Load OMERO Image object by ID.
 
     Args:
-        conn (_type_): Open OMERO connection
-        image_id (String): ID of the image
+        conn: Open OMERO BlitzGateway connection.
+        image_id (str): ID of the image to load.
 
     Returns:
-        _type_: OMERO Image object
+        Image: OMERO Image wrapper object.
     """
     return conn.getObject('Image', image_id)
 
 
 def getOriginalFilename(name):
-    """Attempt to retrieve original filename.
+    """Extract original filename from processed file path.
 
-    Assuming /../../Cells Apoptotic.png_merged_z01_t01.tiff,
-    we want 'Cells Apoptotic.png' to be returned.
+    Extracts the base filename from a processed file path.
+    Example: "/../../Cells Apoptotic.png_merged_z01_t01.tiff"
+    Returns: "Cells Apoptotic.png"
 
     Args:
-        name (String): name of processed file
+        name (str): Path/name of processed file.
+        
+    Returns:
+        str: Original filename if pattern matches, otherwise input name.
     """
     match = re.match(pattern=".+\/(.+\.[A-Za-z]+).+\.[tiff|png]", string=name)
     if match:
@@ -75,18 +117,24 @@ def getOriginalFilename(name):
 
 def saveCSVToOmeroAsTable(conn, folder, client,
                           data_type='Dataset', object_id=651, wf_id=None):
-    """Save CSV files from a (unzipped) folder to OMERO as OMERO.tables
+    """Save CSV files from folder to OMERO as OMERO.tables.
+
+    Searches for CSV files in the specified folder and converts them to
+    OMERO.tables attached to the specified OMERO object. Falls back to
+    file attachments if table creation fails.
 
     Args:
-        conn (_type_): Connection to OMERO
-        folder (String): Unzipped folder
-        client : OMERO client to attach output
-        data_type (str, optional): Type of OMERO object. Defaults to 'Dataset'.
-        object_id (_type_, optional): ID of OMERO object. Defaults to 651.
-        wf_id (str, optional): Workflow ID if available. Defaults to None.
+        conn: OMERO BlitzGateway connection.
+        folder (str): Path to folder containing CSV files.
+        client: OMERO script client for job ID access.
+        data_type (str): Type of OMERO object ('Dataset', 'Plate', etc.).
+            Defaults to 'Dataset'.
+        object_id (int): ID of OMERO object to attach tables to.
+            Defaults to 651.
+        wf_id (str, optional): Workflow ID for metadata. Defaults to None.
 
     Returns:
-        String: Message to add to script output
+        str: Status message describing import results.
     """
     message = ""
 
@@ -988,7 +1036,7 @@ def runScript():
 
 
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
-            version="2.0.0-alpha.6",
+            version=VERSION,
             authors=["Torec Luik"],
             institutions=["Amsterdam UMC"],
             contact='cellularimaging@amsterdamumc.nl',
@@ -1097,18 +1145,19 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, slurmClient, message, folder, wf_id=wf_id)
 
-                            clean_result = slurmClient.cleanup_tmp_files(
-                                slurm_job_id,
-                                filename,
-                                data_location)
-                            message += "\nSuccesfully cleaned up tmp files"
+                            # clean_result = slurmClient.cleanup_tmp_files(
+                            #     slurm_job_id,
+                            #     filename,
+                            #     data_location)
+                            message += "\nSuccesfully not cleaned up tmp files"
                             logger.info(message)
-                            logger.debug(clean_result)
+                            # logger.debug(clean_result)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
                     if folder or log_file:
-                        cleanup_tmp_files_locally(message, folder, log_file)
+                        # cleanup_tmp_files_locally(message, folder, log_file)
+                        print("woops, cleanup not implemented yet")
 
             client.setOutput("Message", rstring(str(message)))
         finally:

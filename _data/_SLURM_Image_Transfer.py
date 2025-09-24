@@ -1,30 +1,54 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+#
+# Copyright (C) 2023 T T Luik
+# Copyright (C) 2006-2014 University of Dundee. All rights reserved.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
 """
------------------------------------------------------------------------------
-  Copyright (C) 2023 T T Luik
-  Copyright (C) 2006-2014 University of Dundee. All rights reserved.
+BIOMERO SLURM Image Transfer Script
 
+This script provides comprehensive data export from OMERO to SLURM clusters
+with support for multiple data formats and automatic cleanup of temporary
+artifacts.
 
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
-  (at your option) any later version.
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
+Key Features:
+- Multi-format export: TIFF, OME-TIFF, ZARR
+- Support for Images, Datasets, and Plates
+- Automatic data transfer to SLURM cluster
+- Intelligent compression and packaging
+- Temporary file annotation cleanup after successful transfer
+- Configurable rendering options (channels, Z-projection, time points)
+- Robust error handling and logging
 
-  You should have received a copy of the GNU General Public License along
-  with this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+Data Export Process:
+1. Render and save image data in selected format
+2. Package data into zip archive (except single OME-TIFF files)
+3. Transfer data to SLURM cluster via SSH
+4. Unpack data on SLURM for processing
+5. Create temporary file annotation in OMERO
+6. Clean up annotation after successful transfer
 
-------------------------------------------------------------------------------
+Supported Formats:
+- TIFF: Rendered image planes with configurable options
+- OME-TIFF: Original pixel data preservation
+- ZARR: Native OME-ZARR format using omero-cli-zarr
 
-This script takes a number of images and saves individual image planes in a
-zip file for download, then exports it to SLURM.
-
-@author Torec Luik
+Authors: Torec Luik, William Moore, OME Team
+Institutions: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
 """
 
 import shutil
@@ -51,14 +75,18 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
 
 # keep track of log strings.
 log_strings = []
 
 
 def log(text):
-    """
-    Adds the text to a list of logs. Compiled into text file at the end.
+    """Add text to log strings list for later compilation to file.
+    
+    Args:
+        text: Text to add to log, handles unicode encoding.
     """
     # Handle unicode
     try:
@@ -70,12 +98,11 @@ def log(text):
 
 
 def compress(target, base):
-    """
-    Creates a ZIP recursively from a given base directory.
-
-    @param target:      Name of the zip file we want to write E.g.
-                        "folder.zip"
-    @param base:        Name of folder that we want to zip up E.g. "folder"
+    """Create a ZIP archive recursively from a given base directory.
+    
+    Args:
+        target (str): Name of the zip file to write (e.g., "folder.zip").
+        base (str): Name of folder to zip up (e.g., "folder").
     """
     base_name, ext = target.split(".")
     shutil.make_archive(base_name, ext, base)
@@ -84,22 +111,21 @@ def compress(target, base):
 def save_plane(image, format, c_name, z_range, project_z, t=0,
                channel=None,
                greyscale=False, zoom_percent=None, folder_name=None):
-    """
-    Renders and saves an image to disk.
-
-    @param suuid:           The active session UUID 
-    @param image:           The image to render
-    @param format:          The format to save as
-    @param c_name:          The name to use
-    @param z_range:         Tuple of (zIndex,) OR (zStart, zStop) for
-                            projection
-    @param t:               T index
-    @param channel:         Active channel index. If None, use current
-                            rendering settings
-    @param greyscale:       If true, all visible channels will be
-                            greyscale
-    @param zoom_percent:    Resize image by this percent if specified
-    @param folder_name:     Indicate where to save the plane
+    """Render and save an image plane to disk.
+    
+    Args:
+        image: OMERO image wrapper to render.
+        format (str): Image format to save as (PNG, TIFF, or JPG).
+        c_name (str): Channel name for filename.
+        z_range (tuple): Either (zIndex,) or (zStart, zStop) for projection.
+        project_z (bool): Whether to use Z projection.
+        t (int): Time point index. Defaults to 0.
+        channel (int, optional): Active channel index. If None, uses current
+            rendering settings.
+        greyscale (bool): If True, render all visible channels as greyscale.
+            Defaults to False.
+        zoom_percent (int, optional): Resize image by this percentage.
+        folder_name (str, optional): Directory to save the plane in.
     """
 
     original_name = image.getName()
@@ -148,9 +174,21 @@ def save_plane(image, format, c_name, z_range, project_z, t=0,
 
 
 def make_image_name(original_name, c_name, z_range, t, extension, folder_name):
-    """
-    Produces the name for the saved image.
-    E.g. imported/myImage.dv -> myImage_DAPI_z13_t01.png
+    """Generate filename for saved image with standardized naming convention.
+    
+    Creates descriptive filenames incorporating image metadata.
+    Example: "imported/myImage.dv" → "myImage_DAPI_z13_t01.png"
+    
+    Args:
+        original_name (str): Original image name from OMERO.
+        c_name (str): Channel name.
+        z_range (tuple): Z-slice range (single index or start-stop range).
+        t (int): Time point index.
+        extension (str): File extension for output format.
+        folder_name (str, optional): Target folder path.
+    
+    Returns:
+        str: Generated filename with full path if folder specified.
     """
     name = os.path.basename(original_name)
     # name = name.rsplit(".",1)[0]  # remove extension
@@ -171,8 +209,12 @@ def make_image_name(original_name, c_name, z_range, t, extension, folder_name):
 
 
 def save_as_ome_tiff(conn, image, folder_name=None):
-    """
-    Saves the image as an ome.tif in the specified folder
+    """Save image as OME-TIFF preserving original pixel data.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        image: OMERO image wrapper to export.
+        folder_name (str, optional): Target folder for the file.
     """
 
     extension = "ome.tif"
@@ -195,18 +237,49 @@ def save_as_ome_tiff(conn, image, folder_name=None):
 
 
 def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None):
+    """Export plate as ZARR format using omero-cli-zarr.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        suuid: Session UUID for authentication.
+        plate: OMERO plate wrapper to export.
+        folder_name (str, optional): Target folder for export.
+        client: OMERO client (unused, for compatibility).
+    """
     # TODO use raw converter directly
     # (1) find out the plate's file
-    # (2) (a) if not zarr: subprocess raw on that file 
+    # (2) (a) if not zarr: subprocess raw on that file
     # (2) (b) if zarr: copy/scp directly
-    save_as_zarr(conn, suuid, plate, folder_name, constants.transfer.DATA_TYPE_PLATE)
+    save_as_zarr(conn, suuid, plate, folder_name,
+                 constants.transfer.DATA_TYPE_PLATE)
 
 
 def save_image_as_zarr(conn, suuid, image, folder_name=None):
-    save_as_zarr(conn, suuid, image, folder_name, constants.transfer.DATA_TYPE_IMAGE)
+    """Export image as ZARR format using omero-cli-zarr.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        suuid: Session UUID for authentication.
+        image: OMERO image wrapper to export.
+        folder_name (str, optional): Target folder for export.
+    """
+    save_as_zarr(conn, suuid, image, folder_name,
+                 constants.transfer.DATA_TYPE_IMAGE)
     
 
 def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
+    """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
+    
+    Args:
+        conn: OMERO BlitzGateway connection.
+        suuid: Session UUID for OMERO authentication.
+        object: OMERO object wrapper (Image or Plate) to export.
+        folder_name (str, optional): Target folder for export.
+        data_type (str, optional): Type of OMERO object for appropriate export.
+    
+    Raises:
+        ValueError: If unsupported data_type is provided.
+    """
     extension = "zarr"
     name = os.path.basename(object.getName())
     img_name = "%s.%s" % (name, extension)
@@ -331,8 +404,35 @@ def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
                                c, g_scale, zoom_percent, folder_name)
 
 
-def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str, client):
-
+def batch_image_export(conn, script_params, slurmClient: SlurmClient,
+                       suuid: str, client):
+    """
+    Export selected OMERO data to SLURM cluster with automatic cleanup.
+    
+    This function handles the complete export pipeline:
+    1. Processes selected images, datasets, or plates from OMERO
+    2. Renders and saves data in specified format (TIFF/OME-TIFF/ZARR)
+    3. Packages data for transfer (zip compression when needed)
+    4. Transfers data to SLURM cluster via SSH
+    5. Unpacks data on SLURM for processing
+    6. Creates temporary file annotation in OMERO
+    7. Automatically cleans up annotation after successful transfer
+    
+    Args:
+        conn: OMERO BlitzGateway connection
+        script_params: Dictionary of script parameters from user input
+        slurmClient: Active SLURM client for data transfer
+        suuid: OMERO session UUID for authentication
+        client: OMERO script client for creating annotations
+        
+    Returns:
+        tuple: (file_annotation, message) where file_annotation is None
+               if successfully cleaned up, or the annotation object if
+               cleanup failed or transfer was unsuccessful
+               
+    Raises:
+        Exception: Various exceptions during export process, all logged
+    """
     # for params with default values, we can get the value directly
     split_cs = script_params[constants.transfer.CHANNELS]
     merged_cs = script_params[constants.transfer.MERGED]
@@ -563,29 +663,58 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient, suuid: str
         namespace = NSCREATED + "/omero/export_scripts/Batch_Image_Export"
 
     # Copy to SLURM
+    transfer_successful = False
     try:
         r = slurmClient.transfer_data(Path(export_file))
         logger.debug(r)
         message += f"'{folder_name}' succesfully copied to SLURM!\n"
+        transfer_successful = True
     except Exception as e:
         message += f"Copying to SLURM failed: {e}\n"
         
     # Unpack on SLURM
-    try:
-        unpack_result = slurmClient.unpack_data(folder_name)
-        logger.debug(unpack_result.stdout)
-        if not unpack_result.ok:
-            logger.warning(f"Error unpacking data:{unpack_result.stderr}")
-    except Exception as e:
-        message += f"Unzipping on SLURM failed: {e}\n"
+    unpack_successful = False
+    if transfer_successful:
+        try:
+            unpack_result = slurmClient.unpack_data(folder_name)
+            logger.debug(unpack_result.stdout)
+            if not unpack_result.ok:
+                logger.warning(f"Error unpacking data:{unpack_result.stderr}")
+            else:
+                unpack_successful = True
+        except Exception as e:
+            message += f"Unzipping on SLURM failed: {e}\n"
     
     file_annotation, ann_message = script_utils.create_link_file_annotation(
         conn, export_file, parent, output=output_display_name,
         namespace=namespace, mimetype=mimetype)
     message += ann_message
+    
+    # Clean up file annotation if transfer and unpack were successful
+    if transfer_successful and unpack_successful and file_annotation:
+        try:
+            conn.deleteObjects("FileAnnotation", [file_annotation.id],
+                               deleteAnns=True, deleteChildren=True, wait=True)
+            message += ("Temporary file annotation cleaned up after "
+                        "successful transfer.\n")
+            logger.info(f"Cleaned up file annotation {file_annotation.id}")
+            # Return None to indicate cleanup was done
+            file_annotation = None
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup file annotation: "
+                           f"{cleanup_error}")
+            message += (f"Warning: Could not cleanup temporary file "
+                        f"annotation: {cleanup_error}\n")
+
     return file_annotation, message
 
+
 def write_logfile(exp_dir):
+    """Write accumulated log strings to a batch export log file.
+    
+    Args:
+        exp_dir (str): Export directory path where log file will be created.
+    """
     name = 'Batch_Image_Export.txt'
     with open(os.path.join(exp_dir, name), 'w') as log_file:
         for s in log_strings:
@@ -594,9 +723,11 @@ def write_logfile(exp_dir):
 
 
 def run_script():
-    """
-    The main entry point of the script, as called by the client via the
-    scripting service, passing the required parameters.
+    """Main entry point for SLURM image transfer script.
+    
+    Called by OMERO scripting service to handle data export from OMERO
+    to SLURM clusters. Configures script parameters, processes user inputs,
+    and delegates to batch_image_export for the actual transfer work.
     """
 
     with SlurmClient.from_config() as slurmClient:
@@ -736,7 +867,7 @@ def run_script():
                 description="Name of folder (and zip file) to store images. Don't use spaces!",
                 default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
 
-            version="2.0.0-alpha.6",
+            version=VERSION,
             authors=["Torec Luik", "William Moore", "OME Team"],
             institutions=["Amsterdam UMC", "University of Dundee"],
             contact='cellularimaging@amsterdamumc.nl',

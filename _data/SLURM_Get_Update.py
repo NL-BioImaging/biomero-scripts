@@ -6,8 +6,40 @@
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
-#
-# Example OMERO.script to get a Slurm job update.
+
+"""
+BIOMERO SLURM Job Status and Update Script
+
+This script provides job monitoring and log file retrieval capabilities
+for SLURM jobs submitted through the BIOMERO workflow system.
+
+Key Features:
+- Monitor status of active SLURM jobs
+- Retrieve log files from completed jobs
+- Attach log files to OMERO projects as file annotations
+- Support for both running and completed job queries
+- User-friendly job selection interface
+- Comprehensive error handling and status reporting
+
+Job Monitoring Capabilities:
+- Active Jobs: Real-time status checking of running workflows
+- Completed Jobs: Log file retrieval and attachment to OMERO
+- Job History: Access to previously completed jobs
+- Error Diagnostics: Log file analysis for troubleshooting
+
+Usage Scenarios:
+- Check progress of long-running workflows
+- Retrieve detailed execution logs for debugging
+- Monitor resource usage and job performance
+- Troubleshoot failed or stalled jobs
+
+This script complements the main workflow execution scripts by providing
+monitoring and diagnostic capabilities after job submission.
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
 
 import omero
 import omero.gateway
@@ -21,6 +53,9 @@ import logging
 import os
 import sys
 
+# Version constant for easy version management
+VERSION = "2.0.0-alpha.7"
+
 logger = logging.getLogger(__name__)
 
 SLURM_JOB_ID = "SLURM Job Id"
@@ -31,6 +66,15 @@ COMPLETED_JOB = "Completed Job"
 
 
 def getUserProjects():
+    """Retrieve list of user's OMERO projects for log file attachment.
+    
+    Creates temporary OMERO connection to fetch available projects
+    that can be used as targets for attaching job log files.
+    
+    Returns:
+        list: Formatted strings of "ID: Name" for each project,
+            or error messages if connection fails.
+    """
     try:
         client = omero.client()
         client.createSession()
@@ -49,8 +93,18 @@ def getUserProjects():
 
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for SLURM job monitoring and update script.
+    
+    Provides interface for monitoring active SLURM jobs and retrieving
+    log files from completed jobs. Handles job status queries, log file
+    downloading, and attachment to OMERO projects.
+    
+    The function manages:
+        - Active job status monitoring
+        - Completed job log file retrieval
+        - OMERO project selection for log attachment
+        - User interface for job selection
+        - Error handling and status reporting
     """
     with SlurmClient.from_config() as slurmClient:
 
@@ -78,7 +132,7 @@ def runScript():
                          description="Project to attach workflow results to",
                          values=_projects),
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
-            version="2.0.0-alpha.6",
+            version=VERSION,
             authors=["Torec Luik"],
             institutions=["Amsterdam UMC"],
             contact='cellularimaging@amsterdamumc.nl',

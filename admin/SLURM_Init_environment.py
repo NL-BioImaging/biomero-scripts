@@ -9,6 +9,23 @@
 #
 # Example OMERO.script to instantiate a 'empty' Slurm connection.
 
+"""
+BIOMERO SLURM Environment Initialization Script (Admin Only)
+
+This administrative script sets up the complete SLURM environment for BIOMERO
+workflow execution including directory structure, job scripts, converters,
+and container images.
+
+**ADMIN ONLY**: This script requires OMERO administrator privileges.
+
+This is typically run once during initial BIOMERO-SLURM setup to prepare
+the cluster environment for workflow execution.
+
+Authors: Torec Luik, OMERO Team
+Institution: Amsterdam UMC, University of Dundee
+License: GPL v2+ (see LICENSE.txt)
+"""
+
 import omero
 import omero.gateway
 from omero import scripts
@@ -20,18 +37,23 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
-VERSION = "2.0.0-alpha.6"
+VERSION = "2.0.0-alpha.7"
 
 
 def runScript():
-    """
-    The main entry point of the script
+    """Main entry point for SLURM environment initialization script.
+    
+    Sets up the complete SLURM environment for BIOMERO workflow execution
+    including directory structure, job scripts, converters, and container
+    images. This is typically run once during initial setup.
     """
 
     extra_config_name = "Extra Config file (optional!)"
     client = scripts.client(
-        'Slurm Init',
+        'Slurm Init (Admin Only)',
         '''Will initiate the Slurm environment for workflow execution.
+
+        **ADMIN ONLY**: Requires OMERO administrator privileges.
 
         You can provide a config file location, 
         and/or it will look for default locations:
@@ -51,6 +73,23 @@ def runScript():
 
     try:
         conn = BlitzGateway(client_obj=client)
+        
+        # Check if user is admin
+        user = conn.getUser()
+        is_admin = user.isAdmin()
+        user_id = conn.getUserId()
+        
+        logger.info(f"User ID {user_id} admin status: {is_admin}")
+        
+        if not is_admin:
+            logger.warning("Access denied: Admin privileges required")
+            client.setOutput("Message", rstring(
+                f"ACCESS DENIED: This initialization script requires OMERO "
+                f"administrator privileges. User ID {user_id} is not an admin."
+            ))
+            return
+        
+        logger.info("Admin access confirmed, proceeding with initialization")
         message = ""
         init_slurm = unwrap(client.getInput("Init Slurm"))
         if init_slurm:

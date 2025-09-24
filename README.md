@@ -1,9 +1,17 @@
 BIOMERO Scripts
 ==================
 
-These scripts are to be used within BIOMERO (an extension to OMERO), together with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
+These scripts provide a comprehensive OMERO integration for running bioimage analysis workflows on SLURM clusters. 
 
-Together, BIOMERO allows you to run BioImage analysis workflows directly from OMERO on a Slurm cluster, through SSH.
+### Key Features
+- Multi-format support: TIFF, OME-TIFF, and ZARR
+- Automatic data export from OMERO to SLURM clusters
+- Intelligent format conversion with optimization
+- Comprehensive workflow tracking and monitoring
+- Automatic result import back to OMERO
+- Configurable output organization options
+
+These scripts work together with the [BIOMERO library](https://github.com/NL-BioImaging/biomero) to enable seamless bioimage analysis workflows directly from OMERO.
 
 !!*NOTE*: Do not install [Example Minimal Slurm Script](https://github.com/NL-BioImaging/biomero-scripts/blob/master/Example_Minimal_Slurm_Script.py) if you do not trust your users with your Slurm cluster. It has literal Command Injection for the SSH user as a **FEATURE**. 
 
@@ -15,6 +23,32 @@ In the figure below we show our **BIOMERO** framework, for **B**io**I**mage anal
 BIOMERO consists of the Python library [BIOMERO](https://github.com/NL-BioImaging/biomero) and the integrations within OMERO through the scripts in this repository.
 
 ![OMERO-Figure1_Overview_v5](https://github.com/NL-BioImaging/biomero/assets/68958516/ff437ed2-d4b7-48b4-a7e3-12f1dbf00981)
+
+## Script Architecture
+
+### Main Workflow Scripts (`__workflows/`)
+- **`SLURM_Run_Workflow.py`**: Primary workflow orchestrator with ZARR support
+- **`SLURM_Run_Workflow_Batched.py`**: Batch processing variant for multiple datasets
+- **`SLURM_CellPose_Segmentation.py`**: Specialized CellPose segmentation workflow
+
+### Data Management Scripts (`_data/`)
+- **`_SLURM_Image_Transfer.py`**: Export data from OMERO to SLURM (with cleanup)
+- **`SLURM_Remote_Conversion.py`**: Intelligent format conversion on SLURM
+- **`SLURM_Get_Results.py`**: Import workflow results back to OMERO
+- **`SLURM_Get_Update.py`**: Monitor and update workflow status
+
+### Administrative Scripts (`admin/`)
+- **`SLURM_Init_environment.py`**: Initialize SLURM environment
+- **`SLURM_check_setup.py`**: Validate BIOMERO configuration
+- **`Example_Minimal_Slurm_Script.py`**: Template for custom workflows
+
+### Workflow Process
+1. **Export**: Selected data transferred from OMERO to SLURM cluster
+2. **Convert**: Smart format conversion (with ZARR no-op optimization)
+3. **Process**: Computational workflows executed on SLURM
+4. **Monitor**: Job progress tracking and status updates
+5. **Import**: Results imported back to OMERO with configurable organization
+6. **Cleanup**: Temporary artifacts automatically removed
 
 Installation
 ------------
@@ -144,3 +178,33 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
+
+## Usage Examples
+
+### Running a Standard Workflow (TIFF)
+1. Select your images, datasets, or plates in OMERO
+2. Run the **SLURM Run Workflow** script
+3. Choose your desired workflow (e.g., CellPose, StarDist)
+4. Configure workflow parameters
+5. Select output organization options
+6. Execute - data will be automatically exported, processed, and imported back
+
+### Using ZARR Format (New in v2.0.0-alpha.7)
+1. Select your data in OMERO
+2. Run the **SLURM Run Workflow** script
+3. **✅ Check "Use ZARR Format"** for workflows that support native ZARR input
+4. Choose your ZARR-compatible workflow
+5. Configure parameters and output options
+6. Execute - conversion step will be skipped for efficiency
+
+### Manual Data Export
+For advanced users who need custom processing:
+1. Use **SLURM Image Transfer** to export data in your preferred format
+2. Use **SLURM Remote Conversion** if format conversion is needed
+3. Process data using custom workflows on SLURM
+4. Use **SLURM Get Results** to import results back to OMERO
+
+### Monitoring and Debugging
+- **SLURM Check Setup**: Validate your BIOMERO configuration
+- **SLURM Get Update**: Monitor job progress and retrieve logs
+- **SLURM Init Environment**: Initialize or update SLURM environment
