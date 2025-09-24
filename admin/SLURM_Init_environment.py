@@ -115,6 +115,10 @@ def runScript():
                     # 4. Download workflow images
                     slurmClient.setup_container_images()
                     conn.keepAlive()
+                    
+                    # 5. Reset db views
+                    slurmClient.initialize_analytics_system(reset_tables=True)
+                    conn.keepAlive()
                 message = "Slurm is almost set up. " + \
                     "It will now download and build " + \
                     "all the requested workflow images." + \

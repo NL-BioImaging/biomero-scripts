@@ -676,7 +676,8 @@ def convertDataOnSLURM(client: omscripts.client,
         "Input data": rstring(zipfile),
         "Source format": rstring(source_format),
         "Target format": rstring(target_format),
-        "Cleanup?": rbool(True)
+        "Cleanup?": rbool(True),
+        "Parent_Workflow_ID": rstring(str(wf_id))
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")

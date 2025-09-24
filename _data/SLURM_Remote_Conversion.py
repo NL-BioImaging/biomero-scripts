@@ -116,6 +116,9 @@ def runScript():
             scripts.Bool(CLEANUP, grouping="03",
                          description=cleanup_descr,
                          default=True),
+            scripts.String("Parent_Workflow_ID", grouping="04",
+                           description="Internal parameter for parent wf",
+                           optional=True),
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
             version=script_version,
             authors=["Torec Luik"],
@@ -134,18 +137,28 @@ def runScript():
             convert_from = scriptParams[SOURCE]
             convert_to = scriptParams[TARGET]
             cleanup = scriptParams[CLEANUP]
+            parent_wf_id = scriptParams.get("Parent_Workflow_ID")
 
             # Connect to Omero
             conn = BlitzGateway(client_obj=client)
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
-            # Start tracking the workflow on a unique ID
-            wf_id = slurmClient.workflowTracker.initiate_workflow(
-                script_name,
-                "\n".join([script_descr, script_version]),
-                user,
-                group
-            )
+            
+            # Check if running as part of parent workflow or standalone
+            is_subtask = parent_wf_id is not None
+            if is_subtask:
+                # Running as part of parent workflow - don't create new wf
+                wf_id = parent_wf_id
+                logger.info(f"Running as subtask of workflow: {wf_id}")
+            else:
+                # Running standalone - create new workflow
+                wf_id = slurmClient.workflowTracker.initiate_workflow(
+                    script_name,
+                    "\n".join([script_descr, script_version]),
+                    user,
+                    group
+                )
+                logger.info(f"Running as standalone workflow: {wf_id}")
             try:
                 # Check if conversion is needed (no-op if source == target)
                 if convert_from == convert_to:
@@ -153,7 +166,9 @@ def runScript():
                           f"{convert_to} format"
                     logger.info(msg)
                     message += msg
-                    slurmClient.workflowTracker.complete_workflow(wf_id)
+                    # Only complete workflow if running standalone
+                    if not is_subtask:
+                        slurmClient.workflowTracker.complete_workflow(wf_id)
                 else:
                     slurmJob = slurmClient.run_conversion_workflow_job(
                         zipfile, convert_from, convert_to, wf_id)
@@ -161,30 +176,41 @@ def runScript():
                     if not slurmJob.ok:
                         logger.error(
                             f"Error converting data: {slurmJob.get_error()}")
-                        slurmClient.workflowTracker.fail_workflow(
-                            wf_id, "Conversion job submission failed")
+                        # Only fail workflow if running standalone
+                        if not is_subtask:
+                            slurmClient.workflowTracker.fail_workflow(
+                                wf_id, "Conversion job submission failed")
                     else:
                         slurmJob.wait_for_completion(slurmClient, conn)
                         if not slurmJob.completed():
-                            log_msg = f"Conversion is not completed: {slurmJob}"
-                            slurmClient.workflowTracker.fail_task(slurmJob.task_id,
-                                                                  "Conversion failed")
-                            slurmClient.workflowTracker.fail_workflow(
-                                wf_id, "Conversion failed")
+                            log_msg = f"Conversion is not completed: " \
+                                      f"{slurmJob}"
+                            slurmClient.workflowTracker.fail_task(
+                                slurmJob.task_id, "Conversion failed")
+                            # Only fail workflow if running standalone
+                            if not is_subtask:
+                                slurmClient.workflowTracker.fail_workflow(
+                                    wf_id, "Conversion failed")
                             raise Exception(log_msg)
                         else:
                             if cleanup:
                                 slurmJob.cleanup(slurmClient)
-                            msg = f"Converted {zipfile} from {convert_from} to {convert_to}"
+                            msg = f"Converted {zipfile} from {convert_from} " \
+                                  f"to {convert_to}"
                             logger.info(msg)
                             message += msg
                             slurmClient.workflowTracker.complete_task(
                                 slurmJob.task_id, msg)
-                            slurmClient.workflowTracker.complete_workflow(wf_id)
+                            # Only complete workflow if running standalone
+                            if not is_subtask:
+                                slurmClient.workflowTracker.complete_workflow(
+                                    wf_id)
             except Exception as e:
                 message += f" ERROR WITH CONVERTING DATA: {e}"
                 logger.error(message)
-                slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+                # Only fail workflow if running standalone
+                if not is_subtask:
+                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
                 raise e
 
             client.setOutput("Message", rstring(str(message)))
