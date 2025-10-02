@@ -547,5 +547,6 @@ if __name__ == '__main__':
     # Silence some of the DEBUG
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
+    logging.getLogger('invoke').setLevel(logging.WARNING)
 
     runScript()

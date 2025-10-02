@@ -13,8 +13,15 @@ These scripts provide a comprehensive OMERO integration for running bioimage ana
 
 These scripts work together with the [BIOMERO library](https://github.com/NL-BioImaging/biomero) to enable seamless bioimage analysis workflows directly from OMERO.
 
-!!*NOTE*: Do not install [Example Minimal Slurm Script](https://github.com/NL-BioImaging/biomero-scripts/blob/master/Example_Minimal_Slurm_Script.py) if you do not trust your users with your Slurm cluster. It has literal Command Injection for the SSH user as a **FEATURE**. 
+## Deploy with NL-BIOMERO
 
+For the easiest deployment and integration with other FAIR infrastructure, consider using the NL-BIOMERO stack:
+
+- **NL-BIOMERO deployment repo**: https://github.com/Cellular-Imaging-Amsterdam-UMC/NL-BIOMERO
+- **OMERO.biomero OMERO.web plugin**: https://github.com/Cellular-Imaging-Amsterdam-UMC/OMERO.biomero
+- **Pre-built BIOMERO processor container**: https://hub.docker.com/r/cellularimagingcf/biomero
+
+The NL-BIOMERO stack provides Docker Compose configurations that automatically set up OMERO.web with the OMERO.biomero plugin, databases, and all necessary dependencies.
 
 # Overview
 
@@ -23,6 +30,17 @@ In the figure below we show our **BIOMERO** framework, for **B**io**I**mage anal
 BIOMERO consists of the Python library [BIOMERO](https://github.com/NL-BioImaging/biomero) and the integrations within OMERO through the scripts in this repository.
 
 ![OMERO-Figure1_Overview_v5](https://github.com/NL-BioImaging/biomero/assets/68958516/ff437ed2-d4b7-48b4-a7e3-12f1dbf00981)
+
+## BIOMERO 2.0 Web Interface
+
+In addition to these command-line scripts, **BIOMERO 2.0** introduces a modern web-based user interface through the [OMERO.biomero](https://github.com/Cellular-Imaging-Amsterdam-UMC/OMERO.biomero) web plugin. This plugin provides:
+
+- **Interactive Workflow Management**: Browse and launch workflows with a modern web interface
+- **Real-time Progress Tracking**: Monitor job progress with live updates
+- **Workflow History**: View past executions with full tracking and metadata  
+- **Dashboard Overview**: Get an overview of all your workflows at a glance
+
+For new users, we recommend the NL-BIOMERO stack with the web interface for the complete experience. These scripts remain fully supported for advanced users who need custom scripting capabilities.
 
 ## Script Architecture
 
@@ -40,7 +58,6 @@ BIOMERO consists of the Python library [BIOMERO](https://github.com/NL-BioImagin
 ### Administrative Scripts (`admin/`)
 - **`SLURM_Init_environment.py`**: Initialize SLURM environment
 - **`SLURM_check_setup.py`**: Validate BIOMERO configuration
-- **`Example_Minimal_Slurm_Script.py`**: Template for custom workflows
 
 ### Workflow Process
 1. **Export**: Selected data transferred from OMERO to SLURM cluster
@@ -111,34 +128,75 @@ Use the BIOMERO scripts
 
 This repository provides example OMERO scripts for using [BIOMERO](https://github.com/NL-BioImaging/biomero). These scripts do not work without installing that client on your OMERO servers/processors that will run these scripts.
 
-Always start with initiating the Slurm environment at least once, for example using [init/Slurm Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/init/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
+Always start with initiating the Slurm environment at least once, for example using [admin/SLURM Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
 
-For example, [workflows/Slurm Run Workflow](https://github.com/NL-BioImaging/biomero-scripts/blob/master/workflows/SLURM_Run_Workflow.py) should provide an easy way to send data to Slurm, run the configured and chosen workflow, poll Slurm until jobs are done (or errors) and retrieve the results when the job is done. This workflow script uses some of the other scripts, like
+For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow.py) should provide an easy way to send data to Slurm, run the configured and chosen workflow, poll Slurm until jobs are done (or errors) and retrieve the results when the job is done. This workflow script uses some of the other scripts, like
 
--  [`data/Slurm Image Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/data/_SLURM_Image_Transfer.py): to export your selected images / dataset / screen as ZARR files to a Slurm dir.
-- [`data/Slurm Get Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/data/SLURM_Get_Results.py): to import your Slurm job results back into OMERO as a zip, dataset or attachment.
+-  [`_data/SLURM Image Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_Image_Transfer.py): to export your selected images / dataset / screen as ZARR files to a Slurm dir.
+- [`_data/SLURM Get Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Results.py): to import your Slurm job results back into OMERO as a zip, dataset or attachment.
 
 Other example OMERO scripts are:
-- [`data/Slurm Get Update`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/data/SLURM_Get_Update.py): to run while you are waiting on a job to finish on Slurm; it will try to get a `%` progress from your job's logfile. Depends on your job/workflow logging a `%` of course.
+- [`_data/SLURM Get Update`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Update.py): to run while you are waiting on a job to finish on Slurm; it will try to get a `%` progress from your job's logfile. Depends on your job/workflow logging a `%` of course.
 
-- [`workflows/Slurm Run Workflow Batched`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/workflows/SLURM_Run_Workflow_Batched.py): This will allow you to run several `workflows/Slurm Run Workflow` in parallel, by batching your input images into smaller chunks (e.g. turn 64 images into 2 batches of 32 images each). It will then poll all these jobs.
+- [`__workflows/SLURM Run Workflow Batched`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow_Batched.py): This will allow you to run several `__workflows/SLURM Run Workflow` in parallel, by batching your input images into smaller chunks (e.g. turn 64 images into 2 batches of 32 images each). It will then poll all these jobs.
 
-- [`workflows/Slurm CellPose Segmentation`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/workflows/SLURM_CellPose_Segmentation.py): This is a more primitive script that only runs the actual workflow `CellPose` (if correctly configured). You will need to manually transfer data first (with `Slurm Image Transfer`) and manually retrieve data afterward (with `Slurm Get Results`).
+- [`__workflows/SLURM CellPose Segmentation`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_CellPose_Segmentation.py): This is a more primitive script that only runs the actual workflow `CellPose` (if correctly configured). You will need to manually transfer data first (with `_data/SLURM Image Transfer`) and manually retrieve data afterward (with `_data/SLURM Get Results`).
 
-Enable logging (of the BIOMERO library)
+Logging Configuration
 -----
 
-Note that you can just enable more logging of your OMERO scripts (including the BIOMERO library) by changing the logger in the __init__ of your scripts:
+**BIOMERO scripts already have comprehensive DEBUG logging enabled by default!** All scripts are configured with:
+
+- **DEBUG level logging** to rotating log files (`biomero.log` in `/opt/omero/server/OMERO.server/var/log/`)
+- **INFO level logging** to stdout (visible in OMERO.web script output)
+- **Rotating log files** (500MB max, 9 backups) to prevent disk space issues
+- **Pre-silenced verbose libraries** (omero.gateway.utils, paramiko.transport, invoke) at WARNING level
+
+### Current Logging Setup
+
+Each script automatically configures logging like this:
 
 ```Python
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                        stream=sys.stdout)
+    # Comprehensive DEBUG logging to rotating biomero.log file
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)  # Only INFO+ to stdout
+    logging.basicConfig(level=logging.DEBUG,  # Full DEBUG to file
+                        format="%(asctime)s %(levelname)-5.5s [%(name)40s] "
+                               "[%(process)d] (%(threadName)-10s) %(message)s",
+                        handlers=[
+                            stream_handler,
+                            logging.handlers.RotatingFileHandler(
+                                os.path.join(LOGDIR, 'biomero.log'),
+                                maxBytes=500000000, backupCount=9)
+                        ])
+
+    # Silence verbose libraries
+    logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
+    logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
+    logging.getLogger('invoke').setLevel(logging.WARNING)
+    
     runScript()
 ```
 
-You can even turn on logging.DEBUG.
+### Reducing Log Verbosity (If Needed)
+
+If the default DEBUG logging is too verbose, you can modify any script to use less logging:
+
+```Python
+# Change DEBUG to INFO for less verbose logging
+logging.basicConfig(level=logging.INFO, ...)
+
+# Or silence additional libraries
+logging.getLogger('biomero').setLevel(logging.INFO)
+logging.getLogger('fabric').setLevel(logging.WARNING)
+```
+
+### Log File Locations
+
+- **Main logs**: `/opt/omero/server/OMERO.server/var/log/biomero.log*`
+- **OMERO logs**: Standard OMERO logging locations
+- **Rotation**: Logs rotate when reaching 500MB, keeping 9 backups
 
 
 Legal
