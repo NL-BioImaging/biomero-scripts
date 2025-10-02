@@ -58,7 +58,7 @@ import sys
 import pkg_resources
 
 # Version constant for easy version management
-VERSION = "2.0.0-alpha.8"
+VERSION = "2.0.0-alpha.9"
 
 logger = logging.getLogger(__name__)
 
