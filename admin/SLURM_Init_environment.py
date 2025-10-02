@@ -175,9 +175,27 @@ if __name__ == '__main__':
                                 backupCount=LOGNUM)
                         ])
     
-    # Silence some of the DEBUG
+    # Silence some of the DEBUG - Extended for cleaner BIOMERO logs
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
+    logging.getLogger('omero.gateway').setLevel(logging.WARNING)  # Silences proxy creation spam
+    logging.getLogger('omero.client').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
+    logging.getLogger('paramiko.sftp').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache').setLevel(logging.WARNING)  # Cache logs
+    logging.getLogger('requests-cache').setLevel(logging.WARNING)  # Alt naming
+    logging.getLogger('requests_cache.core').setLevel(logging.WARNING)  # Core module
+    logging.getLogger('requests_cache.backends').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache.backends.base').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache.backends.sqlite').setLevel(
+        logging.WARNING)
+    logging.getLogger('requests_cache.policy').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache.policy.actions').setLevel(
+        logging.WARNING)
     logging.getLogger('invoke').setLevel(logging.WARNING)
+    logging.getLogger('fabric').setLevel(logging.WARNING)  # SSH operations
+    logging.getLogger('Ice').setLevel(logging.ERROR)
+    logging.getLogger('ZeroC').setLevel(logging.ERROR)
 
     runScript()

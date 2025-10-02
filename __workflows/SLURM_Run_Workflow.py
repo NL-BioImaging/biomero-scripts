@@ -98,7 +98,7 @@ def runScript():
     Raises:
         Exception: Various exceptions during workflow execution, all logged
             and handled gracefully.
-    """
+    """    
     # --------------------------------------------
     # :: Slurm Client ::
     # --------------------------------------------
@@ -265,6 +265,27 @@ def runScript():
         # 4. Check Slurm job statuses
         # 5. When completed, pull and upload data to Omero
         try:
+            
+            # Display startup banner - only shown during actual execution
+            # Dynamic centering for version string to handle varying lengths
+            version_text = f"SLURM Workflow Runner {VERSION}"
+            total_width = 62  # Inner width of the box
+            padding = (total_width - len(version_text)) // 2
+            right_pad = total_width - len(version_text) - padding
+            padded_version = f"{' ' * padding}{version_text}{' ' * right_pad}"
+            
+            logger.info(f"""
+            ╔══════════════════════════════════════════════════════════════╗
+            ║  ██████  ██  ██████  ███    ███ ███████ ██████   ██████      ║
+            ║  ██   ██ ██ ██    ██ ████  ████ ██      ██   ██ ██    ██     ║
+            ║  ██████  ██ ██    ██ ██ ████ ██ █████   ██████  ██    ██     ║
+            ║  ██   ██ ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██     ║
+            ║  ██████  ██  ██████  ██      ██ ███████ ██   ██  ██████      ║
+            ║                                                              ║
+            ║{padded_version}║
+            ╚══════════════════════════════════════════════════════════════╝
+            """)
+            
             # log_string will be output in the Omero Web UI
             UI_messages = ""
             errormsg = None
@@ -1153,9 +1174,27 @@ if __name__ == '__main__':
                                 backupCount=LOGNUM)
                         ])
 
-    # Silence some of the DEBUG
+    # Silence some of the DEBUG - Extended for cleaner BIOMERO logs
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
+    logging.getLogger('omero.gateway').setLevel(logging.WARNING)  # Silences proxy creation spam
+    logging.getLogger('omero.client').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
+    logging.getLogger('paramiko.sftp').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache').setLevel(logging.WARNING)  # Cache logs
+    logging.getLogger('requests-cache').setLevel(logging.WARNING)  # Alt naming
+    logging.getLogger('requests_cache.core').setLevel(logging.WARNING)  # Core module
+    logging.getLogger('requests_cache.backends').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache.backends.base').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache.backends.sqlite').setLevel(
+        logging.WARNING)
+    logging.getLogger('requests_cache.policy').setLevel(logging.WARNING)
+    logging.getLogger('requests_cache.policy.actions').setLevel(
+        logging.WARNING)
     logging.getLogger('invoke').setLevel(logging.WARNING)
+    logging.getLogger('fabric').setLevel(logging.WARNING)  # SSH operations
+    logging.getLogger('Ice').setLevel(logging.ERROR)
+    logging.getLogger('ZeroC').setLevel(logging.ERROR)
 
     runScript()
