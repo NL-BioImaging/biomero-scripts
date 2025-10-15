@@ -1,4 +1,4 @@
-BIOMERO Scripts
+BIOMERO.scripts
 ==================
 
 These scripts provide a comprehensive OMERO integration for running bioimage analysis workflows on SLURM clusters. 
@@ -123,7 +123,7 @@ Upgrading
 
         <path>/<to>/<bin>/omero script list
 
-Use the BIOMERO scripts
+Use the BIOMERO.scripts
 -----
 
 This repository provides example OMERO scripts for using [BIOMERO](https://github.com/NL-BioImaging/biomero). These scripts do not work without installing that client on your OMERO servers/processors that will run these scripts.
@@ -145,7 +145,7 @@ Other example OMERO scripts are:
 Logging Configuration
 -----
 
-**BIOMERO scripts already have comprehensive DEBUG logging enabled by default!** All scripts are configured with:
+**BIOMERO.scripts already have comprehensive DEBUG logging enabled by default!** All scripts are configured with:
 
 - **DEBUG level logging** to rotating log files (`biomero.log` in `/opt/omero/server/OMERO.server/var/log/`)
 - **INFO level logging** to stdout (visible in OMERO.web script output)
@@ -211,7 +211,7 @@ It will be used to help generate a landing page and links for your work.
 Please modify **all** values on **each** branch to describe your scripts.
 
 ###### Repository name ######
-BIOMERO Scripts repository
+BIOMERO.scripts repository
 
 ###### Minimum version ######
 5.6
