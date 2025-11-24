@@ -76,7 +76,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 # Version constant for easy version management
-VERSION = "2.0.0-alpha.10"
+VERSION = "2.0.0-alpha.11"
 
 # keep track of log strings.
 log_strings = []
@@ -323,7 +323,21 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
     if process.returncode == 0:
         log(f"OME ZARR CLI: {stdout}")
         logger.debug(img_name)
-        os.rename(f"{exp_dir}/{object.getId()}.zarr", img_name)
+        
+        # Check for both .ome.zarr and .zarr extensions for compatibility
+        source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
+        source_zarr = f"{exp_dir}/{object.getId()}.zarr"
+        
+        if os.path.exists(source_ome_zarr):
+            os.rename(source_ome_zarr, img_name)
+            log(f"Renamed .ome.zarr file: {source_ome_zarr} -> {img_name}")
+        elif os.path.exists(source_zarr):
+            os.rename(source_zarr, img_name)
+            log(f"Renamed .zarr file: {source_zarr} -> {img_name}")
+        else:
+            error_msg = (f"Neither {source_ome_zarr} nor {source_zarr} "
+                         f"found after ZARR export")
+            raise FileNotFoundError(error_msg)
     return  # shortcut
 
 

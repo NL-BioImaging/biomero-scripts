@@ -48,6 +48,7 @@ from omero.rtypes import rstring, unwrap
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 from biomero import SlurmClient, constants
+from biomero.schema_parsers import convert_schema_type_to_omero
 import logging
 
 # Version constant for easy version management
@@ -140,7 +141,7 @@ def runScript():
             for i, (k, param) in enumerate(wfparams.items()):
                 logger.debug(f"{i}, {k}, {param}")
                 logging.info(param)
-                p = slurmClient.convert_cytype_to_omtype(
+                p = convert_schema_type_to_omero(
                     param["cytype"],
                     param["default"],
                     param["name"],

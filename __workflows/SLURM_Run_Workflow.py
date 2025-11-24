@@ -57,6 +57,7 @@ from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
+from biomero.schema_parsers import convert_schema_type_to_omero
 import logging
 import time as timesleep
 from paramiko import SSHException
@@ -229,8 +230,8 @@ def runScript():
                     wf].items()):
                 logger.debug(f"{param_incr}, {k}, {param}")
                 logger.info(param)
-                # Convert the parameter from cy(tomine)type to om(ero)type
-                omtype_param = slurmClient.convert_cytype_to_omtype(
+                # Convert the parameter from schema type to OMERO type
+                omtype_param = convert_schema_type_to_omero(
                     param["cytype"],
                     param["default"],
                     param["name"],
