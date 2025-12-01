@@ -64,7 +64,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.0.0-alpha.10"
+VERSION = "2.0.0"
 
 OBJECT_TYPES = (
     'Plate',
