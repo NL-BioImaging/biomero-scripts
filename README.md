@@ -1,10 +1,13 @@
 BIOMERO.scripts
 ==================
 
+> 🚀 **This package is part of BIOMERO 2.0** — For complete deployment and FAIR infrastructure setup, start with the [**NL-BIOMERO Documentation**](https://nl-bioimaging.github.io/NL-BIOMERO/) 📖
+
+
 These scripts provide a comprehensive OMERO integration for running bioimage analysis workflows on SLURM clusters. 
 
 ### Key Features
-- Multi-format support: TIFF, OME-TIFF, and ZARR
+- Multi-format support: TIFF, OME-TIFF, and (OME-)ZARR
 - Automatic data export from OMERO to SLURM clusters
 - Intelligent format conversion with optimization
 - Comprehensive workflow tracking and monitoring
@@ -17,8 +20,8 @@ These scripts work together with the [BIOMERO library](https://github.com/NL-Bio
 
 For the easiest deployment and integration with other FAIR infrastructure, consider using the NL-BIOMERO stack:
 
-- **NL-BIOMERO deployment repo**: https://github.com/Cellular-Imaging-Amsterdam-UMC/NL-BIOMERO
-- **OMERO.biomero OMERO.web plugin**: https://github.com/Cellular-Imaging-Amsterdam-UMC/OMERO.biomero
+- **NL-BIOMERO deployment repo**: https://github.com/NL-BioImaging/NL-BIOMERO
+- **OMERO.biomero OMERO.web plugin**: https://github.com/NL-BioImaging/OMERO.biomero
 - **Pre-built BIOMERO processor container**: https://hub.docker.com/r/cellularimagingcf/biomero
 
 The NL-BIOMERO stack provides Docker Compose configurations that automatically set up OMERO.web with the OMERO.biomero plugin, databases, and all necessary dependencies.
@@ -33,7 +36,7 @@ BIOMERO consists of the Python library [BIOMERO](https://github.com/NL-BioImagin
 
 ## BIOMERO 2.0 Web Interface
 
-In addition to these command-line scripts, **BIOMERO 2.0** introduces a modern web-based user interface through the [OMERO.biomero](https://github.com/Cellular-Imaging-Amsterdam-UMC/OMERO.biomero) web plugin. This plugin provides:
+In addition to these command-line scripts, **BIOMERO 2.0** introduces a modern web-based user interface through the [OMERO.biomero](https://github.com/NL-BioImaging/OMERO.biomero) web plugin. This plugin provides:
 
 - **Interactive Workflow Management**: Browse and launch workflows with a modern web interface
 - **Real-time Progress Tracking**: Monitor job progress with live updates
@@ -47,7 +50,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 ### Main Workflow Scripts (`__workflows/`)
 - **`SLURM_Run_Workflow.py`**: Primary workflow orchestrator with ZARR support
 - **`SLURM_Run_Workflow_Batched.py`**: Batch processing variant for multiple datasets
-- **`SLURM_CellPose_Segmentation.py`**: Specialized CellPose segmentation workflow
+- **`SLURM_CellPose_Segmentation.py`**: ⚠️ **OPTIONAL EXAMPLE** - Manual CellPose workflow (consider deletion - use `SLURM_Run_Workflow.py` instead for automated processing)
 
 ### Data Management Scripts (`_data/`)
 - **`_SLURM_Image_Transfer.py`**: Export data from OMERO to SLURM (with cleanup)
@@ -58,6 +61,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 ### Administrative Scripts (`admin/`)
 - **`SLURM_Init_environment.py`**: Initialize SLURM environment
 - **`SLURM_check_setup.py`**: Validate BIOMERO configuration
+- **`Tail_logs.py`**: View recent BIOMERO log entries (admin only)
 
 ### Workflow Process
 1. **Export**: Selected data transferred from OMERO to SLURM cluster
@@ -84,10 +88,12 @@ Installation
         <path>/<to>/<bin>/omero script list
 
 4. Install system requirements _on the_ **PROCESSOR** _nodes_:
-    - `python3 -m pip install biomero ezomero==1.1.1 tifffile==2020.9.3 omero-metadata==0.12.0` 
+    - **If using `biomero[full]`**: Most dependencies are included (`ezomero>=1.1.1`, `tifffile>=2020.9.3`, `omero-metadata>=0.12.0`, `omero-cli-zarr>=0.6.1`)
+    - **Manual installation** (if using basic `biomero` without `[full]` extras): 
+      - `python3 -m pip install biomero ezomero==1.1.1 tifffile==2020.9.3 omero-metadata==0.12.0` 
     - the [OMERO CLI Zarr plugin](https://github.com/ome/omero-cli-zarr), e.g. 
-    `python3 -m pip install omero-cli-zarr==0.5.3` && `yum install -y blosc-devel`
-    - the [bioformats2raw-0.7.0](https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.7.0/bioformats2raw-0.7.0.zip), e.g. `unzip -d /opt bioformats2raw-0.7.0.zip && export PATH="$PATH:/opt/bioformats2raw-0.7.0/bin"`
+    `python3 -m pip install omero-cli-zarr==0.6.1` && `yum install -y blosc-devel`
+    - the [bioformats2raw-0.11.0](https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.11.0/bioformats2raw-0.11.0.zip), e.g. `unzip -d /opt bioformats2raw-0.11.0.zip && export PATH="$PATH:/opt/bioformats2raw-0.11.0/bin"`
 
 These examples work on Linux CentOS (i.e. the official OMERO containers); for Windows, or other Linux package managers, check with the original repositories (OMERO CLI ZARR and BioFormats2RAW) for more details on installation.
 
@@ -97,14 +103,15 @@ Requirements
 Just to reiterate, you need all these requirements installed to run all these scripts, on the OMERO  **PROCESSOR** node:
 
 - Python libraries:
-  - biomero (latest version, or at least matching the version number of this repository)
-  - ezomero==1.1.1
-  - tifffile==2020.9.3
-  - omero-metadata==0.12.0
-  - omero-cli-zarr==0.5.3 (see below)
+  - **biomero[full]** (latest version, includes ezomero>=1.1.1, tifffile>=2020.9.3, omero-metadata>=0.12.0, omero-cli-zarr>=0.6.1)
+  - **OR manual installation**: biomero (latest version, or at least matching the version number of this repository) + individual packages:
+    - ezomero==1.1.1
+    - tifffile==2020.9.3
+    - omero-metadata==0.12.0
+    - omero-cli-zarr>=0.6.1 (see below)
 - the [OMERO CLI Zarr plugin](https://github.com/ome/omero-cli-zarr), e.g. 
-    `python3 -m pip install omero-cli-zarr==0.5.3` && `yum install -y blosc-devel`
-- the [bioformats2raw-0.7.0](https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.7.0/bioformats2raw-0.7.0.zip), e.g. `unzip -d /opt bioformats2raw-0.7.0.zip && export PATH="$PATH:/opt/bioformats2raw-0.7.0/bin"`
+    `python3 -m pip install omero-cli-zarr>=0.6.1` && `yum install -y blosc-devel`
+- the [bioformats2raw-0.11.0](https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.11.0/bioformats2raw-0.11.0.zip), e.g. `unzip -d /opt bioformats2raw-0.11.0.zip && export PATH="$PATH:/opt/bioformats2raw-0.11.0/bin"`
 
 
 Upgrading
@@ -198,11 +205,40 @@ logging.getLogger('fabric').setLevel(logging.WARNING)
 - **OMERO logs**: Standard OMERO logging locations
 - **Rotation**: Logs rotate when reaching 500MB, keeping 9 backups
 
+## Usage Examples
+
+### Running a Standard Workflow (TIFF)
+1. Select your images, datasets, or plates in OMERO
+2. Run the **SLURM Run Workflow** script
+3. Choose your desired workflow (e.g., CellPose, StarDist)
+4. Configure workflow parameters
+5. Select output organization options
+6. Execute - data will be automatically exported, processed, and imported back
+
+### Using ZARR Format (New in v2.0.0-alpha.7)
+1. Select your data in OMERO
+2. Run the **SLURM Run Workflow** script
+3. **✅ Check "Use ZARR Format"** for workflows that support native ZARR input
+4. Choose your ZARR-compatible workflow
+5. Configure parameters and output options
+6. Execute - conversion step will be skipped for efficiency
+
+### Manual Data Export
+For advanced users who need custom processing:
+1. Use **SLURM Image Transfer** to export data in your preferred format
+2. Use **SLURM Remote Conversion** if format conversion is needed
+3. Process data using custom workflows on SLURM
+4. Use **SLURM Get Results** to import results back to OMERO
+
+### Monitoring and Debugging
+- **SLURM Check Setup**: Validate your BIOMERO configuration
+- **SLURM Get Update**: Monitor job progress and retrieve logs
+- **SLURM Init Environment**: Initialize or update SLURM environment
 
 Legal
 -----
 
-See [LICENSE](LICENSE). Note this is copy-left, as we copied from OME's scripts with copy-left license.
+See [LICENSE](LICENSE). Note this is copy-left, as we built on OME's scripts with copy-left license.
 
 
 # About #
@@ -237,32 +273,4 @@ These scripts are to be used with the [BIOMERO library](https://github.com/NL-Bi
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
 
-## Usage Examples
 
-### Running a Standard Workflow (TIFF)
-1. Select your images, datasets, or plates in OMERO
-2. Run the **SLURM Run Workflow** script
-3. Choose your desired workflow (e.g., CellPose, StarDist)
-4. Configure workflow parameters
-5. Select output organization options
-6. Execute - data will be automatically exported, processed, and imported back
-
-### Using ZARR Format (New in v2.0.0-alpha.7)
-1. Select your data in OMERO
-2. Run the **SLURM Run Workflow** script
-3. **✅ Check "Use ZARR Format"** for workflows that support native ZARR input
-4. Choose your ZARR-compatible workflow
-5. Configure parameters and output options
-6. Execute - conversion step will be skipped for efficiency
-
-### Manual Data Export
-For advanced users who need custom processing:
-1. Use **SLURM Image Transfer** to export data in your preferred format
-2. Use **SLURM Remote Conversion** if format conversion is needed
-3. Process data using custom workflows on SLURM
-4. Use **SLURM Get Results** to import results back to OMERO
-
-### Monitoring and Debugging
-- **SLURM Check Setup**: Validate your BIOMERO configuration
-- **SLURM Get Update**: Monitor job progress and retrieve logs
-- **SLURM Init Environment**: Initialize or update SLURM environment
