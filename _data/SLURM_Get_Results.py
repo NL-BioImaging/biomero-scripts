@@ -1145,13 +1145,13 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, slurmClient, message, folder, wf_id=wf_id)
 
-                            # clean_result = slurmClient.cleanup_tmp_files(
-                            #     slurm_job_id,
-                            #     filename,
-                            #     data_location)
-                            message += "\nSuccesfully not cleaned up tmp files"
+                            clean_result = slurmClient.cleanup_tmp_files(
+                                slurm_job_id,
+                                filename,
+                                data_location)
+                            message += "\nSuccesfully cleaned up tmp files"
                             logger.info(message)
-                            # logger.debug(clean_result)
+                            logger.debug(clean_result)
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
