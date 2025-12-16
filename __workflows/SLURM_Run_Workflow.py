@@ -74,7 +74,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 
 
 def runScript():
@@ -711,7 +711,11 @@ def convertDataOnSLURM(client: omscripts.client,
     )
     slurmClient.workflowTracker.start_task(task_id)
     rv = runOMEROScript(client, svc, script_id, inputs)
-    slurmClient.workflowTracker.complete_task(task_id, unwrap(rv['Message']))
+    if 'Message' in rv:
+        msg = rv['Message'].getValue()
+    else:
+        msg = "Finished conversion script."
+    slurmClient.workflowTracker.complete_task(task_id, msg)
     return rv, task_id
 
 
@@ -778,7 +782,11 @@ def exportImageToSLURM(client: omscripts.client,
     )
     slurmClient.workflowTracker.start_task(task_id)
     rv = runOMEROScript(client, svc, script_id, inputs)
-    slurmClient.workflowTracker.complete_task(task_id, unwrap(rv['Message']))
+    if 'Message' in rv:
+        msg = unwrap(rv['Message'])
+    else:
+        msg = "Finished export script."
+    slurmClient.workflowTracker.complete_task(task_id, msg)
     return rv, task_id
 
 
