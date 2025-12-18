@@ -337,12 +337,14 @@ def runScript():
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")
             # Start tracking the workflow on a unique ID
+            logger.debug(f"[TRACE] Initiating workflow for user {user}, group {group}")
             wf_id = slurmClient.workflowTracker.initiate_workflow(
                 params.name,
                 "\n".join([params.description, VERSION]),
                 user,
                 group
             )
+            logger.debug(f"[TRACE] Workflow initiated with ID: {wf_id}")
             wf_failed = False  # wf state
 
             logger.info('''
@@ -405,6 +407,7 @@ def runScript():
                 ''')
                 for wf_name in workflows:
                     if unwrap(client.getInput(wf_name)):
+                        logger.debug(f"[TRACE] Starting workflow '{wf_name}' for wf_id {wf_id}")
                         UI_messages, slurm_job_id, wf_id, task_id = run_workflow(
                             slurmClient,
                             _workflow_params[wf_name],
@@ -416,13 +419,16 @@ def runScript():
                             wf_id)
                         slurm_job_ids[wf_name] = slurm_job_id
                         task_ids[slurm_job_id] = task_id
+                        logger.debug(f"[TRACE] Workflow '{wf_name}' started: slurm_job_id={slurm_job_id}, task_id={task_id}")
 
                 # 4. Poll SLURM results
                 slurm_job_id_list = [
                     x for x in slurm_job_ids.values() if x >= 0]
+                logger.debug(f"[TRACE] Starting job monitoring for {len(slurm_job_id_list)} jobs: {slurm_job_id_list}")
                 logger.debug(slurm_job_id_list)
 
                 while slurm_job_id_list:
+                    logger.debug(f"[TRACE] Monitoring {len(slurm_job_id_list)} active jobs")
                     # Query all jobids we care about
                     try:
                         job_status_dict, _ = slurmClient.check_job_status(
@@ -436,12 +442,18 @@ def runScript():
                         progress = slurmClient.get_active_job_progress(
                             slurm_job_id)
                         task_id = task_ids[slurm_job_id]
-                        slurmClient.workflowTracker.update_task_status(
-                            task_id,
-                            job_state)
-                        slurmClient.workflowTracker.update_task_progress(
-                            task_id,
-                            progress)
+                        logger.debug(f"[TRACE] Updating task {task_id} status to '{job_state}', progress: {progress}")
+                        try:
+                            slurmClient.workflowTracker.update_task_status(
+                                task_id,
+                                job_state)
+                            slurmClient.workflowTracker.update_task_progress(
+                                task_id,
+                                progress)
+                            logger.debug(f"[TRACE] Successfully updated task {task_id} status and progress")
+                        except Exception as db_e:
+                            logger.debug(f"[TRACE] Database error updating task {task_id}: {db_e}")
+                            raise
                         if job_state == "TIMEOUT":
                             log_msg = f"Job {slurm_job_id} is TIMEOUT."
                             UI_messages += log_msg
@@ -525,10 +537,13 @@ def runScript():
                     timesleep.sleep(10)
 
             # 7. Script output
+            logger.debug(f"[TRACE] Workflow {wf_id} completed with failure status: {wf_failed}")
             if wf_failed:
+                logger.debug(f"[TRACE] Marking workflow {wf_id} as failed")
                 slurmClient.workflowTracker.fail_workflow(
                     wf_id, "Workflow execution failed")
             else:
+                logger.debug(f"[TRACE] Marking workflow {wf_id} as completed")
                 slurmClient.workflowTracker.complete_workflow(wf_id)
             
             client.setOutput("Message", rstring(UI_messages))
@@ -536,10 +551,16 @@ def runScript():
         except Exception as e:
             # Only mark workflow as failed if we actually started one
             logger.error("Exception in wf: ", exc_info=True)
+            logger.debug(f"[TRACE] Exception occurred: {e}")
             if 'wf_id' in locals() and wf_id is not None:
                 logger.debug(
                     f"Workflow failed {wf_id} {slurmClient.workflowTracker.repository.get(wf_id)}")
-                slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+                logger.debug(f"[TRACE] Marking workflow {wf_id} as failed due to exception")
+                try:
+                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+                    logger.debug(f"[TRACE] Successfully marked workflow {wf_id} as failed")
+                except Exception as db_e:
+                    logger.debug(f"[TRACE] Database error marking workflow {wf_id} as failed: {db_e}")
             client.setOutput("Message", rstring(
                 f"{UI_messages} ERROR: {str(e)}"))
             raise  # Re-raise the exception after handling
@@ -580,6 +601,7 @@ def run_workflow(slurmClient: SlurmClient,
         SSHException: If job submission or status checking fails.
     """
     logger.info(f"Running {name}")
+    logger.debug(f"[TRACE] Submitting workflow '{name}' for wf_id {wf_id}")
     workflow_version = unwrap(
         client.getInput(f"{name}_Version"))
     kwargs = {}
@@ -588,7 +610,9 @@ def run_workflow(slurmClient: SlurmClient,
         # That is only for the OMERO UI, not for the wf
         kwargs[k] = unwrap(client.getInput(f"{name}_|_{k}"))  # kwarg dict
     logger.info(f"Run workflow with: {kwargs}")
+    logger.debug(f"[TRACE] Workflow parameters: {kwargs}")
     try:
+        logger.debug(f"[TRACE] Calling slurmClient.run_workflow for {name}")
         cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,
@@ -597,9 +621,11 @@ def run_workflow(slurmClient: SlurmClient,
             time=None,
             wf_id=wf_id,
             **kwargs)
+        logger.debug(f"[TRACE] Workflow {name} submitted: slurm_job_id={slurm_job_id}, task_id={task_id}")
         logger.debug(cp_result.stdout)
         if not cp_result.ok:
             logger.warning(f"Error running {name} job: {cp_result.stderr}")
+            logger.debug(f"[TRACE] Marking task {task_id} as failed due to submission error")
             slurmClient.workflowTracker.fail_task(
                 task_id, "Job submission failed")
             global wf_failed
@@ -608,6 +634,7 @@ def run_workflow(slurmClient: SlurmClient,
             UI_messages += f"Submitted {name} to Slurm\
                 as batch job {slurm_job_id}."
 
+            logger.debug(f"[TRACE] Checking initial job status for {slurm_job_id}")
             job_status_dict, poll_result = slurmClient.check_job_status(
                 [slurm_job_id])
             job_state = job_status_dict[slurm_job_id]
@@ -619,11 +646,18 @@ def run_workflow(slurmClient: SlurmClient,
             else:
                 log_msg = f"\n{job_state}"
                 logger.info(log_msg)
-                slurmClient.workflowTracker.update_task_status(task_id,
-                                                               job_state)
+                logger.debug(f"[TRACE] Updating task {task_id} status to {job_state}")
+                try:
+                    slurmClient.workflowTracker.update_task_status(task_id,
+                                                                   job_state)
+                    logger.debug(f"[TRACE] Successfully updated task {task_id} status")
+                except Exception as db_e:
+                    logger.debug(f"[TRACE] Database error updating task {task_id} status: {db_e}")
+                    raise
     except Exception as e:
         UI_messages += f" ERROR WITH JOB: {e}"
         logger.warning(UI_messages)
+        logger.debug(f"[TRACE] Exception in run_workflow for {name}: {e}")
         raise SSHException(UI_messages)
     return UI_messages, slurm_job_id, wf_id, task_id
 
@@ -702,20 +736,98 @@ def convertDataOnSLURM(client: omscripts.client,
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
-    task_id = slurmClient.workflowTracker.add_task_to_workflow(
-        wf_id,
-        script_name,
-        VERSION,
-        zipfile,
-        persist_dict
-    )
-    slurmClient.workflowTracker.start_task(task_id)
-    rv = runOMEROScript(client, svc, script_id, inputs)
-    if 'Message' in rv:
-        msg = rv['Message'].getValue()
-    else:
-        msg = "Finished conversion script."
-    slurmClient.workflowTracker.complete_task(task_id, msg)
+    logger.debug(f"[TRACE] Creating conversion task for workflow {wf_id}")
+    try:
+        task_id = slurmClient.workflowTracker.add_task_to_workflow(
+            wf_id,
+            script_name,
+            VERSION,
+            zipfile,
+            persist_dict
+        )
+        logger.debug(f"[TRACE] Created conversion task {task_id}")
+        slurmClient.workflowTracker.start_task(task_id)
+        logger.debug(f"[TRACE] Started conversion task {task_id}")
+    except Exception as db_e:
+        logger.debug(f"[TRACE] Database error in conversion task creation: {db_e}")
+        raise
+    # Execute the conversion script with comprehensive error detection
+    try:
+        rv = runOMEROScript(client, svc, script_id, inputs)
+        logger.debug(f"[TRACE] Conversion script raw result: {rv}")
+        logger.debug(f"[TRACE] Result type: {type(rv)}, keys: {list(rv.keys()) if isinstance(rv, dict) else 'N/A'}")
+        
+        # Determine if the script actually succeeded
+        success = False
+        msg = ""
+        
+        if rv and isinstance(rv, dict):
+            # Extract the Message content if available
+            if 'Message' in rv:
+                try:
+                    message_content = rv['Message'].getValue()
+                    logger.debug(f"[TRACE] Message content: {message_content}")
+                    
+                    # Check for error indicators in the message
+                    error_indicators = ['ERROR WITH CONVERTING DATA', 'Error converting data', 'Conversion failed', 'Exception']
+                    if any(indicator in message_content for indicator in error_indicators):
+                        success = False
+                        msg = f"Conversion failed - error in message: {message_content}"
+                        logger.error(f"[TRACE] Detected conversion failure in message: {message_content}")
+                    else:
+                        success = True
+                        msg = message_content
+                        logger.info(f"[TRACE] Conversion succeeded with message: {message_content}")
+                except Exception as msg_e:
+                    success = False
+                    msg = f"Failed to extract message from result: {msg_e}"
+                    logger.error(f"[TRACE] Error extracting message: {msg_e}")
+            else:
+                # No Message key - check for other error indicators
+                result_str = str(rv)
+                logger.debug(f"[TRACE] No Message key, checking full result: {result_str}")
+                if any(key in result_str.lower() for key in ['error', 'exception', 'failed']):
+                    success = False
+                    msg = f"Conversion failed - errors in result: {rv}"
+                    logger.error(f"[TRACE] Error indicators found in result: {rv}")
+                else:
+                    success = True
+                    msg = f"Conversion completed (no message): {rv}"
+                    logger.info(f"[TRACE] Conversion assumed successful: {rv}")
+        else:
+            # Empty or None result typically indicates failure
+            success = False
+            msg = f"Conversion script returned empty/invalid result: {rv}"
+            logger.error(f"[TRACE] Empty/invalid result: {rv}")
+        
+        if success:
+            logger.debug(f"[TRACE] Completing conversion task {task_id} successfully with message: {msg}")
+            try:
+                slurmClient.workflowTracker.complete_task(task_id, msg)
+                logger.debug(f"[TRACE] Successfully completed conversion task {task_id}")
+            except Exception as db_e:
+                logger.error(f"[TRACE] Database error completing conversion task {task_id}: {db_e}")
+                raise
+        else:
+            logger.debug(f"[TRACE] Marking conversion task {task_id} as failed with message: {msg}")
+            try:
+                slurmClient.workflowTracker.fail_task(task_id, msg)
+                logger.debug(f"[TRACE] Successfully failed conversion task {task_id}")
+            except Exception as db_e:
+                logger.error(f"[TRACE] Database error failing conversion task {task_id}: {db_e}")
+                raise
+            raise Exception(f"Conversion script failed: {msg}")
+            
+    except Exception as script_e:
+        # Script execution failed entirely
+        error_msg = f"Conversion script execution failed: {script_e}"
+        logger.error(f"[TRACE] Script execution error: {script_e}")
+        try:
+            slurmClient.workflowTracker.fail_task(task_id, error_msg)
+            logger.debug(f"[TRACE] Marked conversion task {task_id} as failed due to execution error")
+        except Exception as db_e:
+            logger.error(f"[TRACE] Database error failing conversion task {task_id}: {db_e}")
+        raise Exception(error_msg)
     return rv, task_id
 
 
@@ -773,20 +885,33 @@ def exportImageToSLURM(client: omscripts.client,
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
-    task_id = slurmClient.workflowTracker.add_task_to_workflow(
-        wf_id,
-        script_name,
-        VERSION,
-        persist_dict[constants.transfer.IDS],
-        persist_dict
-    )
-    slurmClient.workflowTracker.start_task(task_id)
+    logger.debug(f"[TRACE] Creating export task for workflow {wf_id}")
+    try:
+        task_id = slurmClient.workflowTracker.add_task_to_workflow(
+            wf_id,
+            script_name,
+            VERSION,
+            persist_dict[constants.transfer.IDS],
+            persist_dict
+        )
+        logger.debug(f"[TRACE] Created export task {task_id}")
+        slurmClient.workflowTracker.start_task(task_id)
+        logger.debug(f"[TRACE] Started export task {task_id}")
+    except Exception as db_e:
+        logger.debug(f"[TRACE] Database error in export task creation: {db_e}")
+        raise
     rv = runOMEROScript(client, svc, script_id, inputs)
     if 'Message' in rv:
         msg = unwrap(rv['Message'])
     else:
         msg = "Finished export script."
-    slurmClient.workflowTracker.complete_task(task_id, msg)
+    logger.debug(f"[TRACE] Completing export task {task_id} with message: {msg}")
+    try:
+        slurmClient.workflowTracker.complete_task(task_id, msg)
+        logger.debug(f"[TRACE] Successfully completed export task {task_id}")
+    except Exception as db_e:
+        logger.debug(f"[TRACE] Database error completing export task {task_id}: {db_e}")
+        raise
     return rv, task_id
 
 

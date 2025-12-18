@@ -374,12 +374,14 @@ def runScript():
                 raise ValueError(f"Not recognized input data: {data_type}. \
                     Expected one of {DATATYPES}")
             batch_ids = chunk(image_ids, batch_size)
+            batch_ids_list = list(batch_ids)  # Convert generator to list
+            logger.debug(f"Created {len(batch_ids_list)} batches from {len(image_ids)} images with batch size {batch_size}")
 
             # For batching, ensure we write to 1 dataset, not 1 for each batch
             inputs[constants.workflow.OUTPUT_DUPLICATES] = omscripts.rbool(
                 False)
             processes = {}
-            remaining_batches = {i: b for i, b in enumerate(batch_ids)}
+            remaining_batches = {i: b for i, b in enumerate(batch_ids_list)}
             logger.info("#--------------------------------------------#")
             logger.info(f"Batch Size: {batch_size}")
             logger.info(f"Total items: {len(image_ids)}")
@@ -397,6 +399,7 @@ def runScript():
             task_ids = {}
             logger.info(f"Starting batch scripts at {datetime.datetime.now()}")
             for i, batch in remaining_batches.items():
+                logger.debug(f"[TRACE] Starting batch {i} with {len(batch)} images: {list(batch)[:5]}{'...' if len(batch) > 5 else ''}")
                 inputs[constants.transfer.IDS] = rlist([rlong(x)
                                                         # override ids
                                                         for x in batch])
@@ -407,6 +410,7 @@ def runScript():
                 proc = svc.runScript(script_id, inputs, None)
                 processes[i] = proc
                 omero_job_id = proc.getJob()._id
+                logger.debug(f"[TRACE] Batch {i} started successfully: OMERO Job ID {omero_job_id}, Process: {proc}")
                 logger.info(f"Started script {script_id} at\
                     {datetime.datetime.now()}:\
                     Omero Job ID {omero_job_id}")
@@ -420,7 +424,9 @@ def runScript():
                     persist_dict
                 )
                 task_ids[i] = task_id
+                logger.debug(f"[TRACE] Created task {task_id} for batch {i}")
                 slurmClient.workflowTracker.start_task(task_id)
+                logger.debug(f"[TRACE] Started task {task_id} for batch {i}")
                 # slurmClient.workflowTracker.add_job_id(task_id, unwrap(omero_job_id))
                     
             logger.info('''
@@ -433,63 +439,108 @@ def runScript():
             wf_failed = False
             try:
                 # 4. Poll results
+                current_batch_being_processed = None
                 while remaining_batches:
+                    logger.debug(f"[TRACE] Monitoring loop: {len(remaining_batches)} batches remaining: {list(remaining_batches.keys())}")
                     logger.debug(f"Remaining batches: {remaining_batches}")
                     # loop the remaining processes
                     for i, batch in remaining_batches.items():
+                        current_batch_being_processed = i
+                        logger.debug(f"[TRACE] Processing batch {i} in monitoring loop")
                         task_id = task_ids[i]
                         process = processes[i]
-                        return_code = process.poll()
-                        logger.debug(
-                            f"Process {process} polled: {return_code}")
-                        # TODO don't
-                        slurmClient.workflowTracker.update_task_status(
-                            task_id, 
-                            f"{return_code}")
+                        try:
+                            return_code = process.poll()
+                            logger.debug(
+                                f"Process {process} polled: {return_code}")
+                        except Exception as poll_e:
+                            logger.error(f"[TRACE] Error polling process for batch {i}: {poll_e}")
+                            raise
+                        
+                        try:
+                            # TODO don't
+                            slurmClient.workflowTracker.update_task_status(
+                                task_id, 
+                                f"{return_code}")
+                        except Exception as status_e:
+                            logger.error(f"[TRACE] Error updating task status for batch {i}, task {task_id}: {status_e}")
+                            raise
+                            
                         if return_code:  # None if not finished
-                            results = process.getResults(0)  # 0 ms; RtypeDict
-                            if 'Message' in results:
-                                result_msg = results['Message'].getValue()
-                                logger.info(result_msg)
-                                UI_messages['Message'].extend(
-                                    [f">> Batch {i}: ",
-                                     result_msg])
+                            try:
+                                results = process.getResults(0)  # 0 ms; RtypeDict
+                                if 'Message' in results:
+                                    result_msg = results['Message'].getValue()
+                                    logger.info(result_msg)
+                                    UI_messages['Message'].extend(
+                                        [f">> Batch {i}: ",
+                                         result_msg])
 
-                            if 'File_Annotation' in results:
-                                UI_messages['File_Annotation'].append(
-                                    results['File_Annotation'].getValue())
+                                if 'File_Annotation' in results:
+                                    UI_messages['File_Annotation'].append(
+                                        results['File_Annotation'].getValue())
+                            except Exception as results_e:
+                                logger.error(f"[TRACE] Error getting results for batch {i}: {results_e}")
+                                raise
 
                             finished.append(i)
+                            logger.debug(f"[TRACE] Batch {i} process completed with return code: {return_code.getValue()}")
                             if return_code.getValue() == 0:
                                 msg = f"Batch {i} - [{remaining_batches[i]}] finished."
                                 logger.info(
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
-                                slurmClient.workflowTracker.complete_task(
-                                    task_id, result_msg + msg)
+                                try:
+                                    slurmClient.workflowTracker.complete_task(
+                                        task_id, result_msg + msg)
+                                    logger.debug(f"[TRACE] Marked task {task_id} as completed for batch {i}")
+                                except Exception as complete_e:
+                                    logger.error(f"[TRACE] Error completing task {task_id} for batch {i}: {complete_e}")
+                                    raise
                             else:
                                 msg = f"Batch {i} - [{remaining_batches[i]}] failed!"
                                 logger.info(
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
-                                slurmClient.workflowTracker.fail_task(
-                                    task_id, "Batch failed")
+                                try:
+                                    slurmClient.workflowTracker.fail_task(
+                                        task_id, "Batch failed")
+                                    logger.debug(f"[TRACE] Marked task {task_id} as failed for batch {i}")
+                                except Exception as fail_e:
+                                    logger.error(f"[TRACE] Error failing task {task_id} for batch {i}: {fail_e}")
+                                    raise
                                 wf_failed = True
                         else:
                             pass
 
                     # clear out our tracking list, to end while loop at some point
+                    logger.debug(f"[TRACE] Removing {len(finished)} finished batches from tracking: {finished}")
                     for i in finished:
+                        logger.debug(f"[TRACE] Removing batch {i} from remaining_batches")
                         del remaining_batches[i]
                     finished = []
+                    logger.debug(f"[TRACE] After cleanup: {len(remaining_batches)} batches still remaining: {list(remaining_batches.keys())}")
                     # wait for 10 seconds before checking again
                     conn.keepAlive()  # keep connection alive w/ omero/ice
                     timesleep.sleep(10)
             except Exception as e:
-                logger.warning(e)
+                # Much better exception logging
+                logger.error(f"[TRACE] EXCEPTION in batch monitoring loop!")
+                logger.error(f"[TRACE] Exception type: {type(e).__name__}")
+                logger.error(f"[TRACE] Exception message: {str(e)}")
+                logger.error(f"[TRACE] Current batch being processed: {current_batch_being_processed}")
+                logger.error(f"[TRACE] Remaining batches when exception occurred: {list(remaining_batches.keys()) if remaining_batches else 'None'}")
+                logger.error(f"[TRACE] Total finished batches so far: {len(finished) if 'finished' in locals() else 'Unknown'}")
+                logger.error(f"[TRACE] Exception details:", exc_info=True)
+                # Mark the workflow as failed due to monitoring exception
+                wf_failed = True
+                # Re-raise the exception to ensure it's not silently ignored
+                raise
             finally:
+                logger.debug(f"[TRACE] Exiting monitoring loop - remaining_batches state: {len(remaining_batches)} entries")
+                logger.debug(f"[TRACE] Final remaining batches: {list(remaining_batches.keys()) if remaining_batches else 'None'}")
                 logger.info('''
                 # ====================================
                 # :: Finished all batches ::
