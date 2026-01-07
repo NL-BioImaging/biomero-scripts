@@ -75,11 +75,11 @@ VERSION = "2.0.2"
 
 def runScript():
     """Main entry point for SLURM batched workflow execution script.
-    
+
     Orchestrates batch processing of workflows on SLURM clusters by dividing
     selected datasets into manageable batches, submitting jobs, monitoring
     execution, and importing results back to OMERO.
-    
+
     The function handles:
         - SLURM client setup and validation
         - Dynamic workflow parameter discovery
@@ -87,7 +87,7 @@ def runScript():
         - Job status monitoring and error handling
         - Result importing and user notification
         - Comprehensive workflow tracking
-    
+
     Batch processing improves efficiency for large datasets by optimizing
     cluster resource usage and reducing individual job overhead.
     """
@@ -212,12 +212,8 @@ def runScript():
                                     values=_workflow_available_versions[wf])
             input_list.append(wf_v)
             # Create a script parameter for all workflow parameters
-            logger.info(
-                f"\nGenerated these parameters for {wf} descriptors:\n")
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                logger.debug(f"{param_incr}, {k}, {param}")
-                logger.info(param)
                 # Convert the parameter from cy(tomine)type to om(ero)type
                 omtype_param = slurmClient.convert_cytype_to_omtype(
                     param["cytype"],
@@ -231,7 +227,7 @@ def runScript():
                 # To allow 'duplicate' params, add the wf to uniqueify them
                 # we have to remove this prefix later again, before passing
                 # them to BIOMERO (as the wf will not understand these params)
-                omtype_param._name = f"{wf}_|_{omtype_param._name}" 
+                omtype_param._name = f"{wf}_|_{omtype_param._name}"
                 input_list.append(omtype_param)
         # Finish setting up the Omero script UI
         inputs = {
@@ -268,7 +264,6 @@ def runScript():
             version_errors = ""
             for wf, selected in selected_workflows.items():
                 selected_version = unwrap(client.getInput(f"{wf}_Version"))
-                logger.info(f"{wf}, {selected}, {selected_version}")
                 if selected and not selected_version:
                     version_errors += f"ERROR: No version for '{wf}'! \n"
             if version_errors:
@@ -284,8 +279,6 @@ def runScript():
                     selected_output[output_option] = False
                 else:
                     selected_output[output_option] = True
-                    logger.info(
-                        f"Selected: {output_option} >> [{selected_op}]")
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
                 client.setOutput("Message", rstring(errormsg))
@@ -307,7 +300,7 @@ def runScript():
                     f"Cannot process workflows: scripts ({PROC_SCRIPTS})\
                         not found in ({[unwrap(s.getName()) for s in scripts]}) ")
             script_id = script_ids[0]  # go away with your list...
-                
+
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
             # Start tracking the workflow on a unique ID
@@ -374,12 +367,15 @@ def runScript():
                 raise ValueError(f"Not recognized input data: {data_type}. \
                     Expected one of {DATATYPES}")
             batch_ids = chunk(image_ids, batch_size)
+            batch_ids_list = list(batch_ids)  # Convert generator to list
+            logger.info(
+                f"Created {len(batch_ids_list)} batches from {len(image_ids)} images (batch size: {batch_size})")
 
             # For batching, ensure we write to 1 dataset, not 1 for each batch
             inputs[constants.workflow.OUTPUT_DUPLICATES] = omscripts.rbool(
                 False)
             processes = {}
-            remaining_batches = {i: b for i, b in enumerate(batch_ids)}
+            remaining_batches = {i: b for i, b in enumerate(batch_ids_list)}
             logger.info("#--------------------------------------------#")
             logger.info(f"Batch Size: {batch_size}")
             logger.info(f"Total items: {len(image_ids)}")
@@ -395,21 +391,22 @@ def runScript():
             # --------------------------------------------
             ''')
             task_ids = {}
-            logger.info(f"Starting batch scripts at {datetime.datetime.now()}")
+            logger.info(
+                f"Submitting {len(remaining_batches)} batch jobs at {datetime.datetime.now()}")
             for i, batch in remaining_batches.items():
                 inputs[constants.transfer.IDS] = rlist([rlong(x)
                                                         # override ids
                                                         for x in batch])
-                persist_dict = {key: unwrap(value) for key, value in inputs.items()}
+
+                persist_dict = {key: unwrap(value)
+                                for key, value in inputs.items()}
                 # persist_dict[constants.transfer.IDS] = [unwrap(value) for value in persist_dict[constants.transfer.IDS]]
                 script_id = int(script_id)
                 # The last parameter is how long to wait as an RInt
                 proc = svc.runScript(script_id, inputs, None)
                 processes[i] = proc
                 omero_job_id = proc.getJob()._id
-                logger.info(f"Started script {script_id} at\
-                    {datetime.datetime.now()}:\
-                    Omero Job ID {omero_job_id}")
+                logger.debug(f"Batch {i+1}: Started OMERO job {omero_job_id}")
                 # TODO: don't do this, use a different domain (driven design)
                 # Now, views will listen to events and not know what they get
                 task_id = slurmClient.workflowTracker.add_task_to_workflow(
@@ -422,42 +419,61 @@ def runScript():
                 task_ids[i] = task_id
                 slurmClient.workflowTracker.start_task(task_id)
                 # slurmClient.workflowTracker.add_job_id(task_id, unwrap(omero_job_id))
-                    
+
             logger.info('''
             # --------------------------------------------
             # :: 3. Track all the batch jobs ::
             # --------------------------------------------
             ''')
             finished = []
-            # Check if any tasks failed by tracking failure status 
+            # Check if any tasks failed by tracking failure status
             wf_failed = False
             try:
                 # 4. Poll results
+                current_batch_being_processed = None
                 while remaining_batches:
-                    logger.debug(f"Remaining batches: {remaining_batches}")
                     # loop the remaining processes
                     for i, batch in remaining_batches.items():
+                        current_batch_being_processed = i
                         task_id = task_ids[i]
                         process = processes[i]
-                        return_code = process.poll()
-                        logger.debug(
-                            f"Process {process} polled: {return_code}")
-                        # TODO don't
-                        slurmClient.workflowTracker.update_task_status(
-                            task_id, 
-                            f"{return_code}")
-                        if return_code:  # None if not finished
-                            results = process.getResults(0)  # 0 ms; RtypeDict
-                            if 'Message' in results:
-                                result_msg = results['Message'].getValue()
-                                logger.info(result_msg)
-                                UI_messages['Message'].extend(
-                                    [f">> Batch {i}: ",
-                                     result_msg])
+                        try:
+                            return_code = process.poll()
+                            logger.debug(
+                                f"Process {process} polled: {return_code}")
+                        except Exception as poll_e:
+                            logger.error(
+                                f"Error polling process for batch {i}: {poll_e}")
+                            raise
 
-                            if 'File_Annotation' in results:
-                                UI_messages['File_Annotation'].append(
-                                    results['File_Annotation'].getValue())
+                        try:
+                            # TODO don't
+                            slurmClient.workflowTracker.update_task_status(
+                                task_id,
+                                f"{return_code}")
+                        except Exception as status_e:
+                            logger.error(
+                                f"Error updating task status for batch {i}, task {task_id}: {status_e}")
+                            raise
+
+                        if return_code:  # None if not finished
+                            try:
+                                results = process.getResults(
+                                    0)  # 0 ms; RtypeDict
+                                if 'Message' in results:
+                                    result_msg = results['Message'].getValue()
+                                    logger.info(result_msg)
+                                    UI_messages['Message'].extend(
+                                        [f">> Batch {i}: ",
+                                         result_msg])
+
+                                if 'File_Annotation' in results:
+                                    UI_messages['File_Annotation'].append(
+                                        results['File_Annotation'].getValue())
+                            except Exception as results_e:
+                                logger.error(
+                                    f"Error getting results for batch {i}: {results_e}")
+                                raise
 
                             finished.append(i)
                             if return_code.getValue() == 0:
@@ -466,16 +482,34 @@ def runScript():
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
-                                slurmClient.workflowTracker.complete_task(
-                                    task_id, result_msg + msg)
+                                try:
+                                    slurmClient.workflowTracker.complete_task(
+                                        task_id, result_msg + msg)
+                                except Exception as complete_e:
+                                    logger.error(
+                                        f"Error completing task {task_id} for batch {i}: {complete_e}")
+                                    raise
+
+                                # Add batch supervisor metadata for this completed batch
+                                try:
+                                    add_batch_supervisor_metadata_for_batch(
+                                        conn, slurmClient, wf_id, i, batch, len(batch_ids_list), inputs)
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to add batch supervisor metadata for batch {i}: {e}")
                             else:
                                 msg = f"Batch {i} - [{remaining_batches[i]}] failed!"
                                 logger.info(
                                     msg)
                                 UI_messages['Message'].extend(
                                     [msg])
-                                slurmClient.workflowTracker.fail_task(
-                                    task_id, "Batch failed")
+                                try:
+                                    slurmClient.workflowTracker.fail_task(
+                                        task_id, "Batch failed")
+                                except Exception as fail_e:
+                                    logger.error(
+                                        f"Error failing task {task_id} for batch {i}: {fail_e}")
+                                    raise
                                 wf_failed = True
                         else:
                             pass
@@ -488,7 +522,12 @@ def runScript():
                     conn.keepAlive()  # keep connection alive w/ omero/ice
                     timesleep.sleep(10)
             except Exception as e:
-                logger.warning(e)
+                logger.error(
+                    f"Exception in batch monitoring loop for batch {current_batch_being_processed}: {e}")
+                # Mark the workflow as failed due to monitoring exception
+                wf_failed = True
+                # Re-raise the exception to ensure it's not silently ignored
+                raise
             finally:
                 logger.info('''
                 # ====================================
@@ -501,12 +540,13 @@ def runScript():
             # 7. Script output
             client.setOutput("Message",
                              rstring("\n".join(UI_messages['Message'])))
-                    
+
             if wf_failed:
-                slurmClient.workflowTracker.fail_workflow(wf_id, "One or more workflow batches failed")
+                slurmClient.workflowTracker.fail_workflow(
+                    wf_id, "One or more workflow batches failed")
             else:
                 slurmClient.workflowTracker.complete_workflow(wf_id)
-                
+
             for i, ann in enumerate(UI_messages['File_Annotation']):
                 client.setOutput(f"File_Annotation_{i}", robject(ann))
         finally:
@@ -517,6 +557,219 @@ def chunk(lst, n):
     """Yield successive n-sized chunks from lst."""
     it = iter(lst)
     return iter(lambda: tuple(islice(it, n)), ())
+
+
+def add_batch_supervisor_metadata_for_batch(conn, slurmClient, supervisor_wf_id, batch_index, batch_image_ids, total_batches, base_inputs):
+    """Add batch supervisor metadata to images from a single completed batch.
+
+    This function finds output images by matching the input image IDs and output settings
+    that were used for this specific batch, then adds supervisor workflow metadata.
+
+    Args:
+        conn: OMERO BlitzGateway connection
+        slurmClient: SlurmClient for accessing workflow tracking
+        supervisor_wf_id: UUID of the supervisor (batched) workflow
+        batch_index: Index of this specific batch
+        batch_image_ids: List of input image IDs for this batch
+        total_batches: Total number of batches
+        base_inputs: Base input parameters used for all batches
+    """
+    try:
+        logger.debug(
+            f"Adding batch supervisor metadata for batch {batch_index + 1}/{total_batches}")
+
+        # Extract the output settings that were used for all batches
+        output_settings = {}
+        if constants.workflow.OUTPUT_NEW_DATASET in base_inputs:
+            output_settings['New Dataset'] = unwrap(
+                base_inputs[constants.workflow.OUTPUT_NEW_DATASET])
+        if constants.workflow.OUTPUT_DUPLICATES in base_inputs:
+            output_settings['Allow duplicate?'] = unwrap(
+                base_inputs[constants.workflow.OUTPUT_DUPLICATES])
+
+        # Find the corresponding output images for this batch
+        output_images = find_output_images_for_batch(
+            conn, batch_image_ids)
+
+        if output_images:
+            # Add batch supervisor metadata to found images
+            batch_supervisor_dict = {
+                'Batch_Supervisor_Workflow_ID': str(supervisor_wf_id),
+                'Batch_Index': str(batch_index + 1),  # 1-indexed for users
+                'Total_Batches': str(total_batches),
+                # First 10 IDs
+                'Input_Image_IDs': ', '.join(map(str, batch_image_ids[:10])) + ('...' if len(batch_image_ids) > 10 else '')
+            }
+
+            for img_id in output_images:
+                try:
+                    import ezomero
+                    map_ann_id = ezomero.post_map_annotation(
+                        conn=conn,
+                        object_type="Image",
+                        object_id=img_id,
+                        kv_dict=batch_supervisor_dict,
+                        ns="biomero/workflow/batch",
+                        across_groups=False
+                    )
+                    logger.debug(
+                        f"Added batch supervisor metadata to image {img_id}")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to add batch supervisor metadata to image {img_id}: {e}")
+
+            logger.debug(
+                f"Added batch supervisor metadata to {len(output_images)} images")
+        else:
+            logger.warning(
+                f"No output images found for batch {batch_index + 1}")
+
+    except Exception as e:
+        logger.error(
+            f"Error adding batch supervisor metadata for batch {batch_index + 1}: {e}")
+        raise
+
+
+def find_output_images_for_batch(conn, input_image_ids):
+    """Find output images created by a batch using input IDs.
+
+    Args:
+        conn: OMERO BlitzGateway connection
+        input_image_ids: List of input image IDs for this batch
+
+    Returns:
+        List of output image IDs created by this batch
+    """
+    try:
+        # Search for SLURM_Get_Results.py task annotations (optimized with time constraint)
+        query_service = conn.getQueryService()
+
+        # Proper OMERO parameter initialization and time handling
+        import datetime
+        from omero.rtypes import rtime
+
+        # Very tight time window - batch supervisor runs immediately after completion
+        # Only look for SLURM_Get_Results annotations created in last 5 minutes
+        cutoff = datetime.datetime.now(
+            datetime.timezone.utc) - datetime.timedelta(minutes=5)
+        params = omero.sys.ParametersI()
+        params.add("cutoff", rtime(int(cutoff.timestamp() * 1000)))
+
+        # Add LIKE conditions for each input ID
+        like_conditions = []
+        for i, img_id in enumerate(input_image_ids):
+            param_name = f"id_{i}"
+            like_conditions.append(f"mv.value like :{param_name}")
+            params.addString(param_name, f"%{img_id}%")
+
+        like_clause = " and ".join(like_conditions)
+
+        # The WORKING HQL query - finds output images linked to SLURM_Get_Results annotations
+        # that match our batch input IDs and were created recently
+        hql = f"""
+        select distinct
+            img.id as output_image_id,
+            ma.id as annotation_id,
+            mv.value as input_data,
+            ev.time as creation_time
+        from Image img
+        join img.annotationLinks l
+        join l.child ma
+        join ma.details.creationEvent ev
+        join ma.mapValue mvName
+        join ma.mapValue mv
+        where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
+          and mvName.name = 'Name'
+          and mvName.value = 'SLURM_Get_Results.py'
+          and mv.name = 'Input_Data'
+          and ev.time > :cutoff
+          and ({like_clause})
+        """
+
+        results = query_service.projection(hql, params)
+
+        output_image_ids = []
+        for result in results:
+            img_id = result[0].val
+            ann_id = result[1].val
+            input_data = result[2].val
+
+            output_image_ids.append(img_id)
+
+        logger.debug(
+            f"Found {len(output_image_ids)} output images for batch with {len(input_image_ids)} input images")
+        return output_image_ids
+
+    except Exception as e:
+        logger.error(f"Error finding output images for batch: {e}")
+        return []
+
+
+def is_recent_and_matching_settings(conn, img_id, output_settings):
+    """Check if the task is recent and has matching output settings.
+
+    Args:
+        conn: OMERO BlitzGateway connection  
+        img_id: Image ID to check
+        output_settings: Expected output settings
+
+    Returns:
+        Boolean indicating if this is a recent matching task
+    """
+    try:
+        # Get annotations for this image to check timing and settings
+        query_service = conn.getQueryService()
+        params = omero.sys.Parameters()
+        params.map = {"img_id": omero.rtypes.rlong(img_id)}
+
+        # Get task annotations with Created_On timestamp
+        hql = """
+        SELECT mv.name, mv.value
+        FROM Image img
+        JOIN img.annotationLinks ial
+        JOIN ial.child ann  
+        JOIN ann.mapValue mv
+        WHERE img.id = :img_id
+        AND TYPE(ann) = MapAnnotation
+        AND (mv.name = 'Created_On' OR mv.name LIKE 'Param_%')
+        """
+
+        results = query_service.projection(hql, params, conn.SERVICE_OPTS)
+
+        # Check if created recently (within last 2 hours)
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        two_hours_ago = now - datetime.timedelta(hours=2)
+
+        is_recent = False
+        settings_match = True  # Assume match unless we find a mismatch
+
+        for result in results:
+            name = result[0].val
+            value = result[1].val
+
+            if name == 'Created_On':
+                try:
+                    iso_value = value.replace('Z', '+00:00')
+                    created_time = datetime.datetime.fromisoformat(iso_value)
+                    is_recent = created_time > two_hours_ago
+                except (ValueError, AttributeError):
+                    is_recent = True  # Default to true if we can't parse
+
+            # Check output settings match
+            elif name.startswith('Param_') and output_settings:
+                param_name = name.replace('Param_', '')
+                if param_name in output_settings:
+                    expected = str(output_settings[param_name])
+                    if str(value) != expected:
+                        settings_match = False
+                        break
+
+        return is_recent and settings_match
+
+    except Exception as e:
+        logger.debug(f"Error checking recent settings for image {img_id}: {e}")
+        return True  # Default to true if we can't check
 
 
 if __name__ == '__main__':
@@ -546,7 +799,8 @@ if __name__ == '__main__':
 
     # Silence some of the DEBUG - Extended for cleaner BIOMERO logs
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
-    logging.getLogger('omero.gateway').setLevel(logging.WARNING)  # Silences proxy creation spam
+    logging.getLogger('omero.gateway').setLevel(
+        logging.WARNING)  # Silences proxy creation spam
     logging.getLogger('omero.client').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
     logging.getLogger('paramiko.sftp').setLevel(logging.WARNING)
@@ -554,7 +808,8 @@ if __name__ == '__main__':
     logging.getLogger('requests').setLevel(logging.WARNING)
     logging.getLogger('requests_cache').setLevel(logging.WARNING)  # Cache logs
     logging.getLogger('requests-cache').setLevel(logging.WARNING)  # Alt naming
-    logging.getLogger('requests_cache.core').setLevel(logging.WARNING)  # Core module
+    logging.getLogger('requests_cache.core').setLevel(
+        logging.WARNING)  # Core module
     logging.getLogger('requests_cache.backends').setLevel(logging.WARNING)
     logging.getLogger('requests_cache.backends.base').setLevel(logging.WARNING)
     logging.getLogger('requests_cache.backends.sqlite').setLevel(

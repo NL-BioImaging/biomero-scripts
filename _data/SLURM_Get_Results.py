@@ -104,7 +104,7 @@ def getOriginalFilename(name):
 
     Args:
         name (str): Path/name of processed file.
-        
+
     Returns:
         str: Original filename if pattern matches, otherwise input name.
     """
@@ -173,7 +173,7 @@ def saveCSVToOmeroAsTable(conn, folder, client,
 
             objecti = getattr(omero.model, data_type + 'I')
             omero_object = objecti(int(object_id), False)
-            
+
             # Split name and extension
             name_parts = os.path.splitext(csv_name)
             table_name = f"{name_parts[0]}"
@@ -282,22 +282,25 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, wf_id=None):
                             name = new_name  # Update name for the rest of the process
                             logger.debug(f"Renamed file to: {name}")
                         except OSError as e:
-                            logger.warning(f"Could not rename file {name}: {e}")
+                            logger.warning(
+                                f"Could not rename file {name}: {e}")
 
                 # Create annotation with renamed file
                 ext = os.path.splitext(name)[1][1:]
                 file_ann = conn.createFileAnnfromLocalFile(
                     name, mimetype=f"image/{ext}",
                     ns=namespace, desc=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
-                
+
                 # Restore original filename after annotation is created
                 if name != original_name:
                     try:
                         os.rename(name, original_name)
-                        logger.debug(f"Restored original filename: {original_name}")
+                        logger.debug(
+                            f"Restored original filename: {original_name}")
                     except OSError as e:
-                        logger.warning(f"Could not restore original filename {original_name}: {e}")
-                
+                        logger.warning(
+                            f"Could not restore original filename {original_name}: {e}")
+
                 logger.info(f"Attaching {name} to image {og_name}")
                 # image = load_image(conn, image_id)
                 for image in images:
@@ -405,7 +408,6 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
                 'Modified_On': wf._modified_on.isoformat(),
                 'Task_IDs': ", ".join([str(tid) for tid in wf.tasks]),
             }
-            logger.debug(f"Adding metadata: {workflow_annotation_dict}")
             map_ann_id = ezomero.post_map_annotation(
                 conn=conn,
                 object_type=object_type,
@@ -437,7 +439,6 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
                         value) for key, value in task.params.items()})
                 # task metadata
                 ns_task = ns_wf + "/task" + f"/{task.task_name}"
-                logger.debug(f"Adding metadata: {task_annotation_dict}")
                 map_ann_id = ezomero.post_map_annotation(
                     conn=conn,
                     object_type=object_type,
@@ -1191,7 +1192,8 @@ if __name__ == '__main__':
 
     # Silence some of the DEBUG - Extended for cleaner BIOMERO logs
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
-    logging.getLogger('omero.gateway').setLevel(logging.WARNING)  # Silences proxy creation spam
+    logging.getLogger('omero.gateway').setLevel(
+        logging.WARNING)  # Silences proxy creation spam
     logging.getLogger('omero.client').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
     logging.getLogger('paramiko.sftp').setLevel(logging.WARNING)
@@ -1199,7 +1201,8 @@ if __name__ == '__main__':
     logging.getLogger('requests').setLevel(logging.WARNING)
     logging.getLogger('requests_cache').setLevel(logging.WARNING)  # Cache logs
     logging.getLogger('requests-cache').setLevel(logging.WARNING)  # Alt naming
-    logging.getLogger('requests_cache.core').setLevel(logging.WARNING)  # Core module
+    logging.getLogger('requests_cache.core').setLevel(
+        logging.WARNING)  # Core module
     logging.getLogger('requests_cache.backends').setLevel(logging.WARNING)
     logging.getLogger('requests_cache.backends.base').setLevel(logging.WARNING)
     logging.getLogger('requests_cache.backends.sqlite').setLevel(

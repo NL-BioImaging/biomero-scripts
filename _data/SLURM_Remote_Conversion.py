@@ -59,23 +59,23 @@ VERSION = "2.0.2"
 def runScript():
     """
     Main entry point for SLURM remote data conversion script.
-    
+
     This function orchestrates data format conversion on SLURM clusters
     with intelligent optimization for same-format operations:
-    
+
     1. Validates available data files and conversion options
     2. Sets up OMERO script parameters for user input
     3. Checks if conversion is needed (source != target format)
     4. If conversion needed: submits conversion job to SLURM
     5. If no conversion needed: performs unzip-only operation
     6. Updates workflow tracking with results
-    
+
     The script automatically handles:
     - ZARR to TIFF conversion using bioformats tools
     - No-op operations for same-format requests (optimization)
     - Workflow task tracking and status updates
     - Error handling and cleanup
-    
+
     Raises:
         Exception: Various exceptions during conversion process,
                   all tracked in workflow status
@@ -143,7 +143,7 @@ def runScript():
             conn = BlitzGateway(client_obj=client)
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
-            
+
             # Check if running as part of parent workflow or standalone
             is_subtask = parent_wf_id is not None
             if is_subtask:
@@ -163,7 +163,7 @@ def runScript():
                 # Check if conversion is needed (no-op if source == target)
                 if convert_from == convert_to:
                     msg = f"No conversion needed: {zipfile} already in " \
-                          f"{convert_to} format"
+                        f"{convert_to} format"
                     logger.info(msg)
                     message += msg
                     # Only complete workflow if running standalone
@@ -184,7 +184,7 @@ def runScript():
                         slurmJob.wait_for_completion(slurmClient, conn)
                         if not slurmJob.completed():
                             log_msg = f"Conversion is not completed: " \
-                                      f"{slurmJob}"
+                                f"{slurmJob}"
                             slurmClient.workflowTracker.fail_task(
                                 slurmJob.task_id, "Conversion failed")
                             # Only fail workflow if running standalone
@@ -196,7 +196,7 @@ def runScript():
                             if cleanup:
                                 slurmJob.cleanup(slurmClient)
                             msg = f"Converted {zipfile} from {convert_from} " \
-                                  f"to {convert_to}"
+                                f"to {convert_to}"
                             logger.info(msg)
                             message += msg
                             slurmClient.workflowTracker.complete_task(
@@ -206,13 +206,20 @@ def runScript():
                                 slurmClient.workflowTracker.complete_workflow(
                                     wf_id)
             except Exception as e:
-                message += f" ERROR WITH CONVERTING DATA: {e}"
-                logger.error(message)
+                error_msg = f" ERROR WITH CONVERTING DATA: {e}"
+                message += error_msg
+                logger.error(
+                    f"Conversion script exception: {e} | Full error: {message}")
+
                 # Only fail workflow if running standalone
                 if not is_subtask:
                     slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+
+                # Always set output message with error for parent detection
+                client.setOutput("Message", rstring(str(message)))
                 raise e
 
+            # Set successful output message
             client.setOutput("Message", rstring(str(message)))
             # slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
@@ -246,7 +253,8 @@ if __name__ == '__main__':
 
     # Silence some of the DEBUG - Extended for cleaner BIOMERO logs
     logging.getLogger('omero.gateway.utils').setLevel(logging.WARNING)
-    logging.getLogger('omero.gateway').setLevel(logging.WARNING)  # Silences proxy creation spam
+    logging.getLogger('omero.gateway').setLevel(
+        logging.WARNING)  # Silences proxy creation spam
     logging.getLogger('omero.client').setLevel(logging.WARNING)
     logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
     logging.getLogger('paramiko.sftp').setLevel(logging.WARNING)
@@ -254,7 +262,8 @@ if __name__ == '__main__':
     logging.getLogger('requests').setLevel(logging.WARNING)
     logging.getLogger('requests_cache').setLevel(logging.WARNING)  # Cache logs
     logging.getLogger('requests-cache').setLevel(logging.WARNING)  # Alt naming
-    logging.getLogger('requests_cache.core').setLevel(logging.WARNING)  # Core module
+    logging.getLogger('requests_cache.core').setLevel(
+        logging.WARNING)  # Core module
     logging.getLogger('requests_cache.backends').setLevel(logging.WARNING)
     logging.getLogger('requests_cache.backends.base').setLevel(logging.WARNING)
     logging.getLogger('requests_cache.backends.sqlite').setLevel(
