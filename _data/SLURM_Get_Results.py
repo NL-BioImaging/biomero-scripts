@@ -64,7 +64,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 OBJECT_TYPES = (
     'Plate',
@@ -219,6 +219,8 @@ def saveCSVToOmeroAsTable(conn, folder, client,
                     omero_object = conn.getObject("Dataset", int(object_id))
                 elif data_type == 'Project':
                     omero_object = conn.getObject("Project", int(object_id))
+                elif data_type == 'Plate':
+                    omero_object = conn.getObject("Plate", int(object_id))
                 else:
                     raise ValueError(f"Unsupported data_type: {data_type}")
                 logger.debug(
@@ -630,12 +632,45 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
 
 
 def rename_import_file(client, name, og_name):
-    pattern = unwrap(client.getInput("Rename"))
+    pattern = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME))
     logger.debug(f"Overwriting name {name} with pattern: {pattern}")
-    ext = os.path.splitext(name)[1][1:]  # new extension
-    original_file = os.path.splitext(og_name)[0]  # original base
-    name = pattern.format(original_file=original_file, ext=ext)
-    logger.info(f"New name: {name} ({original_file}, {ext})")
+    
+    # Handle double extensions (e.g., .ome.tiff, .ome.zarr)
+    from pathlib import PurePath
+    
+    # Get result file info (name parameter)
+    result_filename = os.path.basename(name)
+    result_suffixes = PurePath(result_filename).suffixes  # e.g. ['.ome', '.tiff']
+    result_ext_combo = ''.join(result_suffixes)  # e.g. '.ome.tiff'
+    if result_ext_combo:
+        result_file_base = result_filename[:-len(result_ext_combo)]
+        ext = result_ext_combo[1:]  # Remove leading dot for {ext}
+    else:
+        result_file_base = os.path.splitext(result_filename)[0]
+        ext = os.path.splitext(result_filename)[1][1:]  # Fallback for no extension
+    
+    # Get original file info (og_name parameter) - clean up any trailing dots
+    original_filename = os.path.basename(og_name).rstrip('.')  # Remove trailing dots
+    original_suffixes = PurePath(original_filename).suffixes
+    original_ext_combo = ''.join(original_suffixes)
+    if original_ext_combo:
+        original_file = original_filename[:-len(original_ext_combo)]
+        original_ext = original_ext_combo[1:]  # Remove leading dot for {original_ext}
+    else:
+        original_file = os.path.splitext(original_filename)[0]
+        original_ext = os.path.splitext(original_filename)[1][1:]  # Fallback for no extension
+    
+    # Create variables for pattern formatting
+    variables = {
+        'original_file': original_file,      # Original file basename without extension
+        'original_ext': original_ext,        # Original file extension (handles double extensions)
+        'file': result_file_base,            # Result file basename without extension  
+        'ext': ext                           # Result file extension (handles double extensions)
+    }
+    
+    logger.debug(f"Rename variables: original_filename='{original_filename}', original_suffixes={original_suffixes}, variables={variables}")
+    name = pattern.format(**variables)
+    logger.info(f"New name: {name}")
     return name
 
 
@@ -768,9 +803,9 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder, wf_id=N
         if unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_NEW_DATASET)):
             # create a new dataset for new images
-            dataset_name = unwrap(client.getInput("New Dataset"))
+            dataset_name = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
 
-            create_new_dataset = unwrap(client.getInput("Allow duplicate?"))
+            create_new_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
             if not create_new_dataset:  # check the named dataset first
                 try:
                     existing_datasets_w_name = [d.id for d in conn.getObjects(
@@ -1002,7 +1037,7 @@ def runScript():
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
                          grouping="06.3",
-                         description="Rename all imported files as below. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
+                         description="Rename all imported files as below. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}NucleiLabels.{ext}",
                          default=False),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME,
                            optional=True,
@@ -1077,14 +1112,14 @@ def runScript():
             projects = []  # note, can also be plate now
             if unwrap(client.getInput(
                     constants.results.OUTPUT_ATTACH_PROJECT)):
-                project_ids = unwrap(client.getInput("Project"))
+                project_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PROJECT_ID))
                 logger.debug(project_ids)
-                projects = [conn.getObject("Project", p.split(":")[0])
+                projects = [conn.getObject(constants.results.OUTPUT_ATTACH_PROJECT_ID, p.split(":")[0])
                             for p in project_ids]
             if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PLATE)):
-                plate_ids = unwrap(client.getInput("Plate"))
+                plate_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PLATE_ID))
                 logger.debug(plate_ids)
-                projects = [conn.getObject("Plate", p.split(":")[0])
+                projects = [conn.getObject(constants.results.OUTPUT_ATTACH_PLATE_ID, p.split(":")[0])
                             for p in plate_ids]
 
             # Job log
