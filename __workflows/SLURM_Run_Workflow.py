@@ -74,7 +74,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 
 def runScript():
@@ -189,6 +189,11 @@ def runScript():
                            optional=False,
                            grouping="02.8",
                            description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
+                           default=True),
+            omscripts.Bool("Cleanup?",
+                           optional=True,
+                           grouping="02.9", 
+                           description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
                            default=True)
 
         ]
@@ -711,7 +716,7 @@ def convertDataOnSLURM(client: omscripts.client,
         "Input data": rstring(zipfile),
         "Source format": rstring(source_format),
         "Target format": rstring(target_format),
-        "Cleanup?": rbool(True),
+        "Cleanup?": client.getInput("Cleanup?") or rbool(True),
         "Parent_Workflow_ID": rstring(str(wf_id))
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
@@ -953,7 +958,8 @@ def importResultsToOmero(client: omscripts.client,
     logger.debug(f"{script_id}, {first_id}, {data_type}")
     inputs = {
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
-        constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id))
+        constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id)),
+        "Cleanup?": client.getInput("Cleanup?") or rbool(True)
     }
 
     # Get a 'parent' dataset or plate of input images

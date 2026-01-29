@@ -54,7 +54,7 @@ import os
 import sys
 
 # Version constant for easy version management
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 logger = logging.getLogger(__name__)
 

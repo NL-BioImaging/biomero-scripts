@@ -64,7 +64,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 OBJECT_TYPES = (
     'Plate',
@@ -1069,6 +1069,11 @@ def runScript():
                          grouping="07.4",
                          description="Plate to attach workflow results to",
                          values=_plates),
+            scripts.Bool("Cleanup?",
+                         optional=True,
+                         grouping="08",
+                         description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
+                         default=True),
 
 
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
@@ -1181,19 +1186,29 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, slurmClient, message, folder, wf_id=wf_id)
 
-                            clean_result = slurmClient.cleanup_tmp_files(
-                                slurm_job_id,
-                                filename,
-                                data_location)
-                            message += "\nSuccesfully cleaned up tmp files"
-                            logger.info(message)
-                            logger.debug(clean_result)
+                            # Only cleanup if Cleanup? is True
+                            if unwrap(client.getInput("Cleanup?")):
+                                clean_result = slurmClient.cleanup_tmp_files(
+                                    slurm_job_id,
+                                    filename,
+                                    data_location)
+                                message += "\nSuccesfully cleaned up tmp files on SLURM"
+                                logger.info(message)
+                                logger.debug(clean_result)
+                            else:
+                                message += f"\nCleanup disabled: Data preserved on SLURM at {data_location}"
+                                logger.info(f"Cleanup disabled: Preserved SLURM data at {data_location}")
                 except Exception as e:
                     message += f"\nEncountered error: {e}"
                 finally:
-                    if folder or log_file:
-                        # cleanup_tmp_files_locally(message, folder, log_file)
-                        print("woops, cleanup not implemented yet")
+                    if folder and log_file:
+                        # Only cleanup locally if Cleanup? is True
+                        if unwrap(client.getInput("Cleanup?")):
+                            message = cleanup_tmp_files_locally(message, folder, log_file)
+                            logger.info("Local cleanup completed")
+                        else:
+                            message += f"\nCleanup disabled: Local files preserved at {folder}"
+                            logger.info(f"Cleanup disabled: Preserved local files at {folder}")
 
             client.setOutput("Message", rstring(str(message)))
         finally:

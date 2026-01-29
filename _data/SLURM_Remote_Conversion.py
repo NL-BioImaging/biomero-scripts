@@ -53,7 +53,7 @@ TARGET = "Target format"
 CLEANUP = "Cleanup?"
 
 # Version constant for easy version management
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 
 def runScript():
