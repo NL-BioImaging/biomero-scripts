@@ -64,7 +64,7 @@ from paramiko import SSHException
 logger = logging.getLogger(__name__)
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
-IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+IMPORT_SCRIPTS = ["SLURM_Import_Results.py"]
 CONVERSION_SCRIPTS = [constants.CONVERSION_SCRIPT]
 DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
              rstring(constants.transfer.DATA_TYPE_IMAGE),
@@ -959,7 +959,8 @@ def importResultsToOmero(client: omscripts.client,
     inputs = {
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
         constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id)),
-        "Cleanup?": client.getInput("Cleanup?") or rbool(True)
+        "Cleanup?": client.getInput("Cleanup?") or rbool(True),
+        "Workflow_UUID": rstring(str(wf_id))
     }
 
     # Get a 'parent' dataset or plate of input images

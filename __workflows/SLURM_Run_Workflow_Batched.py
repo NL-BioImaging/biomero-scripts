@@ -157,7 +157,7 @@ def runScript():
             omscripts.String(constants.workflow.OUTPUT_RENAME,
                              optional=True,
                              grouping="02.7",
-                             description="A new name for the imported images. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
+                             description="A new name for the imported images. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}_nuclei_mask.{ext} or {file}_processed.{original_ext}",
                              default=constants.workflow.NO),
             omscripts.Bool(constants.workflow.OUTPUT_PARENT,
                            optional=True, grouping="02.2",
