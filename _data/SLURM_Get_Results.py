@@ -45,6 +45,7 @@ License: GPL v2+ (see LICENSE.txt)
 
 import shutil
 import sys
+import uuid
 import omero
 import omero.gateway
 from omero import scripts
@@ -80,6 +81,7 @@ _LOGFILE_PATH_PATTERN_GROUP = "DATA_PATH"
 _LOGFILE_PATH_PATTERN = "Running [\w-]+? Job w\/ .+? \| .+? \| (?P<DATA_PATH>.+?) \|.*"
 SUPPORTED_IMAGE_EXTENSIONS = ['.tif', '.tiff', '.png', '.ome.tif']
 SUPPORTED_TABLE_EXTENSIONS = ['.csv']
+UUID_PATTERN = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 
 def load_image(conn, image_id):
@@ -236,14 +238,16 @@ def saveCSVToOmeroAsTable(conn, folder, client,
     return message
 
 
-def saveImagesToOmeroAsAttachments(conn, folder, client, wf_id=None):
+def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=None):
     """Save image from a (unzipped) folder to OMERO as attachments
 
     Args:
         conn (_type_): Connection to OMERO
         folder (String): Unzipped folder
         client : OMERO client to attach output
-
+        metadata_files (List[str]): List of metadata CSV file paths
+        wf_id (str, optional): Workflow ID for metadata. Defaults to None.
+        
     Returns:
         String: Message to add to script output
     """
@@ -258,6 +262,7 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, wf_id=None):
     job_id = unwrap(client.getInput(
         constants.results.OUTPUT_SLURM_JOB_ID)).strip()
     msg = ""
+    message = ""  # Initialize message variable to fix scoping issue
     for name in files:
         logger.debug(name)
         og_name = getOriginalFilename(name)
@@ -307,7 +312,10 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, wf_id=None):
                 # image = load_image(conn, image_id)
                 for image in images:
                     image.linkAnnotation(file_ann)
-
+                    if metadata_files:
+                        message = upload_metadata_csv_to_omero(
+                            client, conn, message, job_id, [image], metadata_files, wf_id)
+                        
                 logger.debug(
                     f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
@@ -758,7 +766,212 @@ def cleanup_tmp_files_locally(message: str, folder: str, log_file: str) -> str:
     return message
 
 
-def upload_contents_to_omero(client, conn, slurmClient, message, folder, wf_id=None):
+def upload_metadata_csv_to_omero(client, conn, message, slurm_job_id, attachment_targets, metadata_files, wf_id=None):
+    """Upload metadata CSV to OMERO as file attachments.
+
+    Creates file annotation for metadata CSV and attaches to specified OMERO objects.
+    Renames the file to include workflow ID for better organization.
+
+    Args:
+        client: OMERO client.
+        conn: Open connection to OMERO.
+        message: Current script output message.
+        slurm_job_id: ID of the SLURM job the metadata came from.
+        attachment_targets: OMERO objects to attach metadata to.
+        metadata_files: List of metadata CSV file paths.
+        wf_id: Workflow ID for metadata. Defaults to None.
+
+    Returns:
+        Updated message with operation results.
+
+    Raises:
+        RuntimeError: If upload fails.
+    """
+    if not metadata_files or not attachment_targets:
+        return message
+    
+    try:
+        # Use the first metadata file (they should all have the same content)
+        source_metadata_file = metadata_files[0]
+
+        # Create a renamed copy with workflow ID
+        source_dir = os.path.dirname(source_metadata_file)
+        if wf_id:
+            renamed_metadata_file = os.path.join(
+                source_dir, f"metadata_{wf_id}.csv")
+        else:
+            renamed_metadata_file = os.path.join(
+                source_dir, f"metadata_{slurm_job_id}.csv")
+
+        # Copy file with new name only if it doesn't already exist (don't modify original that importer might use)
+        if not os.path.exists(renamed_metadata_file):
+            import shutil
+            shutil.copy2(source_metadata_file, renamed_metadata_file)
+            logger.debug(f"Created renamed metadata copy: {renamed_metadata_file}")
+        else:
+            logger.debug(f"Using existing renamed metadata copy: {renamed_metadata_file}")
+        
+        # Upload metadata CSV and link to target objects
+        logger.info(f"Uploading {renamed_metadata_file} and attaching to {attachment_targets}")
+        mimetype = "text/csv"
+        namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
+        description = f"Workflow metadata from SLURM job {slurm_job_id}"
+        if wf_id:
+            description += f" (Workflow {wf_id})"
+        
+        annotation = conn.createFileAnnfromLocalFile(
+            renamed_metadata_file, mimetype=mimetype,
+            ns=namespace, desc=description)
+
+        # Refresh objects to avoid UnloadedEntityException (works for Projects, Plates, Images)
+        for obj in attachment_targets:
+            # Detect object type dynamically
+            if hasattr(obj, '_obj') and hasattr(obj._obj, '__class__'):
+                obj_class_name = obj._obj.__class__.__name__
+                if 'Project' in obj_class_name:
+                    object_type = "Project"
+                elif 'Plate' in obj_class_name:
+                    object_type = "Plate"
+                elif 'Image' in obj_class_name:
+                    object_type = "Image"
+                else:
+                    # Fallback - try to use the wrapper type
+                    object_type = type(obj).__name__.replace('Wrapper', '').replace('_', '')
+            else:
+                object_type = "Project"  # Default fallback
+
+            refreshed_obj = conn.getObject(object_type, obj.getId())
+            if refreshed_obj:
+                refreshed_obj.linkAnnotation(annotation)
+            else:
+                logger.warning(f"Could not refresh {object_type} {obj.getId()} for annotation linking")
+        
+        message += f"\nAttached metadata CSV {os.path.basename(renamed_metadata_file)} to {len(attachment_targets)} targets"
+        logger.info(f"Successfully attached metadata CSV to {len(attachment_targets)} targets")
+        
+    except Exception as e:
+        message += f" Uploading metadata CSV failed: {e}"
+        logger.warning(f"Metadata CSV upload failed: {e}")
+        raise RuntimeError(f"Metadata CSV upload failed: {e}")
+
+    return message
+
+
+def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
+    """Create metadata.csv file with workflow and job metadata.
+
+    The metadata.csv file is created in the same directory as the image files.
+
+    Args:
+        conn: OMERO BlitzGateway connection.
+        slurmClient: BIOMERO SlurmClient instance.
+        target_path: Base path where results were extracted.
+        job_id: SLURM job ID.
+        wf_id: Workflow ID. Defaults to None.
+
+    Returns:
+        List of metadata.csv file paths created.
+    """
+    metadata_rows = []
+
+    # Add basic job metadata
+    metadata_rows.append(['Job_ID', str(job_id)])
+    metadata_rows.append(['Import_Type', 'SLURM_Results'])
+    metadata_rows.append(['Import_User', conn.getUser().getName()])
+    metadata_rows.append(['Import_Group', conn.getGroupFromContext().getName()])
+
+    if slurmClient.track_workflows and wf_id:
+        try:
+            wf = slurmClient.workflowTracker.repository.get(wf_id)
+
+            # Extract version from description
+            version_match = re.search(r'\d+\.\d+\.\d+', wf.description)
+            workflow_version = version_match.group(0) if version_match else "Unknown"
+
+            # Add workflow metadata
+            metadata_rows.extend([
+                ['Workflow_ID', str(wf_id)],
+                ['Workflow_Name', wf.name],
+                ['Workflow_Version', str(workflow_version)],
+                ['Workflow_Created_On', wf._created_on.isoformat()],
+                ['Workflow_Modified_On', wf._modified_on.isoformat()],
+                ['Workflow_Task_IDs', ", ".join([str(tid) for tid in wf.tasks])]
+            ])
+
+            # Add task metadata
+            for tid in wf.tasks:
+                task = slurmClient.workflowTracker.repository.get(tid)
+                task_prefix = f"Task_{task.task_name}_"
+
+                metadata_rows.extend([
+                    [f'{task_prefix}ID', str(task._id)],
+                    [f'{task_prefix}Name', task.task_name],
+                    [f'{task_prefix}Version', task.task_version],
+                    [f'{task_prefix}Status', task.status],
+                    [f'{task_prefix}Input_Data', task.input_data],
+                    [f'{task_prefix}Job_IDs', ", ".join([str(jid) for jid in task.job_ids])]
+                ])
+
+                # Add task parameters
+                if task.params:
+                    for param_key, param_value in task.params.items():
+                        metadata_rows.append([f'{task_prefix}Param_{param_key}', str(param_value)])
+
+        except Exception as e:
+            logger.error(f"Failed to extract detailed workflow metadata: {e}")
+            # Add minimal workflow info
+            metadata_rows.append(['Workflow_ID', str(wf_id)])
+
+    # Find where to put metadata.csv - same logic as images
+    all_files = glob.iglob(target_path + '**/**', recursive=True)
+    image_files = [f for f in all_files if os.path.isfile(f)
+                   and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+
+    # Create metadata.csv in same directories as image files
+    created_files = []
+    if image_files:
+        # Group image files by directory
+        directories_with_images = {}
+        for img_file in image_files:
+            img_dir = os.path.dirname(img_file)
+            if img_dir not in directories_with_images:
+                directories_with_images[img_dir] = []
+            directories_with_images[img_dir].append(img_file)
+
+        # Create metadata.csv in each directory containing images
+        for img_dir in directories_with_images.keys():
+            if wf_id:
+                metadata_file = os.path.join(img_dir, f"metadata_{wf_id}.csv")
+            else:
+                metadata_file = os.path.join(img_dir, f"metadata_{job_id}.csv")
+
+            with open(metadata_file, 'w', newline='', encoding='utf-8') as csvfile:
+                import csv
+                writer = csv.writer(csvfile)
+                writer.writerows(metadata_rows)
+
+            created_files.append(metadata_file)
+            logger.info(f"Created metadata CSV: {metadata_file}")
+    else:
+        # Fallback to base directory if no images found
+        if wf_id:
+            metadata_file = os.path.join(target_path, f"metadata_{wf_id}.csv")
+        else:
+            metadata_file = os.path.join(target_path, f"metadata_{job_id}.csv")
+        logger.warning(f"No image files found, creating metadata.csv in base directory: {metadata_file}")
+
+        with open(metadata_file, 'w', newline='', encoding='utf-8') as csvfile:
+            import csv
+            writer = csv.writer(csvfile)
+            writer.writerows(metadata_rows)
+
+        created_files = [metadata_file]
+
+    logger.info(f"Metadata CSV written successfully with {len(metadata_rows)} data rows to {len(created_files)} locations")
+    return created_files
+
+
+def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadata_files, wf_id=None):
     """Upload contents of folder to OMERO
 
     Args:
@@ -767,13 +980,16 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder, wf_id=N
         slurmClient (SlurmClient): BIOMERO client
         message (String): Script output
         folder (String): Path to folder with content
+        metadata_files (List[str]): List of metadata CSV file paths
         wf_id (str, optional): Workflow ID if available. Defaults to None.
     """
     try:
         if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)):
             # upload and link individual images
             msg = saveImagesToOmeroAsAttachments(conn=conn, folder=folder,
-                                                 client=client, wf_id=wf_id)
+                                                 client=client, 
+                                                 metadata_files=metadata_files, 
+                                                 wf_id=wf_id)
             message += msg
         if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_TABLE)):
             if unwrap(client.getInput(
@@ -874,9 +1090,10 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
         client (_type_): OMERO client
         conn (_type_): Open connection to OMERO
         message (String): Script output
-        slurm_job_id (String): ID of the SLURM job the zip came from
-        projects (List): OMERO projects to attach zip to
-        folder (String): path to / name of zip (w/o zip extension)
+        slurm_job_id (String): ID of the SLURM job the log came from
+        projects (List): OMERO projects to attach log to
+        file (String): path to / name of log file
+        wf_id (str, optional): Workflow ID if available. Defaults to None.
     """
     try:
         # upload log and link to project(s)
@@ -972,6 +1189,138 @@ def extract_data_location_from_log(export_file):
     return data_location
 
 
+def resolve_workflow_id(
+    script_wf_id: str,
+    slurmClient: SlurmClient,
+    slurm_job_id: str
+) -> str:
+    """Validate and resolve workflow ID from available sources with consistency checking.
+
+    Validation steps (fail-fast):
+    1. Validate script parameter (if provided) - exception if invalid
+    2. Extract from SLURM log - exception if fails
+    3. Get from job tracker - exception if fails  
+    4. Verify all sources match - exception if inconsistent
+    5. Generate fallback only if no sources available
+
+    Args:
+        script_wf_id: Workflow ID from script parameter (can be None).
+        slurmClient: BIOMERO SlurmClient instance.
+        slurm_job_id: SLURM job ID.
+
+    Returns:
+        Validated workflow ID to use throughout the script.
+
+    Raises:
+        ValueError: If script parameter is invalid UUID.
+        RuntimeError: If extraction fails or sources are inconsistent.
+    """
+    validated_sources = {}
+
+    # Step 1: Validate script parameter (fail immediately if invalid)
+    if script_wf_id:
+        try:
+            uuid.UUID(script_wf_id)
+        except ValueError:
+            raise ValueError(f"Invalid UUID format in script parameter: {script_wf_id}")
+        validated_sources['script_parameter'] = script_wf_id
+        logger.info(f"Script parameter workflow ID validated: {script_wf_id}")
+
+    # Step 2: Extract from SLURM log
+    try:
+        slurm_wf_id = extract_workflow_uuid_from_log_file(slurmClient, slurm_job_id)
+        if slurm_wf_id:
+            validated_sources['slurm_log'] = slurm_wf_id
+            logger.info(f"SLURM log workflow ID extracted: {slurm_wf_id}")
+    except Exception as e:
+        logger.warning(f"SLURM log extraction failed: {e}")
+
+    # Step 3: Get from job tracker
+    if slurmClient.track_workflows:
+        try:
+            task_id = slurmClient.jobAccounting.get_task_id(slurm_job_id)
+            task = slurmClient.workflowTracker.repository.get(task_id)
+            tracker_wf_id = task.workflow_id
+            if tracker_wf_id:
+                validated_sources['job_tracker'] = tracker_wf_id
+                logger.info(f"Job tracker workflow ID found: {tracker_wf_id}")
+        except Exception as e:
+            logger.warning(f"Job tracker extraction failed: {e}")
+
+    # Step 4: Consistency validation (fail immediately if inconsistent)
+    if validated_sources:
+        unique_ids = set(validated_sources.values())
+        if len(unique_ids) > 1:
+            raise RuntimeError(f"Workflow ID mismatch: {validated_sources}")
+
+        wf_id = list(validated_sources.values())[0]
+        sources = list(validated_sources.keys())
+        logger.info(f"Workflow ID validated across {sources}: {wf_id}")
+        return wf_id
+
+    # Step 5: Generate fallback (only if no sources were available)
+    wf_id = str(uuid.uuid4())
+    logger.warning(f"No workflow ID sources available - generated fallback: {wf_id}")
+    return wf_id
+
+
+def extract_workflow_uuid_from_log_file(
+    slurmClient: SlurmClient,
+    slurm_job_id: str
+) -> str:
+    """Extract workflow UUID from SLURM job logfile using SlurmClient.
+
+    Uses SlurmClient's existing data location extraction, then extracts the UUID from
+    the directory name. UUIDs in the data path typically appear as suffixes.
+
+    Args:
+        slurmClient: BIOMERO SlurmClient instance.
+        slurm_job_id: SLURM job ID.
+
+    Returns:
+        Workflow UUID if found and valid, None otherwise.
+
+    Example:
+        >>> extract_workflow_uuid_from_log_file(client, "151")
+        "82f53736-278b-4d9a-a6ef-485fc0758993"
+
+    Note:
+        Example path: /data/my-scratch/data/151_mask_test_82f53736-278b-4d9a-a6ef-485fc0758993
+        Extracts: 82f53736-278b-4d9a-a6ef-485fc0758993
+    """
+    try:
+        # Use existing SlurmClient method to get data location
+        data_location = slurmClient.extract_data_location_from_log(slurm_job_id)
+        if not data_location:
+            logger.warning(f"No data location found in SLURM log for job {slurm_job_id}")
+            return None
+
+        # Extract directory name from the path
+        dir_name = os.path.basename(data_location.rstrip('/'))
+
+        # Look for UUID in the directory name using a simple regex to find potential UUIDs
+        # Then validate each potential match with uuid.UUID()
+        potential_uuids = re.findall(UUID_PATTERN, dir_name, re.IGNORECASE)
+        
+        for potential_uuid in potential_uuids:
+            try:
+                # Validate using standard library - more reliable than regex
+                validated_uuid = uuid.UUID(potential_uuid)
+                extracted_uuid = str(validated_uuid).lower()
+                logger.info(f"Extracted workflow UUID from directory '{dir_name}': {extracted_uuid}")
+                return extracted_uuid
+            except ValueError:
+                # Not a valid UUID, continue searching
+                continue
+        
+        logger.warning(f"No valid UUID found in directory name: {dir_name}")
+        return None
+
+    except Exception as e:
+        logger.error(f"Failed to extract workflow UUID from SLURM job {slurm_job_id}: {e}")
+        return None
+
+
 def runScript():
     """
     The main entry point of the script
@@ -996,6 +1345,9 @@ def runScript():
             scripts.String(constants.results.OUTPUT_SLURM_JOB_ID,
                            optional=False, grouping="01.1",
                            values=_oldjobs),
+            scripts.String("workflow_uuid",
+                           optional=True, grouping="01.2",
+                           description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="03",
@@ -1095,17 +1447,9 @@ def runScript():
             slurm_job_id = unwrap(client.getInput(
                 constants.results.OUTPUT_SLURM_JOB_ID)).strip()
 
-            # Get workflow ID if available
-            wf_id = None
-            if slurmClient.track_workflows:
-                try:
-                    task_id = slurmClient.jobAccounting.get_task_id(
-                        slurm_job_id)
-                    task = slurmClient.workflowTracker.repository.get(task_id)
-                    wf_id = task.workflow_id
-                except Exception as e:
-                    logger.error(
-                        f"Failed to get workflow ID from job {slurm_job_id}. Error: {str(e)}")
+            # Get and validate workflow ID using cascading validation
+            script_wf_id = unwrap(client.getInput("workflow_uuid"))
+            wf_id = resolve_workflow_id(script_wf_id, slurmClient, slurm_job_id)
 
             # Ask job State
             if unwrap(client.getInput(constants.results.OUTPUT_COMPLETED_JOB)):
@@ -1172,6 +1516,12 @@ def runScript():
                             logger.debug(f"{copy_result}")
 
                             folder = f"{local_tmp_storage}/{filename}"
+                            
+                            # Extract zip first before doing anything else with contents
+                            message = unzip_zip_locally(message, folder)
+                            
+                            # Now create metadata after extraction
+                            metadata_files = create_metadata_csv(conn, slurmClient, folder, slurm_job_id, wf_id)
 
                             if (unwrap(client.getInput(
                                 constants.results.OUTPUT_ATTACH_PROJECT)) or
@@ -1180,11 +1530,14 @@ def runScript():
                                 message = upload_zip_to_omero(
                                     client, conn, message,
                                     slurm_job_id, projects, folder, wf_id=wf_id)
-
-                            message = unzip_zip_locally(message, folder)
+                                
+                                # Create and attach metadata CSV for ZIP attachments
+                                if projects and metadata_files:
+                                    message = upload_metadata_csv_to_omero(
+                                        client, conn, message, slurm_job_id, projects, metadata_files, wf_id)
 
                             message = upload_contents_to_omero(
-                                client, conn, slurmClient, message, folder, wf_id=wf_id)
+                                client, conn, slurmClient, message, folder, metadata_files, wf_id=wf_id)
 
                             # Only cleanup if Cleanup? is True
                             if unwrap(client.getInput("Cleanup?")):
