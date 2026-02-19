@@ -1890,17 +1890,24 @@ def extract_workflow_uuid_from_log_file(
         # Extract directory name from the path
         dir_name = os.path.basename(data_location.rstrip('/'))
 
-        # Look for UUID in the directory name (usually as suffix after last underscore)
-        uuid_match = re.search(UUID_PATTERN, dir_name, re.IGNORECASE)
-        if uuid_match:
-            wf_id = uuid_match.group(0)
-            logger.info(
-                f"Extracted workflow UUID from SLURM log: {wf_id}")
-            return wf_id
-        else:
-            logger.warning(
-                f"No valid UUID pattern found in directory name: {dir_name}")
-            return None
+        # Look for UUID in the directory name using a more flexible approach
+        # UUIDs are 32 hex chars with 4 hyphens in specific positions: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        uuid_regex = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        potential_uuids = re.findall(uuid_regex, dir_name, re.IGNORECASE)
+        
+        for potential_uuid in potential_uuids:
+            try:
+                # Validate using standard library - more reliable than regex
+                validated_uuid = uuid.UUID(potential_uuid)
+                extracted_uuid = str(validated_uuid).lower()
+                logger.info(f"Extracted workflow UUID from directory '{dir_name}': {extracted_uuid}")
+                return extracted_uuid
+            except ValueError:
+                # Not a valid UUID, continue searching
+                continue
+        
+        logger.warning(f"No valid UUID found in directory name: {dir_name}")
+        return None
 
     except Exception as e:
         logger.error(
@@ -1909,16 +1916,17 @@ def extract_workflow_uuid_from_log_file(
 
 
 def runScript() -> None:
-    """Main entry point of the script.
+    """Main entry point for SLURM results import with comprehensive data handling.
 
-    Initializes SLURM client, creates OMERO script interface, and orchestrates
-    the complete workflow for importing SLURM results into OMERO.
+    Orchestrates the complete import workflow including data extraction, permanent
+    storage setup, and execution of requested import operations (attachments,
+    dataset imports, tables, etc.).
 
-    Raises:
-        Exception: Any unhandled exceptions during script execution.
+    The workflow handles both standard OMERO import workflows and importer-enabled
+    dataset imports based on configuration.
     """
-
-    with SlurmClient.from_config() as slurmClient:
+    try:
+        with SlurmClient.from_config() as slurmClient:
 
         _oldjobs = slurmClient.list_completed_jobs()
         _projects = getUserProjects()
@@ -2218,6 +2226,16 @@ def runScript() -> None:
                 client.closeSession()
             except Exception as close_error:
                 logger.error(f"Failed to close session: {close_error}")
+    
+    except Exception as e:
+        logger.exception(f"Script failed with error: {e}")
+        # Try to report error to client if available
+        try:
+            if 'client' in locals():
+                client.setOutput("Message", wrap(f"Error: {str(e)}"))
+        except:
+            pass  # Client might not be available
+        raise  # Re-raise to ensure proper exit code
 
 
 def initialize_importer():

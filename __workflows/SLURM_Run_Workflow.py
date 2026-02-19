@@ -32,10 +32,17 @@ Key Features:
     - Configurable workflow execution with parameter validation
     - Comprehensive workflow tracking and logging
     - Automatic temporary file cleanup
+    - Dynamic import script selection via IMPORTER_ENABLED environment variable
+
+Import Script Selection:
+    - If IMPORTER_ENABLED=true: Uses SLURM_Import_Results.py (biomero-importer integration)
+    - If IMPORTER_ENABLED=false or unset: Uses SLURM_Get_Results.py (standard import)
+    - Both scripts support the same API including workflow UUID tracking
 
 Usage:
     Select data in OMERO, choose workflows and parameters, then run the script.
-    Results are automatically imported based on selected output options.
+    Results are automatically imported based on selected output options and
+    environment configuration.
 
 Authors:
     Torec Luik (Amsterdam UMC)
@@ -58,13 +65,23 @@ import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
 import logging
+import os
 import time as timesleep
 from paramiko import SSHException
 
 logger = logging.getLogger(__name__)
 
+# Check if importer is enabled via environment variable
+IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
-IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+# Dynamically choose import script based on IMPORTER_ENABLED
+if IMPORTER_ENABLED:
+    IMPORT_SCRIPTS = ["SLURM_Import_Results.py"]
+    logger.info("Using SLURM_Import_Results.py (importer-enabled workflow)")
+else:
+    IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+    logger.info("Using SLURM_Get_Results.py (standard workflow)")
 CONVERSION_SCRIPTS = [constants.CONVERSION_SCRIPT]
 DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
              rstring(constants.transfer.DATA_TYPE_IMAGE),
@@ -925,9 +942,14 @@ def importResultsToOmero(client: omscripts.client,
     """
     Import workflow results from SLURM back into OMERO.
 
-    This function delegates to the SLURM_Get_Results.py script to retrieve
-    completed workflow results from SLURM and import them into OMERO
+    This function dynamically delegates to either SLURM_Get_Results.py or 
+    SLURM_Import_Results.py based on the IMPORTER_ENABLED environment variable
+    to retrieve completed workflow results from SLURM and import them into OMERO
     according to the user's selected output options.
+
+    Import Script Selection:
+        - If IMPORTER_ENABLED=true: Uses SLURM_Import_Results.py (biomero-importer)
+        - If IMPORTER_ENABLED=false/unset: Uses SLURM_Get_Results.py (standard)
 
     Args:
         client: OMERO script client for accessing user inputs
@@ -959,7 +981,8 @@ def importResultsToOmero(client: omscripts.client,
     inputs = {
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
         constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id)),
-        "Cleanup?": client.getInput("Cleanup?") or rbool(True)
+        "Cleanup?": client.getInput("Cleanup?") or rbool(True),
+        "Workflow_UUID": rstring(str(wf_id))
     }
 
     # Get a 'parent' dataset or plate of input images
