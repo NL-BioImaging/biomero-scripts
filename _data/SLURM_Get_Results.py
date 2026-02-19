@@ -1564,6 +1564,18 @@ def runScript():
                             logger.info(f"Cleanup disabled: Preserved local files at {folder}")
 
             client.setOutput("Message", rstring(str(message)))
+        except Exception as e:
+            logger.error(f"Script execution failed: {e}", exc_info=True)
+            message += f"\nScript execution failed: {e}"
+
+            # Set failure output and re-raise to show red X in OMERO
+            try:
+                client.setOutput("Message", rstring(f"FAILED: {message}"))
+            except Exception:
+                pass
+
+            # Critical errors should cause script failure
+            raise e
         finally:
             client.closeSession()
 
