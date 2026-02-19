@@ -1326,21 +1326,19 @@ def runScript():
     """
     The main entry point of the script
     """
-    
-    try:
-        with SlurmClient.from_config() as slurmClient:
+    with SlurmClient.from_config() as slurmClient:
 
-            _oldjobs = slurmClient.list_completed_jobs()
-            _projects = getUserProjects()
-            _plates = getUserPlates()
-            _datasets = getUserDatasets()
+        _oldjobs = slurmClient.list_completed_jobs()
+        _projects = getUserProjects()
+        _plates = getUserPlates()
+        _datasets = getUserDatasets()
 
-            client = scripts.client(
-                'Slurm Get Results',
-                '''Retrieve the results from your completed SLURM job.
+        client = scripts.client(
+            'Slurm Get Results',
+            '''Retrieve the results from your completed SLURM job.
 
-                Attach files to provided project.
-                ''',
+            Attach files to provided project.
+            ''',
             scripts.Bool(constants.results.OUTPUT_COMPLETED_JOB,
                          optional=False, grouping="01",
                          default=True),
@@ -1568,16 +1566,6 @@ def runScript():
             client.setOutput("Message", rstring(str(message)))
         finally:
             client.closeSession()
-    
-    except Exception as e:
-        logger.exception(f"Script failed with error: {e}")
-        # Try to report error to client if available
-        try:
-            if 'client' in locals():
-                client.setOutput("Message", wrap(f"Error: {str(e)}"))
-        except:
-            pass  # Client might not be available
-        raise  # Re-raise to ensure proper exit code
 
 
 if __name__ == '__main__':
