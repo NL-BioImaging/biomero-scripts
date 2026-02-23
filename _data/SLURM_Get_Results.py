@@ -1240,18 +1240,18 @@ def resolve_workflow_id(
         try:
             task_id = slurmClient.jobAccounting.get_task_id(slurm_job_id)
             task = slurmClient.workflowTracker.repository.get(task_id)
-            tracker_wf_id = task.workflow_id
+            tracker_wf_id = str(task.workflow_id)
             if tracker_wf_id:
                 validated_sources['job_tracker'] = tracker_wf_id
                 logger.info(f"Job tracker workflow ID found: {tracker_wf_id}")
         except Exception as e:
-            logger.warning(f"Job tracker extraction failed: {e}")
+            logger.warning(f"Job tracker lookup failed: {e}")
 
     # Step 4: Consistency validation (fail immediately if inconsistent)
     if validated_sources:
         unique_ids = set(validated_sources.values())
         if len(unique_ids) > 1:
-            raise RuntimeError(f"Workflow ID mismatch: {validated_sources}")
+            raise RuntimeError(f"Workflow ID inconsistency: {dict(validated_sources)}")
 
         wf_id = list(validated_sources.values())[0]
         sources = list(validated_sources.keys())

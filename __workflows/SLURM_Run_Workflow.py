@@ -1134,12 +1134,27 @@ def importResultsToOmero(client: omscripts.client,
     rv = runOMEROScript(client, svc, script_id, inputs)
     try:
         msg = unwrap(rv['Message'])
+        # Check if the script actually failed by looking for error indicators
+        if ("Script execution failed:" in msg or 
+            "ERROR:" in msg.upper() or 
+            "FAILED:" in msg or
+            "RuntimeError:" in msg or
+            "Exception:" in msg):
+            logger.error(f"Import script failed: {msg}")
+            slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
+            global wf_failed
+            wf_failed = True  # Mark workflow as failed
+            raise RuntimeError(f"Import script failed: {msg}")
+        else:
+            logger.info(f"Import script succeeded: {msg}")
+            slurmClient.workflowTracker.complete_task(task_id, msg)
     except KeyError as e:
-        slurmClient.workflowTracker.fail_task(task_id, "Import failed")
+        error_msg = "No message returned from import script"
+        logger.error(error_msg)
+        slurmClient.workflowTracker.fail_task(task_id, error_msg)
         global wf_failed
         wf_failed = True  # Mark workflow as failed
-        raise e
-    slurmClient.workflowTracker.complete_task(task_id, msg)
+        raise RuntimeError(error_msg)
     return rv
 
 
