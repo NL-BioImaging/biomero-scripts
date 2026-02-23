@@ -609,6 +609,7 @@ def run_workflow(slurmClient: SlurmClient,
     Raises:
         SSHException: If job submission or status checking fails.
     """
+    global wf_failed  # Declare global at the top of the function
     logger.info(f"Submitting workflow: {name}")
     workflow_version = unwrap(client.getInput(f"{name}_Version"))
 
@@ -632,7 +633,6 @@ def run_workflow(slurmClient: SlurmClient,
             logger.warning(f"Error running {name} job: {cp_result.stderr}")
             slurmClient.workflowTracker.fail_task(
                 task_id, "Job submission failed")
-            global wf_failed
             wf_failed = True
         else:
             UI_messages += f"Submitted {name} to Slurm\
@@ -965,6 +965,7 @@ def importResultsToOmero(client: omscripts.client,
     Raises:
         Exception: If import script not found or import fails
     """
+    global wf_failed  # Declare global at the top of the function
     if conn.keepAlive():
         svc = conn.getScriptService()
         scripts = svc.getScripts()
@@ -1142,7 +1143,6 @@ def importResultsToOmero(client: omscripts.client,
             "Exception:" in msg):
             logger.error(f"Import script failed: {msg}")
             slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
-            global wf_failed
             wf_failed = True  # Mark workflow as failed
             raise RuntimeError(f"Import script failed: {msg}")
         else:
@@ -1152,7 +1152,6 @@ def importResultsToOmero(client: omscripts.client,
         error_msg = "No message returned from import script"
         logger.error(error_msg)
         slurmClient.workflowTracker.fail_task(task_id, error_msg)
-        global wf_failed
         wf_failed = True  # Mark workflow as failed
         raise RuntimeError(error_msg)
     return rv
