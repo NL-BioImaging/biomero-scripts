@@ -81,6 +81,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from uuid import UUID
 
 import omero
 import omero.gateway
@@ -104,6 +105,11 @@ try:
         log_ingestion_step,
         STAGE_NEW_ORDER,
         _mask_url,
+        IngestionTracking,
+        get_ingest_tracker,
+        STAGE_IMPORTED,
+        STAGE_INGEST_FAILED,
+        STAGE_INGEST_STARTED
     )
     IMPORTER_AVAILABLE = True
 except ImportError:
@@ -925,7 +931,7 @@ def extract_slurm_results_zip(
     slurm_job_id: str,
     local_tmp_storage: str,
     group_name: str,
-    wf_id: str,
+    wf_id: UUID,
     message: str,
 ) -> Tuple[str, str, str, str, str]:
     """Extract and copy SLURM results zip once for reuse by multiple workflows.
@@ -1345,13 +1351,149 @@ def create_upload_order(order_dict: Dict[str, Any]) -> None:
         raise
 
 
+def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600, poll_interval: int = 5) -> Tuple[bool, str]:
+    """Poll the importer database for import completion status.
+
+    Args:
+        uuid: The UUID of the import order to monitor
+        conn: OMERO BlitzGateway connection (optional, for keepAlive in long polls)
+        timeout: Maximum time to wait in seconds (default: 1 hour)
+        poll_interval: Time between polls in seconds (default: 5 seconds)
+
+    Returns:
+        Tuple of (success: bool, message: str)
+        success=True if import completed successfully
+        success=False if import failed or timed out
+    """
+    if not IMPORTER_ENABLED or not IMPORTER_AVAILABLE:
+        return False, "Importer not available for status polling"
+
+    logger.info(f"Starting import status polling for UUID {uuid}")
+    
+    try:
+        import time
+        start_time = time.time()
+        tracker = get_ingest_tracker()
+        
+        if not tracker:
+            return False, "Could not get ingest tracker instance"
+        
+        Session = tracker.Session
+        
+        while (time.time() - start_time) < timeout:
+            try:
+                with Session() as session:
+                    # Get the latest status for this UUID
+                    latest_entry = session.query(IngestionTracking)\
+                        .filter(IngestionTracking.uuid == uuid)\
+                        .order_by(IngestionTracking.timestamp.desc())\
+                        .first()
+                    
+                    if not latest_entry:
+                        logger.warning(f"No import entries found for UUID {uuid}")
+                        time.sleep(poll_interval)
+                        continue
+                    
+                    current_stage = latest_entry.stage
+                    logger.debug(f"Current import stage for {uuid}: {current_stage}")
+                    
+                    if current_stage == STAGE_IMPORTED:
+                        elapsed = time.time() - start_time
+                        return True, f"Import completed successfully after {elapsed:.1f} seconds"
+                    
+                    elif current_stage == STAGE_INGEST_FAILED:
+                        error_msg = latest_entry.description or "Import failed with unknown error"
+                        return False, f"Import failed: {error_msg}"
+                    
+                    # Still in progress (STAGE_NEW_ORDER, STAGE_INGEST_STARTED, etc.)
+                    
+            except Exception as db_error:
+                logger.warning(f"Database query error during polling: {db_error}")
+            
+            # Keep OMERO connection alive during long waits (similar to batched script)
+            if conn:
+                try:
+                    conn.keepAlive()
+                except Exception as keepalive_error:
+                    logger.warning(f"Failed to keep OMERO connection alive: {keepalive_error}")
+            
+            # Wait before next poll
+            time.sleep(poll_interval)
+        
+        # Timeout reached
+        elapsed = time.time() - start_time
+        return False, f"Import polling timed out after {elapsed:.1f} seconds"
+        
+    except Exception as e:
+        logger.error(f"Error during import status polling: {e}", exc_info=True)
+        return False, f"Error during polling: {str(e)}"
+
+
+def wait_for_import_completion(upload_orders: List[Dict[str, Any]], 
+                              conn: BlitzGateway = None,
+                              timeout: int = 3600, 
+                              poll_interval: int = 5,
+                              task_id: UUID = None,
+                              slurmClient: SlurmClient = None) -> Tuple[bool, str, List[str]]:
+    """Wait for completion of multiple import orders.
+
+    Args:
+        upload_orders: List of upload order dictionaries
+        conn: OMERO BlitzGateway connection (optional, for keepAlive during long waits)
+        timeout: Maximum time to wait per order in seconds
+        poll_interval: Time between polls in seconds
+        task_id: Task ID for workflow tracking (optional)
+        slurmClient: SLURM client for task status updates (optional)
+
+    Returns:
+        Tuple of (all_success: bool, summary_message: str, failed_uuids: List[str])
+    """
+    if not upload_orders:
+        return True, "No upload orders to wait for", []
+    
+    logger.info(f"Waiting for completion of {len(upload_orders)} import orders")
+    
+    # Note: Removed unnecessary IMPORTING_DATA status update to reduce noise
+    
+    successful_imports = []
+    failed_imports = []
+    
+    for order in upload_orders:
+        uuid = order.get('UUID')
+        if not uuid:
+            failed_imports.append("Unknown UUID")
+            continue
+            
+        logger.info(f"Polling import status for UUID {uuid}")
+        success, message = poll_import_status(uuid, conn, timeout, poll_interval)
+        
+        if success:
+            successful_imports.append(uuid)
+            logger.info(f"Import successful for {uuid}: {message}")
+        else:
+            failed_imports.append(uuid)  
+            logger.error(f"Import failed for {uuid}: {message}")
+    
+    total_orders = len(upload_orders)
+    success_count = len(successful_imports)
+    failed_count = len(failed_imports)
+    
+    summary = f"Import results: {success_count}/{total_orders} successful"
+    if failed_count > 0:
+        summary += f", {failed_count} failed"
+    
+    all_successful = failed_count == 0
+    
+    return all_successful, summary, failed_imports
+
+
 def create_upload_orders_for_results(
     group_name: str,
     username: str,
     destination_type: str,
     destination_id: int,
     results_path: str,
-    wf_id: str
+    wf_id: UUID
 ) -> List[Dict[str, Any]]:
     """Create upload orders for SLURM results (images only).
 
@@ -1393,7 +1535,7 @@ def create_upload_orders_for_results(
             "Username": username,
             "DestinationID": destination_id,
             "DestinationType": destination_type,
-            "UUID": str(uuid.uuid4()),
+            "UUID": uuid.uuid4(),
             "Files": image_files,
             "wf_id": wf_id,
             "source": "SLURM_Results"
@@ -1476,6 +1618,221 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
     return message
 
 
+def add_metadata_to_imported_images(
+    conn: BlitzGateway,
+    slurmClient: SlurmClient,
+    dataset_id: int,
+    order_uuids: List[str],
+    wf_id: str,
+    job_id: str
+) -> str:
+    """Add metadata to images imported by biomero-importer using UUID search.
+    
+    Searches for images that have the specific import order UUIDs in their metadata
+    (added by biomero-importer) and adds workflow metadata annotations.
+    Much more reliable than time-based approaches.
+    
+    Args:
+        conn: OMERO BlitzGateway connection
+        slurmClient: SlurmClient instance
+        dataset_id: ID of the dataset containing imported images  
+        order_uuids: List of upload order UUIDs to search for
+        wf_id: Workflow UUID for metadata
+        job_id: SLURM job ID for metadata
+        
+    Returns:
+        Status message describing metadata addition results
+    """
+    try:
+        if not order_uuids:
+            return "No upload order UUIDs provided for image search"
+        
+        logger.info(f"Searching for images imported with UUIDs: {order_uuids}")
+        
+        # Search for images with any of the import order UUIDs in their annotations
+        # biomero-importer adds the order UUID as metadata to each imported image
+        query_service = conn.getQueryService()
+        
+        imported_images = []
+        
+        for uuid in order_uuids:
+            # HQL to find images with this specific UUID in map annotations  
+            hql = """
+            SELECT DISTINCT img.id, img.name
+            FROM Image img
+            JOIN img.annotationLinks ial
+            JOIN ial.child ann
+            JOIN ann.mapValue mv
+            WHERE TYPE(ann) = MapAnnotation
+            AND mv.value = :uuid
+            """
+            
+            import omero.sys
+            params = omero.sys.ParametersI()
+            params.addString("uuid", uuid)
+            
+            results = query_service.projection(hql, params, conn.SERVICE_OPTS)
+            
+            if results:
+                image_ids = [result[0].val for result in results]
+                uuid_images = [conn.getObject("Image", img_id) for img_id in image_ids]
+                uuid_images = [img for img in uuid_images if img is not None]
+                imported_images.extend(uuid_images)
+                logger.info(f"Found {len(uuid_images)} images for UUID {uuid}")
+            else:
+                logger.warning(f"No images found with UUID {uuid}")
+        
+        # Remove duplicates (shouldn't happen but just in case)
+        seen_ids = set()
+        unique_images = []
+        for img in imported_images:
+            if img.getId() not in seen_ids:
+                unique_images.append(img)
+                seen_ids.add(img.getId())
+        imported_images = unique_images
+        
+        if not imported_images:
+            # Fallback: check dataset for any images (less precise but better than nothing)
+            logger.info(f"No images found with order UUIDs, checking dataset {dataset_id}")
+            dataset = conn.getObject("Dataset", dataset_id)
+            if dataset:
+                imported_images = list(dataset.listChildren())
+                logger.info(f"Fallback: found {len(imported_images)} images in dataset")
+        
+        if not imported_images:
+            return "No imported images found for metadata addition"
+        
+        logger.info(f"Adding metadata to {len(imported_images)} imported images")
+        
+        # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
+        metadata_added = 0
+        for img in imported_images:
+            try:
+                # Use the same function as SLURM_Get_Results.py for consistency
+                add_image_annotations(conn, slurmClient, img.getId(), job_id, wf_id=wf_id)
+                metadata_added += 1
+                logger.debug(f"Added metadata to image {img.getId()}: {img.getName()}")
+            except Exception as img_error:
+                logger.warning(f"Failed to add metadata to image {img.getId()}: {img_error}")
+        
+        message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
+        logger.info(message)
+        
+        return message
+        
+    except Exception as e:
+        error_msg = f"Failed to add metadata to imported images: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return error_msg
+
+
+def add_image_annotations(conn: BlitzGateway, slurmClient: SlurmClient, object_id: int, job_id: str, wf_id: UUID = None) -> None:
+    """Add workflow metadata annotations to an image (copied from SLURM_Get_Results.py).
+    
+    Args:
+        conn: OMERO BlitzGateway connection
+        slurmClient: SlurmClient instance
+        object_id: Image ID to annotate
+        job_id: SLURM job ID
+        wf_id: Workflow ID (optional)
+    """
+    try:
+        import ezomero
+        
+        object_type = "Image"
+        ns_wf = "biomero/workflow"
+        
+        if slurmClient.track_workflows and wf_id:
+            try:
+                # Same detailed workflow tracking as SLURM_Get_Results.py
+                wf = slurmClient.workflowTracker.repository.get(wf_id)
+                
+                # Extract version from description
+                import re
+                version_match = re.search(r'\\d+\\.\\d+\\.\\d+', wf.description)
+                workflow_version = version_match.group(0) if version_match else "Unknown"
+                
+                # Workflow metadata
+                wf_dict = {
+                    'Workflow_ID': str(wf_id),
+                    'Name': wf.name,
+                    'Version': str(workflow_version),
+                    'Created_On': wf._created_on.isoformat(),
+                    'Modified_On': wf._modified_on.isoformat(),
+                    'Task_IDs': ", ".join([str(tid) for tid in wf.tasks])
+                }
+                
+                ezomero.post_map_annotation(
+                    conn=conn,
+                    object_type=object_type,
+                    object_id=object_id,
+                    kv_dict=wf_dict,
+                    ns=ns_wf,
+                    across_groups=False
+                )
+                
+                # Task metadata for each task in the workflow
+                ns_task = ns_wf + "/task"
+                for tid in wf.tasks:
+                    try:
+                        task = slurmClient.workflowTracker.repository.get(tid)
+                        task_dict = {
+                            'Task_ID': str(tid),
+                            'Name': task.name,
+                            'Version': task.version,
+                            'Input_Data': str(task.input_data),
+                            'Status': task.status,
+                            'Created_On': task._created_on.isoformat(),
+                        }
+                        
+                        if hasattr(task, '_modified_on'):
+                            task_dict['Modified_On'] = task._modified_on.isoformat()
+                        
+                        ezomero.post_map_annotation(
+                            conn=conn,
+                            object_type=object_type,
+                            object_id=object_id,
+                            kv_dict=task_dict,
+                            ns=ns_task + f"/{task.name}",
+                            across_groups=False
+                        )
+                    except Exception as task_e:
+                        logger.warning(f"Failed to add task {tid} metadata: {task_e}")
+                        
+            except Exception as e:
+                logger.warning(f"Failed to extract detailed workflow metadata for {wf_id}: {e}")
+                # Fallback to basic workflow info
+                basic_wf_dict = {'Workflow_ID': str(wf_id)}
+                ezomero.post_map_annotation(
+                    conn=conn,
+                    object_type=object_type,
+                    object_id=object_id,
+                    kv_dict=basic_wf_dict,
+                    ns=ns_wf,
+                    across_groups=False
+                )
+        else:
+            # Basic job metadata when workflow tracking is off (same as SLURM_Get_Results.py)
+            ns_task = ns_wf + "/task"
+            ns_task_job = ns_task + "/job"
+            job_dict = {
+                'Job_ID': str(job_id),
+            }
+            
+            logger.debug(f"Track workflows is off. Adding only limited metadata: {job_dict}")
+            ezomero.post_map_annotation(
+                conn=conn,
+                object_type=object_type,
+                object_id=object_id,
+                kv_dict=job_dict,
+                ns=ns_task_job,
+                across_groups=False
+            )
+            
+    except Exception as e:
+        logger.error(f"Failed to add annotations to image {object_id}: {e}", exc_info=True)
+
+
 def process_importer_workflow(
     client: Any,
     conn: BlitzGateway,
@@ -1485,6 +1842,7 @@ def process_importer_workflow(
     username: str,
     permanent_storage_path: str,
     wf_id: Optional[str],
+    task_id: Optional[UUID] = None
 
 ) -> str:
     """Process dataset image imports via biomero-importer from comprehensive permanent storage.
@@ -1501,7 +1859,8 @@ def process_importer_workflow(
         group_name: OMERO group name.
         username: Username for upload orders.
         permanent_storage_path: Path to permanent storage location.
-        wf_id: Workflow ID for metadata. Defaults to None.        
+        wf_id: Workflow ID for metadata. Defaults to None.
+        task_id: Task ID for workflow tracking. Defaults to None.        
 
     Returns:
         Status message describing processing results.
@@ -1575,6 +1934,35 @@ def process_importer_workflow(
             message += f"\n  - Order {order['UUID']}: {file_count} files"
             logger.info(
                 f"Created upload order {order['UUID']} with {file_count} files")
+        
+        # NEW: Wait for import completion instead of returning immediately
+        logger.info("Step 3g: Waiting for import completion...")
+        message += f"\nWaiting for import completion of {len(orders)} orders..."
+        
+        # Configure timeout - can be made configurable via script parameters if needed
+        import_timeout = 3600  # 1 hour default
+        
+        all_successful, summary, failed_uuids = wait_for_import_completion(
+            orders, conn, timeout=import_timeout, poll_interval=10, 
+            task_id=task_id, slurmClient=slurmClient)
+        
+        message += f"\n{summary}"
+        
+        if all_successful:
+            logger.info("All imports completed successfully")
+            message += "\nAll dataset imports completed successfully!"
+            
+            # Post-processing: Add metadata to newly imported images using UUID search
+            logger.info("Step 3h: Adding metadata to imported images...")
+            order_uuids = [order.get('UUID') for order in orders if order.get('UUID')]
+            post_processing_message = add_metadata_to_imported_images(
+                conn, slurmClient, dataset_id, order_uuids, wf_id, slurm_job_id)
+            if post_processing_message:
+                message += f"\n{post_processing_message}"
+        else:
+            logger.error(f"Some imports failed: {failed_uuids}")
+            message += f"\nSome imports failed for UUIDs: {failed_uuids}"
+            # Import failures are logged but don't stop the workflow
     else:
         message += "\nNo image files found for importer"
         logger.warning("No image files found for importer processing")
@@ -1847,7 +2235,7 @@ def resolve_workflow_id(
         return wf_id
 
     # Step 5: Generate fallback (only if no sources were available)
-    wf_id = str(uuid.uuid4())
+    wf_id = uuid.uuid4()
     logger.warning(
         f"No workflow ID sources available - generated fallback: {wf_id}")
     return wf_id
@@ -1947,6 +2335,9 @@ def runScript() -> None:
             scripts.String("workflow_uuid",
                         optional=True, grouping="01.2",
                         description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
+            scripts.String("Task_ID",
+                        optional=True, grouping="01.3",
+                        description="Task ID for biomero workflow tracking and status updates"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                         optional=False,
                         grouping="03",
@@ -2041,13 +2432,34 @@ def runScript() -> None:
 
             message = ""
             logger.info(f"Import Results: {scriptParams}\n")
+            
+            # Get task_id if provided for status updates
+            task_id = None
+            try:
+                task_id_input = unwrap(client.getInput("Task_ID"))
+                if task_id_input and task_id_input.strip():
+                    task_id = uuid.UUID(task_id_input.strip())  # Convert to UUID object
+                    logger.info(f"Using task ID {task_id} for status updates")
+                else:
+                    logger.debug("No task ID provided - status updates disabled")
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.debug(f"No valid task ID provided - status updates disabled: {e}")
 
             # Job id
             slurm_job_id = unwrap(client.getInput(
                 constants.results.OUTPUT_SLURM_JOB_ID)).strip()
 
-            # Get workflow ID from script parameter
-            script_wf_id = unwrap(client.getInput("workflow_uuid"))
+            # Get and validate workflow ID using proper UUID parsing
+            script_wf_id = None
+            try:
+                wf_uuid_input = unwrap(client.getInput("workflow_uuid"))
+                if wf_uuid_input and wf_uuid_input.strip():
+                    # Validate UUID format immediately
+                    script_wf_id = uuid.UUID(wf_uuid_input.strip())
+                    logger.info(f"Workflow UUID parameter validated: {script_wf_id}")
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Invalid workflow UUID format: {e}")
+                script_wf_id = None
 
             # Resolve workflow ID from all available sources with validation
             wf_id = resolve_workflow_id(
@@ -2116,6 +2528,14 @@ def runScript() -> None:
             }
 
             logger.info(f"Starting import: {workflow_config}")
+            
+            # Update task status to IMPORTING if task_id is available
+            if task_id and slurmClient.track_workflows:
+                try:
+                    slurmClient.workflowTracker.update_task_status(task_id, "IMPORTING")
+                    logger.info(f"Updated task {task_id} status to IMPORTING")
+                except Exception as db_e:
+                    logger.warning(f"Failed to update task status: {db_e}")
 
             # Step 1: Copy logfile to server
             logger.info("Step 1: Copying logfile from SLURM...")
@@ -2161,7 +2581,7 @@ def runScript() -> None:
                 importer_message = process_importer_workflow(
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
-                    permanent_storage_path, wf_id)
+                    permanent_storage_path, wf_id, task_id)
                 message += importer_message
 
             # Step 5: SLURM TABLES PROCESSING
@@ -2181,10 +2601,27 @@ def runScript() -> None:
 
             logger.info("Results imported successfully")
             message += "\nWorkflow execution completed successfully."
+            
+            # Update task status to IMPORTED on successful import
+            if task_id and slurmClient.track_workflows:
+                try:
+                    slurmClient.workflowTracker.update_task_status(task_id, "IMPORTED")
+                    logger.info(f"Updated task {task_id} status to IMPORTED")
+                except Exception as db_e:
+                    logger.warning(f"Failed to update task completion status: {db_e}")
 
         except Exception as e:
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
+            
+            # Update task status to FAILED if task_id is available
+            if task_id and slurmClient and slurmClient.track_workflows:
+                try:
+                    slurmClient.workflowTracker.update_task_status(task_id, "FAILED")
+                    slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {str(e)}")
+                    logger.info(f"Updated task {task_id} status to FAILED")
+                except Exception as db_e:
+                    logger.warning(f"Failed to update task failure status: {db_e}")
 
             # Set failure output and re-raise to show red X in OMERO
             try:

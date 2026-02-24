@@ -1259,7 +1259,7 @@ def resolve_workflow_id(
         return wf_id
 
     # Step 5: Generate fallback (only if no sources were available)
-    wf_id = str(uuid.uuid4())
+    wf_id = uuid.uuid4()
     logger.warning(f"No workflow ID sources available - generated fallback: {wf_id}")
     return wf_id
 
@@ -1348,6 +1348,9 @@ def runScript():
             scripts.String("workflow_uuid",
                            optional=True, grouping="01.2",
                            description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
+            scripts.String("Task_ID",
+                           optional=True, grouping="01.3",
+                           description="Task ID for biomero workflow tracking and status updates"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="03",
@@ -1442,15 +1445,37 @@ def runScript():
 
             message = ""
             logger.info(f"Get Results: {scriptParams}\n")
+            
+            # Get task_id if provided for status updates
+            task_id = None
+            try:
+                task_id_input = unwrap(client.getInput("Task_ID"))
+                if task_id_input and task_id_input.strip():
+                    task_id = uuid.UUID(task_id_input.strip())  # Convert to UUID object
+                    logger.info(f"Using task ID {task_id} for status updates")
+                else:
+                    logger.debug("No task ID provided - status updates disabled")
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.debug(f"No valid task ID provided - status updates disabled: {e}")
 
             # Job id
             slurm_job_id = unwrap(client.getInput(
                 constants.results.OUTPUT_SLURM_JOB_ID)).strip()
 
-            # Get and validate workflow ID using cascading validation
-            script_wf_id = unwrap(client.getInput("workflow_uuid"))
+            # Get and validate workflow ID using proper UUID parsing
+            script_wf_id = None
+            try:
+                wf_uuid_input = unwrap(client.getInput("workflow_uuid"))
+                if wf_uuid_input and wf_uuid_input.strip():
+                    # Validate UUID format immediately
+                    script_wf_id = uuid.UUID(wf_uuid_input.strip())
+                    logger.info(f"Workflow UUID parameter validated: {script_wf_id}")
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Invalid workflow UUID format: {e}")
+                script_wf_id = None
+            
             wf_id = resolve_workflow_id(script_wf_id, slurmClient, slurm_job_id)
-
+            
             # Ask job State
             if unwrap(client.getInput(constants.results.OUTPUT_COMPLETED_JOB)):
                 _, result = slurmClient.check_job_status([slurm_job_id])

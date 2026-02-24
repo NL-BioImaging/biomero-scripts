@@ -1131,6 +1131,8 @@ def importResultsToOmero(client: omscripts.client,
             client.getInput(constants.transfer.IDS))},
         persist_dict
     )
+    # Add task_id to inputs so Import_Results can update task status during import
+    inputs["Task_ID"] = rstring(str(task_id))
     slurmClient.workflowTracker.start_task(task_id)
     rv = runOMEROScript(client, svc, script_id, inputs)
     try:
