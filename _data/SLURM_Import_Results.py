@@ -90,6 +90,7 @@ from omero.constants.namespaces import NSCREATED
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, robject, unwrap, wrap
 from omero_metadata.populate import ParsingContext
+import ezomero
 
 from biomero import SlurmClient, constants
 

@@ -943,14 +943,18 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
                     slurmClient.bring_listener_uptodate(
                         slurmClient.wfProgress, start=next_position
                     )
-                    new_position = slurmClient.wfProgress.recorder.max_tracking_id(
-                        application_name='WorkflowTracker'
-                    ) + 1
-                    if new_position > next_position:
-                        logger.debug(f"Import subscript progress: picked up {new_position - next_position} new workflow event(s) (events {next_position}-{new_position - 1})")
-                    next_position = new_position
                 except Exception as e:
-                    logger.warning(f"[runOMEROScript] Failed to poll wfProgress during script: {e}")
+                    logger.debug(f"wfProgress poll skipped (events already processed by runner): {e}")
+                finally:
+                    try:
+                        new_position = slurmClient.wfProgress.recorder.max_tracking_id(
+                            application_name='WorkflowTracker'
+                        ) + 1
+                        if new_position > next_position:
+                            logger.debug(f"Import subscript progress: picked up {new_position - next_position} new workflow event(s) (events {next_position}-{new_position - 1})")
+                        next_position = new_position
+                    except Exception:
+                        pass
         cb.close()
         rv = proc.getResults(0)
     finally:
