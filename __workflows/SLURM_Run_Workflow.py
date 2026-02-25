@@ -902,7 +902,8 @@ def exportImageToSLURM(client: omscripts.client,
     return rv, task_id
 
 
-def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
+def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
+                   slurmClient=None):
     """
     Execute an OMERO script and return its results.
 
@@ -911,6 +912,9 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
         svc: OMERO script service
         script_id: ID of the script to execute
         inputs: Dictionary of input parameters for the script
+        slurmClient: Optional SlurmClient; when provided, polls wfProgress
+            on each iteration so IMPORTING/IMPORTED events written by the
+            sub-script are visible in real time.
 
     Returns:
         dict: Script execution results
@@ -924,8 +928,29 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
     proc = svc.runScript(script_id, inputs, None)
     try:
         cb = omero.scripts.ProcessCallbackI(client, proc)
+        # Snapshot position once so we only process NEW events each iteration
+        next_position = 1
+        if slurmClient is not None and slurmClient.wfProgress is not None:
+            try:
+                next_position = slurmClient.wfProgress.recorder.max_tracking_id(
+                    application_name='WorkflowTracker'
+                ) + 1
+            except Exception:
+                next_position = 1
         while not cb.block(1000):  # ms.
-            pass
+            if slurmClient is not None and slurmClient.wfProgress is not None:
+                try:
+                    slurmClient.bring_listener_uptodate(
+                        slurmClient.wfProgress, start=next_position
+                    )
+                    new_position = slurmClient.wfProgress.recorder.max_tracking_id(
+                        application_name='WorkflowTracker'
+                    ) + 1
+                    if new_position > next_position:
+                        logger.debug(f"Import subscript progress: picked up {new_position - next_position} new workflow event(s) (events {next_position}-{new_position - 1})")
+                    next_position = new_position
+                except Exception as e:
+                    logger.warning(f"[runOMEROScript] Failed to poll wfProgress during script: {e}")
         cb.close()
         rv = proc.getResults(0)
     finally:
@@ -1134,7 +1159,7 @@ def importResultsToOmero(client: omscripts.client,
     # Add task_id to inputs so Import_Results can update task status during import
     inputs["Task_ID"] = rstring(str(task_id))
     slurmClient.workflowTracker.start_task(task_id)
-    rv = runOMEROScript(client, svc, script_id, inputs)
+    rv = runOMEROScript(client, svc, script_id, inputs, slurmClient=slurmClient)
     try:
         msg = unwrap(rv['Message'])
         # Check if the script actually failed by looking for error indicators

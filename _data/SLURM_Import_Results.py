@@ -1368,7 +1368,9 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
     if not IMPORTER_ENABLED or not IMPORTER_AVAILABLE:
         return False, "Importer not available for status polling"
 
-    logger.info(f"Starting import status polling for UUID {uuid}")
+    # Ensure uuid is always a string to avoid PostgreSQL type casting issues
+    uuid_str = str(uuid)
+    logger.info(f"Starting import status polling for UUID {uuid_str}")
     
     try:
         import time
@@ -1385,17 +1387,17 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
                 with Session() as session:
                     # Get the latest status for this UUID
                     latest_entry = session.query(IngestionTracking)\
-                        .filter(IngestionTracking.uuid == uuid)\
+                        .filter(IngestionTracking.uuid == uuid_str)\
                         .order_by(IngestionTracking.timestamp.desc())\
                         .first()
                     
                     if not latest_entry:
-                        logger.warning(f"No import entries found for UUID {uuid}")
+                        logger.warning(f"No import entries found for UUID {uuid_str}")
                         time.sleep(poll_interval)
                         continue
                     
                     current_stage = latest_entry.stage
-                    logger.debug(f"Current import stage for {uuid}: {current_stage}")
+                    logger.debug(f"Current import stage for {uuid_str}: {current_stage}")
                     
                     if current_stage == STAGE_IMPORTED:
                         elapsed = time.time() - start_time
@@ -1464,15 +1466,17 @@ def wait_for_import_completion(upload_orders: List[Dict[str, Any]],
             failed_imports.append("Unknown UUID")
             continue
             
-        logger.info(f"Polling import status for UUID {uuid}")
-        success, message = poll_import_status(uuid, conn, timeout, poll_interval)
+        # Ensure uuid is always a string to avoid PostgreSQL type casting issues
+        uuid_str = str(uuid)
+        logger.info(f"Polling import status for UUID {uuid_str}")
+        success, message = poll_import_status(uuid_str, conn, timeout, poll_interval)
         
         if success:
-            successful_imports.append(uuid)
-            logger.info(f"Import successful for {uuid}: {message}")
+            successful_imports.append(uuid_str)
+            logger.info(f"Import successful for {uuid_str}: {message}")
         else:
-            failed_imports.append(uuid)  
-            logger.error(f"Import failed for {uuid}: {message}")
+            failed_imports.append(uuid_str)  
+            logger.error(f"Import failed for {uuid_str}: {message}")
     
     total_orders = len(upload_orders)
     success_count = len(successful_imports)
@@ -1535,7 +1539,7 @@ def create_upload_orders_for_results(
             "Username": username,
             "DestinationID": destination_id,
             "DestinationType": destination_type,
-            "UUID": uuid.uuid4(),
+            "UUID": str(uuid.uuid4()),  # Generate unique order ID (importer needs string)
             "Files": image_files,
             "wf_id": wf_id,
             "source": "SLURM_Results"
@@ -1726,111 +1730,122 @@ def add_metadata_to_imported_images(
         return error_msg
 
 
-def add_image_annotations(conn: BlitzGateway, slurmClient: SlurmClient, object_id: int, job_id: str, wf_id: UUID = None) -> None:
-    """Add workflow metadata annotations to an image (copied from SLURM_Get_Results.py).
-    
-    Args:
-        conn: OMERO BlitzGateway connection
-        slurmClient: SlurmClient instance
-        object_id: Image ID to annotate
-        job_id: SLURM job ID
-        wf_id: Workflow ID (optional)
-    """
-    try:
-        import ezomero
-        
-        object_type = "Image"
-        ns_wf = "biomero/workflow"
-        
-        if slurmClient.track_workflows and wf_id:
-            try:
-                # Same detailed workflow tracking as SLURM_Get_Results.py
-                wf = slurmClient.workflowTracker.repository.get(wf_id)
-                
-                # Extract version from description
-                import re
-                version_match = re.search(r'\\d+\\.\\d+\\.\\d+', wf.description)
-                workflow_version = version_match.group(0) if version_match else "Unknown"
-                
-                # Workflow metadata
-                wf_dict = {
-                    'Workflow_ID': str(wf_id),
-                    'Name': wf.name,
-                    'Version': str(workflow_version),
-                    'Created_On': wf._created_on.isoformat(),
-                    'Modified_On': wf._modified_on.isoformat(),
-                    'Task_IDs': ", ".join([str(tid) for tid in wf.tasks])
-                }
-                
-                ezomero.post_map_annotation(
-                    conn=conn,
-                    object_type=object_type,
-                    object_id=object_id,
-                    kv_dict=wf_dict,
-                    ns=ns_wf,
-                    across_groups=False
-                )
-                
-                # Task metadata for each task in the workflow
-                ns_task = ns_wf + "/task"
-                for tid in wf.tasks:
-                    try:
-                        task = slurmClient.workflowTracker.repository.get(tid)
-                        task_dict = {
-                            'Task_ID': str(tid),
-                            'Name': task.name,
-                            'Version': task.version,
-                            'Input_Data': str(task.input_data),
-                            'Status': task.status,
-                            'Created_On': task._created_on.isoformat(),
-                        }
-                        
-                        if hasattr(task, '_modified_on'):
-                            task_dict['Modified_On'] = task._modified_on.isoformat()
-                        
-                        ezomero.post_map_annotation(
-                            conn=conn,
-                            object_type=object_type,
-                            object_id=object_id,
-                            kv_dict=task_dict,
-                            ns=ns_task + f"/{task.name}",
-                            across_groups=False
-                        )
-                    except Exception as task_e:
-                        logger.warning(f"Failed to add task {tid} metadata: {task_e}")
-                        
-            except Exception as e:
-                logger.warning(f"Failed to extract detailed workflow metadata for {wf_id}: {e}")
-                # Fallback to basic workflow info
-                basic_wf_dict = {'Workflow_ID': str(wf_id)}
-                ezomero.post_map_annotation(
-                    conn=conn,
-                    object_type=object_type,
-                    object_id=object_id,
-                    kv_dict=basic_wf_dict,
-                    ns=ns_wf,
-                    across_groups=False
-                )
-        else:
-            # Basic job metadata when workflow tracking is off (same as SLURM_Get_Results.py)
-            ns_task = ns_wf + "/task"
-            ns_task_job = ns_task + "/job"
-            job_dict = {
-                'Job_ID': str(job_id),
+def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
+    object_type = "Image"  # Set to Image when it's a dataset
+    ns_wf = "biomero/workflow"
+    if slurmClient.track_workflows and wf_id:
+        try:
+            wf = slurmClient.workflowTracker.repository.get(wf_id)
+
+            map_ann_ids = []
+
+            # Extract version from the description using regex
+            version_match = re.search(r'\d+\.\d+\.\d+', wf.description)
+            workflow_version = version_match.group(
+                0) if version_match else "Unknown"
+
+            workflow_annotation_dict = {
+                'Workflow_ID': str(wf_id),
+                'Name': wf.name,
+                'Version': str(workflow_version),
+                'Created_On': wf._created_on.isoformat(),
+                'Modified_On': wf._modified_on.isoformat(),
+                'Task_IDs': ", ".join([str(tid) for tid in wf.tasks]),
             }
-            
-            logger.debug(f"Track workflows is off. Adding only limited metadata: {job_dict}")
-            ezomero.post_map_annotation(
+            map_ann_id = ezomero.post_map_annotation(
                 conn=conn,
                 object_type=object_type,
                 object_id=object_id,
-                kv_dict=job_dict,
-                ns=ns_task_job,
-                across_groups=False
+                kv_dict=workflow_annotation_dict,
+                ns=ns_wf,
+                across_groups=False  # Set to False if you don't want cross-group behavior
             )
-            
-    except Exception as e:
-        logger.error(f"Failed to add annotations to image {object_id}: {e}", exc_info=True)
+            map_ann_ids.append(map_ann_id)
+
+            for tid in wf.tasks:
+                task = slurmClient.workflowTracker.repository.get(tid)
+                # Add FAIR metadata
+                task_annotation_dict = {
+                    'Task_ID': str(task._id),
+                    'Workflow_ID': str(wf_id),
+                    'Workflow_Name': wf.name,
+                    'Name': task.task_name,
+                    'Version': task.task_version,
+                    'Created_On': task._created_on.isoformat(),
+                    'Modified_On': task._modified_on.isoformat(),
+                    'Status': task.status,
+                    'Input_Data': task.input_data,
+                    'Job_IDs': ", ".join([str(jid) for jid in task.job_ids]),
+                }
+                # Add parameters
+                if task.params:
+                    task_annotation_dict.update({f"Param_{key}": str(
+                        value) for key, value in task.params.items()})
+                # task metadata
+                ns_task = ns_wf + "/task" + f"/{task.task_name}"
+                map_ann_id = ezomero.post_map_annotation(
+                    conn=conn,
+                    object_type=object_type,
+                    object_id=object_id,
+                    kv_dict=task_annotation_dict,
+                    ns=ns_task,
+                    across_groups=False  # Set to False if you don't want cross-group behavior
+                )
+                map_ann_ids.append(map_ann_id)
+
+                for jid in task.job_ids:
+                    job_dict = {
+                        'Job_ID': str(jid),
+                        'Task_ID': str(tid),
+                        'Workflow_ID': str(wf_id),
+                        'Result_Message': task.result_message,
+                    }
+                    # Add the specific job-script command
+                    if task.results and "command" in task.results[0]:
+                        job_dict['Command'] = task.results[0]['command']
+                    # and environment variables
+                    if task.results and "env" in task.results[0]:
+                        job_dict.update({f"Env_{key}": str(value)
+                                        for key, value in task.results[0]['env'].items()})
+                    # job metadata
+                    ns_task_job = ns_task + "/job"
+                    logger.debug(f"Adding metadata: {job_dict}")
+                    map_ann_id = ezomero.post_map_annotation(
+                        conn=conn,
+                        object_type=object_type,
+                        object_id=object_id,
+                        kv_dict=job_dict,
+                        ns=ns_task_job,
+                        across_groups=False  # Set to False if you don't want cross-group behavior
+                    )
+                    map_ann_ids.append(map_ann_id)
+
+            if map_ann_ids:
+                logger.info(
+                    f"Successfully added annotations to {object_type} ID: {object_id}. MapAnnotation IDs: {map_ann_ids}")
+            else:
+                logger.warning(
+                    f"MapAnnotation created for {object_type} ID: {object_id}, but no ID was returned.")
+        except Exception as e:
+            logger.error(
+                f"Failed to add annotations to {object_type} ID: {object_id}. Error: {str(e)}")
+    else:  # We have no access to workflow tracking, log very limited metadata
+        ns_task = ns_wf + "/task"
+        ns_task_job = ns_task + "/job"
+        job_dict = {
+            'Job_ID': str(job_id),
+        }
+        # job metadata
+        logger.debug(
+            f"Track workflows is off. Adding only limited metadata: {job_dict}")
+        map_ann_id = ezomero.post_map_annotation(
+            conn=conn,
+            object_type=object_type,
+            object_id=object_id,
+            kv_dict=job_dict,
+            ns=ns_task_job,
+            across_groups=False  # Set to False if you don't want cross-group behavior
+        )
 
 
 def process_importer_workflow(
@@ -2235,7 +2250,7 @@ def resolve_workflow_id(
         return wf_id
 
     # Step 5: Generate fallback (only if no sources were available)
-    wf_id = uuid.uuid4()
+    wf_id = str(uuid.uuid4())  # Convert UUID to string to avoid PostgreSQL type casting issues
     logger.warning(
         f"No workflow ID sources available - generated fallback: {wf_id}")
     return wf_id
