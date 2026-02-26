@@ -1399,17 +1399,17 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
     # Ensure uuid is always a string to avoid PostgreSQL type casting issues
     uuid_str = str(uuid)
     logger.info(f"Starting import status polling for UUID {uuid_str}")
-    
+
     try:
         import time
         start_time = time.time()
         tracker = get_ingest_tracker()
-        
+
         if not tracker:
             return False, "Could not get ingest tracker instance"
-        
+
         Session = tracker.Session
-        
+
         while (time.time() - start_time) < timeout:
             try:
                 with Session() as session:
@@ -1418,53 +1418,57 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
                         .filter(IngestionTracking.uuid == uuid_str)\
                         .order_by(IngestionTracking.timestamp.desc())\
                         .first()
-                    
+
                     if not latest_entry:
-                        logger.warning(f"No import entries found for UUID {uuid_str}")
+                        logger.warning(
+                            f"No import entries found for UUID {uuid_str}")
                         time.sleep(poll_interval)
                         continue
-                    
+
                     current_stage = latest_entry.stage
-                    logger.debug(f"Current import stage for {uuid_str}: {current_stage}")
-                    
+                    logger.debug(
+                        f"Current import stage for {uuid_str}: {current_stage}")
+
                     if current_stage == STAGE_IMPORTED:
                         elapsed = time.time() - start_time
                         return True, f"Import completed successfully after {elapsed:.1f} seconds"
-                    
+
                     elif current_stage == STAGE_INGEST_FAILED:
                         error_msg = latest_entry.description or "Import failed with unknown error"
                         return False, f"Import failed: {error_msg}"
-                    
+
                     # Still in progress (STAGE_NEW_ORDER, STAGE_INGEST_STARTED, etc.)
-                    
+
             except Exception as db_error:
-                logger.warning(f"Database query error during polling: {db_error}")
-            
+                logger.warning(
+                    f"Database query error during polling: {db_error}")
+
             # Keep OMERO connection alive during long waits (similar to batched script)
             if conn:
                 try:
                     conn.keepAlive()
                 except Exception as keepalive_error:
-                    logger.warning(f"Failed to keep OMERO connection alive: {keepalive_error}")
-            
+                    logger.warning(
+                        f"Failed to keep OMERO connection alive: {keepalive_error}")
+
             # Wait before next poll
             time.sleep(poll_interval)
-        
+
         # Timeout reached
         elapsed = time.time() - start_time
         return False, f"Import polling timed out after {elapsed:.1f} seconds"
-        
+
     except Exception as e:
         logger.error(f"Error during import status polling: {e}", exc_info=True)
         return False, f"Error during polling: {str(e)}"
 
 
-def wait_for_import_completion(upload_orders: List[Dict[str, Any]], 
-                              conn: BlitzGateway = None,
-                              timeout: int = 3600, 
-                              poll_interval: int = 5,
-                              task_id: UUID = None,
-                              slurmClient: SlurmClient = None) -> Tuple[bool, str, List[str]]:
+def wait_for_import_completion(upload_orders: List[Dict[str, Any]],
+                               conn: BlitzGateway = None,
+                               timeout: int = 3600,
+                               poll_interval: int = 5,
+                               task_id: UUID = None,
+                               slurmClient: SlurmClient = None) -> Tuple[bool, str, List[str]]:
     """Wait for completion of multiple import orders.
 
     Args:
@@ -1480,42 +1484,44 @@ def wait_for_import_completion(upload_orders: List[Dict[str, Any]],
     """
     if not upload_orders:
         return True, "No upload orders to wait for", []
-    
-    logger.info(f"Waiting for completion of {len(upload_orders)} import orders")
-    
+
+    logger.info(
+        f"Waiting for completion of {len(upload_orders)} import orders")
+
     # Note: Removed unnecessary IMPORTING_DATA status update to reduce noise
-    
+
     successful_imports = []
     failed_imports = []
-    
+
     for order in upload_orders:
         uuid = order.get('UUID')
         if not uuid:
             failed_imports.append("Unknown UUID")
             continue
-            
+
         # Ensure uuid is always a string to avoid PostgreSQL type casting issues
         uuid_str = str(uuid)
         logger.info(f"Polling import status for UUID {uuid_str}")
-        success, message = poll_import_status(uuid_str, conn, timeout, poll_interval)
-        
+        success, message = poll_import_status(
+            uuid_str, conn, timeout, poll_interval)
+
         if success:
             successful_imports.append(uuid_str)
             logger.info(f"Import successful for {uuid_str}: {message}")
         else:
-            failed_imports.append(uuid_str)  
+            failed_imports.append(uuid_str)
             logger.error(f"Import failed for {uuid_str}: {message}")
-    
+
     total_orders = len(upload_orders)
     success_count = len(successful_imports)
     failed_count = len(failed_imports)
-    
+
     summary = f"Import results: {success_count}/{total_orders} successful"
     if failed_count > 0:
         summary += f", {failed_count} failed"
-    
+
     all_successful = failed_count == 0
-    
+
     return all_successful, summary, failed_imports
 
 
@@ -1567,7 +1573,8 @@ def create_upload_orders_for_results(
             "Username": username,
             "DestinationID": destination_id,
             "DestinationType": destination_type,
-            "UUID": str(uuid.uuid4()),  # Generate unique order ID (importer needs string)
+            # Generate unique order ID (importer needs string)
+            "UUID": str(uuid.uuid4()),
             "Files": image_files,
             "wf_id": wf_id,
             "source": "SLURM_Results"
@@ -1659,11 +1666,11 @@ def add_metadata_to_imported_images(
     job_id: str
 ) -> str:
     """Add metadata to images imported by biomero-importer using UUID search.
-    
+
     Searches for images that have the specific import order UUIDs in their metadata
     (added by biomero-importer) and adds workflow metadata annotations.
     Much more reliable than time-based approaches.
-    
+
     Args:
         conn: OMERO BlitzGateway connection
         slurmClient: SlurmClient instance
@@ -1671,24 +1678,24 @@ def add_metadata_to_imported_images(
         order_uuids: List of upload order UUIDs to search for
         wf_id: Workflow UUID for metadata
         job_id: SLURM job ID for metadata
-        
+
     Returns:
         Status message describing metadata addition results
     """
     try:
         if not order_uuids:
             return "No upload order UUIDs provided for image search"
-        
+
         logger.info(f"Searching for images imported with UUIDs: {order_uuids}")
-        
+
         # Search for images with any of the import order UUIDs in their annotations
         # biomero-importer adds the order UUID as metadata to each imported image
         query_service = conn.getQueryService()
-        
+
         imported_images = []
-        
+
         for uuid in order_uuids:
-            # HQL to find images with this specific UUID in map annotations  
+            # HQL to find images with this specific UUID in map annotations
             hql = """
             SELECT DISTINCT img.id, img.name
             FROM Image img
@@ -1698,22 +1705,23 @@ def add_metadata_to_imported_images(
             WHERE TYPE(ann) = MapAnnotation
             AND mv.value = :uuid
             """
-            
+
             import omero.sys
             params = omero.sys.ParametersI()
             params.addString("uuid", uuid)
-            
+
             results = query_service.projection(hql, params, conn.SERVICE_OPTS)
-            
+
             if results:
                 image_ids = [result[0].val for result in results]
-                uuid_images = [conn.getObject("Image", img_id) for img_id in image_ids]
+                uuid_images = [conn.getObject("Image", img_id)
+                               for img_id in image_ids]
                 uuid_images = [img for img in uuid_images if img is not None]
                 imported_images.extend(uuid_images)
                 logger.info(f"Found {len(uuid_images)} images for UUID {uuid}")
             else:
                 logger.warning(f"No images found with UUID {uuid}")
-        
+
         # Remove duplicates (shouldn't happen but just in case)
         seen_ids = set()
         unique_images = []
@@ -1722,36 +1730,42 @@ def add_metadata_to_imported_images(
                 unique_images.append(img)
                 seen_ids.add(img.getId())
         imported_images = unique_images
-        
+
         if not imported_images:
             # Fallback: check dataset for any images (less precise but better than nothing)
-            logger.info(f"No images found with order UUIDs, checking dataset {dataset_id}")
+            logger.info(
+                f"No images found with order UUIDs, checking dataset {dataset_id}")
             dataset = conn.getObject("Dataset", dataset_id)
             if dataset:
                 imported_images = list(dataset.listChildren())
-                logger.info(f"Fallback: found {len(imported_images)} images in dataset")
-        
+                logger.info(
+                    f"Fallback: found {len(imported_images)} images in dataset")
+
         if not imported_images:
             return "No imported images found for metadata addition"
-        
-        logger.info(f"Adding metadata to {len(imported_images)} imported images")
-        
+
+        logger.info(
+            f"Adding metadata to {len(imported_images)} imported images")
+
         # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
         metadata_added = 0
         for img in imported_images:
             try:
                 # Use the same function as SLURM_Get_Results.py for consistency
-                add_image_annotations(conn, slurmClient, img.getId(), job_id, wf_id=wf_id)
+                add_image_annotations(
+                    conn, slurmClient, img.getId(), job_id, wf_id=wf_id)
                 metadata_added += 1
-                logger.debug(f"Added metadata to image {img.getId()}: {img.getName()}")
+                logger.debug(
+                    f"Added metadata to image {img.getId()}: {img.getName()}")
             except Exception as img_error:
-                logger.warning(f"Failed to add metadata to image {img.getId()}: {img_error}")
-        
+                logger.warning(
+                    f"Failed to add metadata to image {img.getId()}: {img_error}")
+
         message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
         logger.info(message)
-        
+
         return message
-        
+
     except Exception as e:
         error_msg = f"Failed to add metadata to imported images: {str(e)}"
         logger.error(error_msg, exc_info=True)
@@ -1983,27 +1997,28 @@ def process_importer_workflow(
             message += f"\n  - Order {order['UUID']}: {file_count} files"
             logger.info(
                 f"Created upload order {order['UUID']} with {file_count} files")
-        
+
         # NEW: Wait for import completion instead of returning immediately
         logger.info("Waiting for import completion...")
         message += f"\nWaiting for import completion of {len(orders)} orders..."
-        
+
         # Configure timeout - can be made configurable via script parameters if needed
         import_timeout = 3600  # 1 hour default
-        
+
         all_successful, summary, failed_uuids = wait_for_import_completion(
-            orders, conn, timeout=import_timeout, poll_interval=10, 
+            orders, conn, timeout=import_timeout, poll_interval=10,
             task_id=task_id, slurmClient=slurmClient)
-        
+
         message += f"\n{summary}"
-        
+
         if all_successful:
             logger.info("All imports completed successfully")
             message += "\nAll dataset imports completed successfully!"
-            
+
             # Post-processing: Add metadata to newly imported images using UUID search
             logger.info("Adding metadata to imported images...")
-            order_uuids = [order.get('UUID') for order in orders if order.get('UUID')]
+            order_uuids = [order.get('UUID')
+                           for order in orders if order.get('UUID')]
             post_processing_message = add_metadata_to_imported_images(
                 conn, slurmClient, dataset_id, order_uuids, wf_id, slurm_job_id)
             if post_processing_message:
@@ -2284,7 +2299,8 @@ def resolve_workflow_id(
         return wf_id
 
     # Step 5: Generate fallback (only if no sources were available)
-    wf_id = str(uuid.uuid4())  # Convert UUID to string to avoid PostgreSQL type casting issues
+    # Convert UUID to string to avoid PostgreSQL type casting issues
+    wf_id = str(uuid.uuid4())
     logger.warning(
         f"No workflow ID sources available - generated fallback: {wf_id}")
     return wf_id
@@ -2331,18 +2347,19 @@ def extract_workflow_uuid_from_log_file(
         # UUIDs are 32 hex chars with 4 hyphens in specific positions: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         uuid_regex = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
         potential_uuids = re.findall(uuid_regex, dir_name, re.IGNORECASE)
-        
+
         for potential_uuid in potential_uuids:
             try:
                 # Validate using standard library - more reliable than regex
                 validated_uuid = uuid.UUID(potential_uuid)
                 extracted_uuid = str(validated_uuid).lower()
-                logger.info(f"Extracted workflow UUID from directory '{dir_name}': {extracted_uuid}")
+                logger.info(
+                    f"Extracted workflow UUID from directory '{dir_name}': {extracted_uuid}")
                 return extracted_uuid
             except ValueError:
                 # Not a valid UUID, continue searching
                 continue
-        
+
         logger.warning(f"No valid UUID found in directory name: {dir_name}")
         return None
 
@@ -2376,95 +2393,95 @@ def runScript() -> None:
             Process completed SLURM job results using biomero-importer for scalable remote processing.
             ''',
             scripts.Bool(constants.results.OUTPUT_COMPLETED_JOB,
-                        optional=False, grouping="01",
-                        default=True),
+                         optional=False, grouping="01",
+                         default=True),
             scripts.String(constants.results.OUTPUT_SLURM_JOB_ID,
-                        optional=False, grouping="01.1",
-                        values=_oldjobs),
+                           optional=False, grouping="01.1",
+                           values=_oldjobs),
             scripts.String("workflow_uuid",
-                        optional=True, grouping="01.2",
-                        description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
+                           optional=True, grouping="01.2",
+                           description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
             scripts.String("Task_ID",
-                        optional=True, grouping="01.3",
-                        description="Task ID for biomero workflow tracking and status updates"),
+                           optional=True, grouping="01.3",
+                           description="Task ID for biomero workflow tracking and status updates"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
-                        optional=False,
-                        grouping="03",
-                        description="Attach all results in zip to a project",
-                        default=False),
+                         optional=False,
+                         grouping="03",
+                         description="Attach all results in zip to a project",
+                         default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PROJECT_ID,
-                        optional=True, grouping="03.1",
-                        description="Project to attach workflow results to",
-                        values=_projects),
+                         optional=True, grouping="03.1",
+                         description="Project to attach workflow results to",
+                         values=_projects),
             scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
-                        optional=False,
-                        grouping="05",
-                        description="Attach all results to original images as attachments",
-                        default=False),
+                         optional=False,
+                         grouping="05",
+                         description="Attach all results to original images as attachments",
+                         default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
-                        optional=False,
-                        grouping="04",
-                        description="Attach all results in zip to a plate",
-                        default=False),
+                         optional=False,
+                         grouping="04",
+                         description="Attach all results in zip to a plate",
+                         default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
-                        optional=True, grouping="04.1",
-                        description="Plate to attach workflow results to",
-                        values=_plates),
+                         optional=True, grouping="04.1",
+                         description="Plate to attach workflow results to",
+                         values=_plates),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET,
-                        optional=False,
-                        grouping="06",
-                        description="Import all result as a new dataset via biomero-importer",
-                        default=True),
+                         optional=False,
+                         grouping="06",
+                         description="Import all result as a new dataset via biomero-importer",
+                         default=True),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME,
-                        optional=True,
-                        grouping="06.1",
-                        description="Name for the new dataset w/ results",
-                        default="Imported_Results"),
+                           optional=True,
+                           grouping="06.1",
+                           description="Name for the new dataset w/ results",
+                           default="Imported_Results"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE,
-                        optional=True,
-                        grouping="06.2",
-                        description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
-                        default=False),
+                         optional=True,
+                         grouping="06.2",
+                         description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
+                         default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
-                        optional=True,
-                        grouping="06.3",
-                        description="Rename all imported files as below. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}_IMPORTED.{ext}",
-                        default=True),
+                         optional=True,
+                         grouping="06.3",
+                         description="Rename all imported files as below. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}_IMPORTED.{ext}",
+                         default=True),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME,
-                        optional=True,
-                        grouping="06.4",
-                        description="A new name for the imported images.",
-                        default="{original_file}_IMPORTED.{ext}"),
+                           optional=True,
+                           grouping="06.4",
+                           description="A new name for the imported images.",
+                           default="{original_file}_IMPORTED.{ext}"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE,
-                        optional=False,
-                        grouping="07",
-                        description="Add all csv files as OMERO.tables to the chosen dataset",
-                        default=True),
+                         optional=False,
+                         grouping="07",
+                         description="Add all csv files as OMERO.tables to the chosen dataset",
+                         default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE_DATASET,
-                        optional=True,
-                        grouping="07.1",
-                        description="Attach to the dataset chosen below",
-                        default=True),
+                         optional=True,
+                         grouping="07.1",
+                         description="Attach to the dataset chosen below",
+                         default=True),
             scripts.List(constants.results.OUTPUT_ATTACH_TABLE_DATASET_ID,
-                        optional=True,
-                        grouping="07.2",
-                        description="Dataset to attach workflow results to",
-                        values=_datasets),
+                         optional=True,
+                         grouping="07.2",
+                         description="Dataset to attach workflow results to",
+                         values=_datasets),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE_PLATE,
-                        optional=True,
-                        grouping="07.3",
-                        description="Attach to the plate chosen below",
-                        default=False),
+                         optional=True,
+                         grouping="07.3",
+                         description="Attach to the plate chosen below",
+                         default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_TABLE_PLATE_ID,
-                        optional=True,
-                        grouping="07.4",
-                        description="Plate to attach workflow results to",
-                        values=_plates),
+                         optional=True,
+                         grouping="07.4",
+                         description="Plate to attach workflow results to",
+                         values=_plates),
             scripts.Bool("Cleanup?",
-                        optional=True,
-                        grouping="08",
-                        description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
-                        default=True),
+                         optional=True,
+                         grouping="08",
+                         description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
+                         default=True),
 
 
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
@@ -2481,18 +2498,21 @@ def runScript() -> None:
 
             message = ""
             logger.info(f"Import Results: {scriptParams}\n")
-            
+
             # Get task_id if provided for status updates
             task_id = None
             try:
                 task_id_input = unwrap(client.getInput("Task_ID"))
                 if task_id_input and task_id_input.strip():
-                    task_id = uuid.UUID(task_id_input.strip())  # Convert to UUID object
+                    # Convert to UUID object
+                    task_id = uuid.UUID(task_id_input.strip())
                     logger.info(f"Using task ID {task_id} for status updates")
                 else:
-                    logger.debug("No task ID provided - status updates disabled")
+                    logger.debug(
+                        "No task ID provided - status updates disabled")
             except (ValueError, TypeError, AttributeError) as e:
-                logger.debug(f"No valid task ID provided - status updates disabled: {e}")
+                logger.debug(
+                    f"No valid task ID provided - status updates disabled: {e}")
 
             # Job id
             slurm_job_id = unwrap(client.getInput(
@@ -2505,7 +2525,8 @@ def runScript() -> None:
                 if wf_uuid_input and wf_uuid_input.strip():
                     # Validate UUID format immediately
                     script_wf_id = uuid.UUID(wf_uuid_input.strip())
-                    logger.info(f"Workflow UUID parameter validated: {script_wf_id}")
+                    logger.info(
+                        f"Workflow UUID parameter validated: {script_wf_id}")
             except (ValueError, TypeError, AttributeError) as e:
                 logger.warning(f"Invalid workflow UUID format: {e}")
                 script_wf_id = None
@@ -2578,11 +2599,12 @@ def runScript() -> None:
             }
 
             logger.info(f"Starting import: {workflow_config}")
-            
+
             # Update task status to IMPORTING if task_id is available
             if task_id and slurmClient.track_workflows:
                 try:
-                    slurmClient.workflowTracker.update_task_status(task_id, "IMPORTING")
+                    slurmClient.workflowTracker.update_task_status(
+                        task_id, "IMPORTING")
                     logger.info(f"Updated task {task_id} status to IMPORTING")
                 except Exception as db_e:
                     logger.warning(f"Failed to update task status: {db_e}")
@@ -2595,7 +2617,8 @@ def runScript() -> None:
                 try:
                     tup = slurmClient.get_logfile_from_slurm(slurm_job_id)
                     (local_tmp_storage, log_file, get_result) = tup
-                    logger.info(f"Logfile copied successfully on attempt {_logfile_attempt}: {log_file}")
+                    logger.info(
+                        f"Logfile copied successfully on attempt {_logfile_attempt}: {log_file}")
                     break
                 except FileNotFoundError as _logfile_err:
                     if _logfile_attempt < _logfile_max_retries:
@@ -2635,6 +2658,19 @@ def runScript() -> None:
                 message += f"\nFailed to extract SLURM results: {e}"
                 raise e
 
+            # Copy log file into permanent storage so it lives alongside the results
+            if log_file and permanent_storage_path and os.path.exists(log_file):
+                try:
+                    log_dest = os.path.join(
+                        permanent_storage_path, os.path.basename(log_file))
+                    shutil.copy2(log_file, log_dest)
+                    logger.info(
+                        f"Copied log file to permanent storage: {log_dest}")
+                    message += f"\nLog file copied to permanent storage."
+                except Exception as _log_copy_err:
+                    logger.warning(
+                        f"Failed to copy log file to permanent storage: {_log_copy_err}")
+
             # IMPORTER WORKFLOW - Dataset image imports
             if use_importer_for_datasets:
                 importer_message = process_importer_workflow(
@@ -2667,27 +2703,32 @@ def runScript() -> None:
 
             logger.info("Results imported successfully")
             message += "\nWorkflow execution completed successfully."
-            
+
             # Update task status to IMPORTED on successful import
             if task_id and slurmClient.track_workflows:
                 try:
-                    slurmClient.workflowTracker.update_task_status(task_id, "IMPORTED")
+                    slurmClient.workflowTracker.update_task_status(
+                        task_id, "IMPORTED")
                     logger.info(f"Updated task {task_id} status to IMPORTED")
                 except Exception as db_e:
-                    logger.warning(f"Failed to update task completion status: {db_e}")
+                    logger.warning(
+                        f"Failed to update task completion status: {db_e}")
 
         except Exception as e:
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
-            
+
             # Update task status to FAILED if task_id is available
             if task_id and slurmClient and slurmClient.track_workflows:
                 try:
-                    slurmClient.workflowTracker.update_task_status(task_id, "FAILED")
-                    slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {str(e)}")
+                    slurmClient.workflowTracker.update_task_status(
+                        task_id, "FAILED")
+                    slurmClient.workflowTracker.fail_task(
+                        task_id, f"Import failed: {str(e)}")
                     logger.info(f"Updated task {task_id} status to FAILED")
                 except Exception as db_e:
-                    logger.warning(f"Failed to update task failure status: {db_e}")
+                    logger.warning(
+                        f"Failed to update task failure status: {db_e}")
 
             # Set failure output and re-raise to show red X in OMERO
             try:
