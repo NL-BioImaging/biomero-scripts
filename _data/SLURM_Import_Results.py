@@ -965,6 +965,33 @@ def extract_slurm_results_zip(
 
     logger.info(f"Extracted data location: {slurm_data_path}")
 
+    # Poll SLURM until data/out contains files (NFS flush lag after job COMPLETED)
+    out_dir = f"{slurm_data_path}/data/out"
+    poll_interval = 15  # seconds
+    poll_max_attempts = 20  # 20 * 15s = 5 minutes max
+    for attempt in range(1, poll_max_attempts + 1):
+        check_result = slurmClient.run_commands(
+            [f"ls \"{out_dir}\" 2>/dev/null | wc -l"])
+        file_count = 0
+        if check_result.ok:
+            try:
+                file_count = int(check_result.stdout.strip())
+            except (ValueError, AttributeError):
+                file_count = 0
+        if file_count > 0:
+            logger.info(
+                f"Output directory ready: {out_dir} has {file_count} file(s) (attempt {attempt})")
+            break
+        logger.warning(
+            f"Output directory empty on SLURM (attempt {attempt}/{poll_max_attempts}): "
+            f"{out_dir} — waiting {poll_interval}s for filesystem flush...")
+        import time
+        time.sleep(poll_interval)
+    else:
+        raise RuntimeError(
+            f"SLURM output directory still empty after {poll_max_attempts * poll_interval}s: "
+            f"{out_dir}. Job may have failed to write output.")
+
     # Create and copy zip archive from SLURM
     filename = f"{slurm_job_id}_out"
     logger.info(f"Creating and copying data archive from SLURM...")
@@ -1782,8 +1809,15 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
                 if task.params:
                     task_annotation_dict.update({f"Param_{key}": str(
                         value) for key, value in task.params.items()})
-                # task metadata
-                ns_task = ns_wf + "/task" + f"/{task.task_name}"
+                # task metadata - SLURM_Import_Results.py uses the SLURM_Get_Results.py
+                # namespace so the batch supervisor (find_output_images_for_batch) can
+                # locate images regardless of which import script was used.
+                # The 'Name' key in the annotation dict still identifies the true source.
+                # All other tasks keep their own namespace.
+                if task.task_name == 'SLURM_Import_Results.py':
+                    ns_task = ns_wf + "/task/SLURM_Get_Results.py"
+                else:
+                    ns_task = ns_wf + "/task" + f"/{task.task_name}"
                 map_ann_id = ezomero.post_map_annotation(
                     conn=conn,
                     object_type=object_type,
@@ -1882,26 +1916,25 @@ def process_importer_workflow(
         Status message describing processing results.
     """
     message = ""
-    logger.info(
-        "Step 3: Processing comprehensive data preservation + biomero-importer")
+    logger.info("Processing importer workflow...")
 
-    # Step 3c: Handle file renaming if enabled
+    # Handle file renaming if enabled
     rename_enabled = unwrap(client.getInput(
         constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
 
     if rename_enabled:
-        logger.info("Step 3c: Renaming files in importer storage...")
+        logger.info("Renaming files in importer storage...")
         rename_message = rename_files_in_importer_storage(client,
                                                           permanent_storage_path)
         message += rename_message
         logger.info("File renaming completed")
     else:
-        logger.info("Step 3c: Skipping file renaming (not enabled)")
+        logger.info("Skipping file renaming (not enabled)")
 
     # Get dataset info from existing parameters
     dataset_name = unwrap(client.getInput(
         constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
-    logger.info(f"Step 3d: Setting up dataset '{dataset_name}'...")
+    logger.info(f"Setting up dataset '{dataset_name}'...")
 
     # Check if dataset exists or create new one
     create_new_dataset = unwrap(client.getInput(
@@ -1925,7 +1958,7 @@ def process_importer_workflow(
                 "Error checking for existing dataset, will create new one")
 
     if create_new_dataset:
-        logger.info("Step 3e: Creating new dataset...")
+        logger.info("Creating new dataset...")
         dataset = omero.model.DatasetI()
         dataset.name = rstring(dataset_name)
         desc = f"Images from SLURM job {slurm_job_id}"
@@ -1938,7 +1971,7 @@ def process_importer_workflow(
         logger.info(f"Created new dataset ID: {dataset_id}")
 
     # Create upload order for images only
-    logger.info("Step 3f: Creating upload orders for biomero-importer...")
+    logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
         group_name, username, "Dataset", dataset_id,
         permanent_storage_path, wf_id)
@@ -1952,7 +1985,7 @@ def process_importer_workflow(
                 f"Created upload order {order['UUID']} with {file_count} files")
         
         # NEW: Wait for import completion instead of returning immediately
-        logger.info("Step 3g: Waiting for import completion...")
+        logger.info("Waiting for import completion...")
         message += f"\nWaiting for import completion of {len(orders)} orders..."
         
         # Configure timeout - can be made configurable via script parameters if needed
@@ -1969,7 +2002,7 @@ def process_importer_workflow(
             message += "\nAll dataset imports completed successfully!"
             
             # Post-processing: Add metadata to newly imported images using UUID search
-            logger.info("Step 3h: Adding metadata to imported images...")
+            logger.info("Adding metadata to imported images...")
             order_uuids = [order.get('UUID') for order in orders if order.get('UUID')]
             post_processing_message = add_metadata_to_imported_images(
                 conn, slurmClient, dataset_id, order_uuids, wf_id, slurm_job_id)
@@ -2525,6 +2558,7 @@ def runScript() -> None:
             # MAIN WORKFLOW EXECUTION - runs regardless of project/plate attachment settings
             folder = None
             log_file = None
+            slurm_data_path = None
 
             # Extract project/plate info
             project_info = [
@@ -2553,25 +2587,41 @@ def runScript() -> None:
                 except Exception as db_e:
                     logger.warning(f"Failed to update task status: {db_e}")
 
-            # Step 1: Copy logfile to server
-            logger.info("Step 1: Copying logfile from SLURM...")
-            tup = slurmClient.get_logfile_from_slurm(slurm_job_id)
-            (local_tmp_storage, log_file, get_result) = tup
+            logger.info("Copying logfile from SLURM...")
+            local_tmp_storage = None
+            _logfile_max_retries = 5
+            _logfile_retry_delay = 10  # seconds between retries
+            for _logfile_attempt in range(1, _logfile_max_retries + 1):
+                try:
+                    tup = slurmClient.get_logfile_from_slurm(slurm_job_id)
+                    (local_tmp_storage, log_file, get_result) = tup
+                    logger.info(f"Logfile copied successfully on attempt {_logfile_attempt}: {log_file}")
+                    break
+                except FileNotFoundError as _logfile_err:
+                    if _logfile_attempt < _logfile_max_retries:
+                        logger.warning(
+                            f"Logfile omero-{slurm_job_id}.log not yet available on SLURM "
+                            f"(attempt {_logfile_attempt}/{_logfile_max_retries}), "
+                            f"retrying in {_logfile_retry_delay}s...")
+                        import time as _timesleep
+                        _timesleep.sleep(_logfile_retry_delay)
+                    else:
+                        logger.error(
+                            f"Logfile omero-{slurm_job_id}.log not found after "
+                            f"{_logfile_max_retries} attempts: {_logfile_err}")
+                        raise
             # Ensure local_tmp_storage has trailing slash (required for copy operations)
-            if not local_tmp_storage.endswith('/'):
+            if local_tmp_storage and not local_tmp_storage.endswith('/'):
                 local_tmp_storage += '/'
             message += "\nSuccessfully copied logfile."
             logger.info(f"Logfile copied successfully: {log_file}")
 
-            # Step 2: Upload logfile to OMERO as Original File
-            logger.info("Step 2: Uploading logfile to OMERO...")
+            logger.info("Uploading logfile to OMERO...")
             message = upload_log_to_omero(
                 client, conn, message, slurm_job_id,
                 projects, log_file, wf_id=wf_id)
 
-            # Step 3: Extract SLURM zip once
-            logger.info(
-                "Step 3: Extracting SLURM results (shared by multiple workflows)...")
+            logger.info("Extracting SLURM results...")
             slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename = (
                 None, None, None, None)
             try:
@@ -2585,14 +2635,7 @@ def runScript() -> None:
                 message += f"\nFailed to extract SLURM results: {e}"
                 raise e
 
-            # Create metadata CSV file
-            logger.info("Step 3b: Creating metadata CSV...")
-            metadata_files = create_metadata_csv(
-                conn, slurmClient, permanent_storage_path, slurm_job_id, wf_id)
-            message += f"\nCreated metadata files: {metadata_files}"
-            logger.info(f"Metadata files created: {metadata_files}")
-
-            # Step 4: IMPORTER WORKFLOW - Dataset image imports
+            # IMPORTER WORKFLOW - Dataset image imports
             if use_importer_for_datasets:
                 importer_message = process_importer_workflow(
                     client, conn, slurmClient, slurm_job_id,
@@ -2600,14 +2643,21 @@ def runScript() -> None:
                     permanent_storage_path, wf_id, task_id)
                 message += importer_message
 
-            # Step 5: SLURM TABLES PROCESSING
+            # Create metadata CSV (after import, to avoid duplicate metadata in import dir)
+            logger.info("Creating metadata CSV...")
+            metadata_files = create_metadata_csv(
+                conn, slurmClient, permanent_storage_path, slurm_job_id, wf_id)
+            message += f"\nCreated metadata files: {metadata_files}"
+            logger.info(f"Metadata files created: {metadata_files}")
+
+            # SLURM TABLES PROCESSING
             if process_csv_tables:
                 zip_message = process_slurm_tables(
                     client, conn, process_csv_tables,
                     permanent_storage_path, wf_id)
                 message += zip_message
 
-            # Step 6: ZIP ATTACHMENT OPERATIONS
+            # ZIP ATTACHMENT OPERATIONS
             if process_attachments:
                 attachment_message = process_zip_attachments(
                     client, conn, permanent_storage_path,

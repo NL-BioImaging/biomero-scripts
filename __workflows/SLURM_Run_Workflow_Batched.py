@@ -664,7 +664,7 @@ def find_output_images_for_batch(conn, input_image_ids):
 
         like_clause = " and ".join(like_conditions)
 
-        # The WORKING HQL query - finds output images linked to SLURM_Get_Results annotations
+        # The WORKING HQL query - finds output images linked to SLURM Import/Get Results annotations
         # that match our batch input IDs and were created recently
         hql = f"""
         select distinct
@@ -680,7 +680,7 @@ def find_output_images_for_batch(conn, input_image_ids):
         join ma.mapValue mv
         where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
           and mvName.name = 'Name'
-          and mvName.value = 'SLURM_Get_Results.py'
+          and (mvName.value = 'SLURM_Get_Results.py' or mvName.value = 'SLURM_Import_Results.py')
           and mv.name = 'Input_Data'
           and ev.time > :cutoff
           and ({like_clause})
