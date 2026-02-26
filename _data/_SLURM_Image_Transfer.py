@@ -338,6 +338,10 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
             error_msg = (f"Neither {source_ome_zarr} nor {source_zarr} "
                          f"found after ZARR export")
             raise FileNotFoundError(error_msg)
+    else:
+        error_msg = f"ZARR export failed with return code {process.returncode}: {stderr.decode('utf-8') if stderr else 'Unknown error'}"
+        logger.error(f"Critical error: {error_msg}")
+        raise Exception(error_msg)
     return  # shortcut
 
 
@@ -577,7 +581,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     ids = []
     # do the saving to disk
     
-    if format == constants.transfer.FORMAT_ZARR:
+    if format == constants.transfer.FORMAT_ZARR and data_type == constants.transfer.DATA_TYPE_PLATE:
         for plate in objects:
             log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
             save_plate_as_zarr(conn, suuid, plate, folder_name, client)
@@ -660,7 +664,9 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         write_logfile(exp_dir)
 
     if len(os.listdir(exp_dir)) == 0:
-        return None, "No files exported. See 'info' for more details"
+        error_msg = "No files exported. Check export settings and data availability."
+        logger.error(f"Critical error: {error_msg}")
+        raise Exception(error_msg)
     # zip everything up (unless we've only got a single ome-tiff)
     if format == constants.transfer.FORMAT_OMETIFF and len(os.listdir(exp_dir)) == 1:
         ometiff_ids = [t.id for t in parent.listAnnotations(ns=NSOMETIFF)]
@@ -684,7 +690,8 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         message += f"'{folder_name}' succesfully copied to SLURM!\n"
         transfer_successful = True
     except Exception as e:
-        message += f"Copying to SLURM failed: {e}\n"
+        logger.error(f"Critical error: Copying to SLURM failed: {e}")
+        raise Exception(f"Data transfer to SLURM failed: {e}") from e
         
     # Unpack on SLURM
     unpack_successful = False
@@ -693,11 +700,14 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             unpack_result = slurmClient.unpack_data(folder_name)
             logger.debug(unpack_result.stdout)
             if not unpack_result.ok:
-                logger.warning(f"Error unpacking data:{unpack_result.stderr}")
+                error_msg = f"Error unpacking data on SLURM: {unpack_result.stderr}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
             else:
                 unpack_successful = True
         except Exception as e:
-            message += f"Unzipping on SLURM failed: {e}\n"
+            logger.error(f"Critical error: Unzipping on SLURM failed: {e}")
+            raise Exception(f"Data unpacking on SLURM failed: {e}") from e
     
     file_annotation, ann_message = script_utils.create_link_file_annotation(
         conn, export_file, parent, output=output_display_name,
@@ -715,6 +725,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             # Return None to indicate cleanup was done
             file_annotation = None
         except Exception as cleanup_error:
+            # Cleanup failure is non-critical - log warning but don't fail script
             logger.warning(f"Failed to cleanup file annotation: "
                            f"{cleanup_error}")
             message += (f"Warning: Could not cleanup temporary file "

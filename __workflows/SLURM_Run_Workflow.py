@@ -32,10 +32,17 @@ Key Features:
     - Configurable workflow execution with parameter validation
     - Comprehensive workflow tracking and logging
     - Automatic temporary file cleanup
+    - Dynamic import script selection via IMPORTER_ENABLED environment variable
+
+Import Script Selection:
+    - If IMPORTER_ENABLED=true: Uses SLURM_Import_Results.py (biomero-importer integration)
+    - If IMPORTER_ENABLED=false or unset: Uses SLURM_Get_Results.py (standard import)
+    - Both scripts support the same API including workflow UUID tracking
 
 Usage:
     Select data in OMERO, choose workflows and parameters, then run the script.
-    Results are automatically imported based on selected output options.
+    Results are automatically imported based on selected output options and
+    environment configuration.
 
 Authors:
     Torec Luik (Amsterdam UMC)
@@ -58,13 +65,23 @@ import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
 import logging
+import os
 import time as timesleep
 from paramiko import SSHException
 
 logger = logging.getLogger(__name__)
 
+# Check if importer is enabled via environment variable
+IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
-IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+# Dynamically choose import script based on IMPORTER_ENABLED
+if IMPORTER_ENABLED:
+    IMPORT_SCRIPTS = ["SLURM_Import_Results.py"]
+    logger.info("Using SLURM_Import_Results.py (importer-enabled workflow)")
+else:
+    IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
+    logger.info("Using SLURM_Get_Results.py (standard workflow)")
 CONVERSION_SCRIPTS = [constants.CONVERSION_SCRIPT]
 DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
              rstring(constants.transfer.DATA_TYPE_IMAGE),
@@ -165,7 +182,7 @@ def runScript():
             omscripts.String(constants.workflow.OUTPUT_RENAME,
                              optional=True,
                              grouping="02.7",
-                             description="A new name for the imported images. You can use variables {original_file} and {ext}. E.g. {original_file}NucleiLabels.{ext}",
+                             description="A new name for the imported images. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}_nuclei_mask.{ext} or {file}_processed.{original_ext}",
                              default=constants.workflow.NO),
             omscripts.Bool(constants.workflow.OUTPUT_PARENT,
                            optional=True, grouping="02.2",
@@ -592,6 +609,7 @@ def run_workflow(slurmClient: SlurmClient,
     Raises:
         SSHException: If job submission or status checking fails.
     """
+    global wf_failed  # Declare global at the top of the function
     logger.info(f"Submitting workflow: {name}")
     workflow_version = unwrap(client.getInput(f"{name}_Version"))
 
@@ -615,7 +633,6 @@ def run_workflow(slurmClient: SlurmClient,
             logger.warning(f"Error running {name} job: {cp_result.stderr}")
             slurmClient.workflowTracker.fail_task(
                 task_id, "Job submission failed")
-            global wf_failed
             wf_failed = True
         else:
             UI_messages += f"Submitted {name} to Slurm\
@@ -885,7 +902,8 @@ def exportImageToSLURM(client: omscripts.client,
     return rv, task_id
 
 
-def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
+def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
+                   slurmClient=None):
     """
     Execute an OMERO script and return its results.
 
@@ -894,6 +912,9 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
         svc: OMERO script service
         script_id: ID of the script to execute
         inputs: Dictionary of input parameters for the script
+        slurmClient: Optional SlurmClient; when provided, polls wfProgress
+            on each iteration so IMPORTING/IMPORTED events written by the
+            sub-script are visible in real time.
 
     Returns:
         dict: Script execution results
@@ -907,8 +928,33 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs):
     proc = svc.runScript(script_id, inputs, None)
     try:
         cb = omero.scripts.ProcessCallbackI(client, proc)
+        # Snapshot position once so we only process NEW events each iteration
+        next_position = 1
+        if slurmClient is not None and slurmClient.wfProgress is not None:
+            try:
+                next_position = slurmClient.wfProgress.recorder.max_tracking_id(
+                    application_name='WorkflowTracker'
+                ) + 1
+            except Exception:
+                next_position = 1
         while not cb.block(1000):  # ms.
-            pass
+            if slurmClient is not None and slurmClient.wfProgress is not None:
+                try:
+                    slurmClient.bring_listener_uptodate(
+                        slurmClient.wfProgress, start=next_position
+                    )
+                except Exception as e:
+                    logger.debug(f"wfProgress poll skipped (events already processed by runner): {e}")
+                finally:
+                    try:
+                        new_position = slurmClient.wfProgress.recorder.max_tracking_id(
+                            application_name='WorkflowTracker'
+                        ) + 1
+                        if new_position > next_position:
+                            logger.debug(f"Import subscript progress: picked up {new_position - next_position} new workflow event(s) (events {next_position}-{new_position - 1})")
+                        next_position = new_position
+                    except Exception:
+                        pass
         cb.close()
         rv = proc.getResults(0)
     finally:
@@ -925,9 +971,14 @@ def importResultsToOmero(client: omscripts.client,
     """
     Import workflow results from SLURM back into OMERO.
 
-    This function delegates to the SLURM_Get_Results.py script to retrieve
-    completed workflow results from SLURM and import them into OMERO
+    This function dynamically delegates to either SLURM_Get_Results.py or 
+    SLURM_Import_Results.py based on the IMPORTER_ENABLED environment variable
+    to retrieve completed workflow results from SLURM and import them into OMERO
     according to the user's selected output options.
+
+    Import Script Selection:
+        - If IMPORTER_ENABLED=true: Uses SLURM_Import_Results.py (biomero-importer)
+        - If IMPORTER_ENABLED=false/unset: Uses SLURM_Get_Results.py (standard)
 
     Args:
         client: OMERO script client for accessing user inputs
@@ -943,6 +994,7 @@ def importResultsToOmero(client: omscripts.client,
     Raises:
         Exception: If import script not found or import fails
     """
+    global wf_failed  # Declare global at the top of the function
     if conn.keepAlive():
         svc = conn.getScriptService()
         scripts = svc.getScripts()
@@ -959,7 +1011,8 @@ def importResultsToOmero(client: omscripts.client,
     inputs = {
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
         constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id)),
-        "Cleanup?": client.getInput("Cleanup?") or rbool(True)
+        "Cleanup?": client.getInput("Cleanup?") or rbool(True),
+        "Workflow_UUID": rstring(str(wf_id))
     }
 
     # Get a 'parent' dataset or plate of input images
@@ -1107,16 +1160,31 @@ def importResultsToOmero(client: omscripts.client,
             client.getInput(constants.transfer.IDS))},
         persist_dict
     )
+    # Add task_id to inputs so Import_Results can update task status during import
+    inputs["Task_ID"] = rstring(str(task_id))
     slurmClient.workflowTracker.start_task(task_id)
-    rv = runOMEROScript(client, svc, script_id, inputs)
+    rv = runOMEROScript(client, svc, script_id, inputs, slurmClient=slurmClient)
     try:
         msg = unwrap(rv['Message'])
+        # Check if the script actually failed by looking for error indicators
+        if ("Script execution failed:" in msg or 
+            "ERROR:" in msg.upper() or 
+            "FAILED:" in msg or
+            "RuntimeError:" in msg or
+            "Exception:" in msg):
+            logger.error(f"Import script failed: {msg}")
+            slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
+            wf_failed = True  # Mark workflow as failed
+            raise RuntimeError(f"Import script failed: {msg}")
+        else:
+            logger.info(f"Import script succeeded: {msg}")
+            slurmClient.workflowTracker.complete_task(task_id, msg)
     except KeyError as e:
-        slurmClient.workflowTracker.fail_task(task_id, "Import failed")
-        global wf_failed
+        error_msg = "No message returned from import script"
+        logger.error(error_msg)
+        slurmClient.workflowTracker.fail_task(task_id, error_msg)
         wf_failed = True  # Mark workflow as failed
-        raise e
-    slurmClient.workflowTracker.complete_task(task_id, msg)
+        raise RuntimeError(error_msg)
     return rv
 
 
