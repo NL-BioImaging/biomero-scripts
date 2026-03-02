@@ -56,7 +56,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 - **`_SLURM_Image_Transfer.py`**: Export data from OMERO to SLURM (with cleanup)
 - **`SLURM_Remote_Conversion.py`**: Intelligent format conversion on SLURM
 - **`SLURM_Get_Results.py`**: Upload workflow results back to OMERO (standard mode)
-- **`SLURM_Import_Results.py`**: Import workflow results with full [biomero-importer](https://github.com/NL-BioImaging/biomero-importer) integration — selected automatically when `IMPORTER_ENABLED=true`
+- **`SLURM_Import_Results.py`**: Import workflow results with full [BIOMERO.importer](https://github.com/NL-BioImaging/BIOMERO.importer) integration — selected automatically when `IMPORTER_ENABLED=true`
 - **`SLURM_Get_Update.py`**: Monitor and update workflow status
 
 ### Administrative Scripts (`admin/`)
@@ -79,9 +79,9 @@ The import step automatically selects the right script based on your environment
 | `IMPORTER_ENABLED` | Script used | Dataset import method |
 |-|-|-|
 | `false` (default) | `SLURM_Get_Results.py` | Upload via OMERO API |
-| `true` | `SLURM_Import_Results.py` | In-place import from remote storage via biomero-importer |
+| `true` | `SLURM_Import_Results.py` | In-place import from remote storage via BIOMERO.importer |
 
-Set `IMPORTER_ENABLED=true` in your environment (e.g. docker-compose `.env`) to enable in-place imports via biomero-importer. The script will raise an error at startup if `IMPORTER_ENABLED=true` but the `biomero-importer` module is not installed.
+Set `IMPORTER_ENABLED=true` in your environment (e.g. docker-compose `.env`) to enable in-place imports via BIOMERO.importer. The script will raise an error at startup if `IMPORTER_ENABLED=true` but the `BIOMERO.importer` module is not installed.
 
 Installation
 ------------
