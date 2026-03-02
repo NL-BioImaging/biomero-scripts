@@ -50,12 +50,13 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 ### Main Workflow Scripts (`__workflows/`)
 - **`SLURM_Run_Workflow.py`**: Primary workflow orchestrator with ZARR support
 - **`SLURM_Run_Workflow_Batched.py`**: Batch processing variant for multiple datasets
-- **`SLURM_CellPose_Segmentation.py`**: ⚠️ **OPTIONAL EXAMPLE** - Manual CellPose workflow (consider deletion - use `SLURM_Run_Workflow.py` instead for automated processing)
+- **`SLURM_CellPose_Segmentation.py`**: ⚠️ **EXAMPLE ONLY** - Manual single-workflow script for CellPose. Not installed by default in NL-BIOMERO. Use `SLURM_Run_Workflow.py` instead.
 
 ### Data Management Scripts (`_data/`)
 - **`_SLURM_Image_Transfer.py`**: Export data from OMERO to SLURM (with cleanup)
 - **`SLURM_Remote_Conversion.py`**: Intelligent format conversion on SLURM
-- **`SLURM_Get_Results.py`**: Import workflow results back to OMERO
+- **`SLURM_Get_Results.py`**: Upload workflow results back to OMERO (standard mode)
+- **`SLURM_Import_Results.py`**: Import workflow results with full [biomero-importer](https://github.com/NL-BioImaging/biomero-importer) integration — selected automatically when `IMPORTER_ENABLED=true`
 - **`SLURM_Get_Update.py`**: Monitor and update workflow status
 
 ### Administrative Scripts (`admin/`)
@@ -67,9 +68,20 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 1. **Export**: Selected data transferred from OMERO to SLURM cluster
 2. **Convert**: Smart format conversion (with ZARR no-op optimization)
 3. **Process**: Computational workflows executed on SLURM
-4. **Monitor**: Job progress tracking and status updates
-5. **Import**: Results imported back to OMERO with configurable organization
-6. **Cleanup**: Temporary artifacts automatically removed
+4. **Monitor**: Job progress tracking and status updates (with real-time polling when SlurmClient is available)
+5. **Import**: Results imported back to OMERO — via `SLURM_Import_Results.py` (importer-enabled) or `SLURM_Get_Results.py` (standard), selected automatically based on `IMPORTER_ENABLED`
+6. **Cleanup**: Temporary artifacts automatically removed (non-critical cleanup errors are logged but do not fail the workflow)
+
+### Dynamic Import Script Selection
+
+The import step automatically selects the right script based on your environment:
+
+| `IMPORTER_ENABLED` | Script used | Dataset import method |
+|-|-|-|
+| `false` (default) | `SLURM_Get_Results.py` | Upload via OMERO API |
+| `true` | `SLURM_Import_Results.py` | In-place import from remote storage via biomero-importer |
+
+Set `IMPORTER_ENABLED=true` in your environment (e.g. docker-compose `.env`) to enable in-place imports via biomero-importer. The script will raise an error at startup if `IMPORTER_ENABLED=true` but the `biomero-importer` module is not installed.
 
 Installation
 ------------
@@ -140,14 +152,17 @@ Always start with initiating the Slurm environment at least once, for example us
 For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow.py) should provide an easy way to send data to Slurm, run the configured and chosen workflow, poll Slurm until jobs are done (or errors) and retrieve the results when the job is done. This workflow script uses some of the other scripts, like
 
 -  [`_data/SLURM Image Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_Image_Transfer.py): to export your selected images / dataset / screen as ZARR files to a Slurm dir.
-- [`_data/SLURM Get Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Results.py): to import your Slurm job results back into OMERO as a zip, dataset or attachment.
+- [`_data/SLURM Get Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Results.py): to retrieve your Slurm job results back into OMERO as a zip, dataset or attachment. Datasets are uploaded directly into OMERO via the OMERO API.
+- [`_data/SLURM Import Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Import_Results.py): to retrieve your Slurm job results back into OMERO as a zip, dataset or attachment. Datasets are in-place imported from remote storage via [BIOMERO.importer](https://github.com/NL-BioImaging/biomero.importer). Selected automatically when `IMPORTER_ENABLED=true`.
 
 Other example OMERO scripts are:
 - [`_data/SLURM Get Update`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Update.py): to run while you are waiting on a job to finish on Slurm; it will try to get a `%` progress from your job's logfile. Depends on your job/workflow logging a `%` of course.
 
+> **Note**: The NL-BIOMERO deployment removes example-only scripts by default (`SLURM_CellPose_Segmentation.py`). These are kept in the repository as reference implementations showing how to build a single-workflow script, but you should use `SLURM_Run_Workflow.py` for production use.
+
 - [`__workflows/SLURM Run Workflow Batched`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow_Batched.py): This will allow you to run several `__workflows/SLURM Run Workflow` in parallel, by batching your input images into smaller chunks (e.g. turn 64 images into 2 batches of 32 images each). It will then poll all these jobs.
 
-- [`__workflows/SLURM CellPose Segmentation`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_CellPose_Segmentation.py): This is a more primitive script that only runs the actual workflow `CellPose` (if correctly configured). You will need to manually transfer data first (with `_data/SLURM Image Transfer`) and manually retrieve data afterward (with `_data/SLURM Get Results`).
+- [`__workflows/SLURM CellPose Segmentation`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_CellPose_Segmentation.py): ⚠️ **Example only** — a minimal script that runs only the CellPose workflow. You will need to manually transfer data first (with `_data/SLURM Image Transfer`) and manually retrieve data afterward (with `_data/SLURM Get Results`). Use as a reference if you want to build your own single-workflow script.
 
 Logging Configuration
 -----
