@@ -556,6 +556,54 @@ def getUserProjects() -> List[Any]:
         client.closeSession()
 
 
+def get_current_user_groups(conn: BlitzGateway) -> List[str]:
+    """Get OMERO groups that the current user belongs to.
+    
+    Args:
+        conn: Existing OMERO BlitzGateway connection.
+    
+    Returns:
+        List of group names the current user belongs to.
+        
+    Raises:
+        Exception: If connection or query fails.
+    """
+    try:
+        user_groups = []
+        
+        # Get current group from connection context
+        current_group = conn.getGroupFromContext()
+        if current_group:
+            user_groups.append(current_group.getName())
+        
+        # Get admin service to query group memberships
+        admin_service = conn.getAdminService()
+        user = conn.getUser()
+        user_id = user.getId()
+        
+        # Get all groups the user belongs to
+        group_list = admin_service.containedGroups(user_id)
+        for group in group_list:
+            # Extract group name (handle both string and RString cases)
+            if hasattr(group, 'getName'):
+                group_name_obj = group.getName()
+                if hasattr(group_name_obj, 'getValue'):
+                    group_name = group_name_obj.getValue()
+                else:
+                    group_name = str(group_name_obj)
+            else:
+                group_name = str(group)
+                
+            if group_name and group_name not in user_groups:
+                user_groups.append(group_name)
+        
+        return user_groups
+        
+    except Exception as e:
+        logger.warning(f"Failed to get user groups: {e}")
+        return []
+
+
 def cleanup_tmp_files_locally(message: str, folder: str, log_file: str) -> str:
     """ Cleanup zip and unzipped files/folders
 
@@ -572,16 +620,6 @@ def cleanup_tmp_files_locally(message: str, folder: str, log_file: str) -> str:
         os.remove(log_file)
         os.remove(f"{folder}.zip")
         shutil.rmtree(folder)
-
-        # TODO: remove these from "permanent move"
-        # Remove the zip file after extraction (importer expects extracted files)
-        os.remove(target_zip_path)
-
-        # Clean up temp directory only if we extracted fresh (not using existing zip)
-        if not existing_zip_path:
-            temp_dir = os.path.dirname(existing_zip_path)
-            if os.path.exists(temp_dir) and 'biomero_import_' in temp_dir:
-                shutil.rmtree(temp_dir)
 
     except Exception as e:
         logger.error(f"Failed to cleanup tmp files: {e}")
@@ -834,7 +872,6 @@ def get_importer_group_base_path(group_name: str) -> str:
 
     try:
         # Load frontend group mappings from biomero-config.json
-        import json
         with open('/opt/omero/server/biomero-config.json', 'r') as f:
             frontend_config = json.load(f)
 
@@ -919,7 +956,6 @@ def get_workflow_results_path(group_name: str, wf_id: Optional[str]) -> str:
             f"No importer path configured for group: {group_name}")
 
     # Add timestamp directory to ensure uniqueness for multiple imports from same workflow
-    from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     results_path = os.path.join(
@@ -1039,7 +1075,6 @@ def extract_slurm_results_zip(
 
         # Validate zip can be opened and contains files
         try:
-            import zipfile
             with zipfile.ZipFile(temporary_zip_file_path, 'r') as zip_ref:
                 file_list = zip_ref.namelist()
                 if not file_list:
@@ -2369,6 +2404,125 @@ def extract_workflow_uuid_from_log_file(
         return None
 
 
+def check_write_access_for_importer(group_name: str, test_wf_id: str = None, conn: BlitzGateway = None) -> Tuple[bool, str]:
+    """
+    Check if we have write access to create importer storage directories.
+    
+    This function validates that we can create the required directory structure
+    and write files to the permanent storage location that will be needed for
+    the importer workflow. This allows us to fail fast if there are permission
+    issues before starting expensive SLURM operations.
+    
+    Args:
+        group_name: Name of the OMERO group
+        test_wf_id: Test workflow ID to use for path creation (optional)
+        conn: Existing OMERO BlitzGateway connection (optional)
+        
+    Returns:
+        Tuple of (success: bool, message: str) indicating if write access works
+    """
+    if not IMPORTER_ENABLED:
+        return True, "Importer not enabled, write check not needed"
+        
+    if not IMPORTER_AVAILABLE:
+        return False, "Importer is enabled but biomero-importer module is not available"
+    
+    try:
+        # Use a test workflow ID if none provided
+        if test_wf_id is None:
+            import uuid
+            test_wf_id = str(uuid.uuid4())
+            
+        # Get the path where we would need to write
+        test_results_path = get_workflow_results_path(group_name, test_wf_id)
+        
+        # Try to create the directory structure
+        os.makedirs(test_results_path, exist_ok=True)
+        
+        # Try to write a test file
+        test_file_path = os.path.join(test_results_path, "write_access_test.txt")
+        with open(test_file_path, 'w') as f:
+            f.write("BIOMERO write access test")
+            
+        # Verify we can read it back
+        with open(test_file_path, 'r') as f:
+            content = f.read()
+            if content != "BIOMERO write access test":
+                return False, f"Write test failed: file content mismatch in {test_results_path}"
+                
+        # Clean up test file and directory
+        os.remove(test_file_path)
+        
+        # Try to remove the test directory structure (only if empty)
+        try:
+            # Remove the timestamp directory if it's empty
+            os.rmdir(test_results_path)
+            # Try to remove the workflow ID directory if it's empty
+            workflow_dir = os.path.dirname(test_results_path)
+            try:
+                os.rmdir(workflow_dir)
+            except OSError:
+                pass  # Directory not empty, that's fine
+            # Try to remove the .analyzed directory if it's empty
+            analyzed_dir = os.path.dirname(workflow_dir)
+            try:
+                os.rmdir(analyzed_dir)
+            except OSError:
+                pass  # Directory not empty, that's fine
+        except OSError:
+            pass  # Directories not empty or other issues, that's fine for cleanup
+            
+        return True, f"Write access confirmed for {test_results_path}"
+        
+    except PermissionError as e:
+        # Handle permission errors with specific admin guidance
+        try:
+            base_path = get_importer_group_base_path(group_name)
+        except Exception:
+            base_path = "path determination failed"
+            
+        # Get user groups for security filtering (only show groups the user belongs to)
+        user_groups = get_current_user_groups(conn) if conn else []
+        
+        # Simplify accessible mappings display 
+        accessible_mappings = []
+        try:
+            with open('/opt/omero/server/biomero-config.json', 'r') as f:
+                config = json.load(f)
+            group_mappings = config.get('group_mappings', {})
+            
+            for group_id, mapping in group_mappings.items():
+                group_name_mapped = mapping.get('groupName', 'unknown')
+                if group_name_mapped in user_groups:
+                    folder_mapped = mapping.get('folder', 'default')
+                    accessible_mappings.append(f"  - {group_name_mapped} -> {folder_mapped}")
+        except Exception as config_e:
+            pass  # Config issues handled in resolution
+        
+        mappings_text = "\n".join(accessible_mappings) if accessible_mappings else "  (no configured mappings found for your groups)"
+        
+        error_message = f"""Permission denied writing to '{base_path}' for group '{group_name}'.
+
+Your groups with configured storage mappings:
+{mappings_text}
+
+Resolution:
+1) User: Try switching to a different group above (if write access works there)
+2) Admin: Add or change storage mapping for '{group_name}' group in the biomero importer admin page.  
+3) IT: Grant write permissions on '{base_path}' for the biomero user account"""
+        
+        return False, error_message
+    except Exception as e:
+        # Handle all other errors with simple, clear message
+        error_message = f"Write access check failed: {str(e)}"
+        if test_results_path:
+            error_message += f"\nAttempted path: {test_results_path}"
+        
+        error_message += "\n\nContact your BIOMERO administrator to investigate this error."
+        
+        return False, error_message
+
+
 def runScript() -> None:
     """Main entry point for SLURM results import with comprehensive data handling.
 
@@ -2482,6 +2636,12 @@ def runScript() -> None:
                          grouping="08",
                          description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
                          default=True),
+            scripts.Bool("Test_Write_Permissions_Only",
+                         optional=True,
+                         grouping="09",
+                         description="DRY-RUN ONLY: Test write permissions to importer storage and exit (no actual import). " + \
+                                    "Use this to validate storage configuration before running expensive workflows.",
+                         default=False),
 
 
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
@@ -2493,11 +2653,36 @@ def runScript() -> None:
         )
 
         try:
+            # Initialize all variables that could be used in exception handling/cleanup
+            # This prevents UnboundLocalError if an early exception occurs
+            task_id = None
+            slurm_job_id = None
+            wf_id = None
+            slurm_data_path = None
+            folder = None
+            log_file = None
+            
             scriptParams = client.getInputs(unwrap=True)
             conn = BlitzGateway(client_obj=client)
 
             message = ""
             logger.info(f"Import Results: {scriptParams}\n")
+
+            # Check if this is a write access validation request (DRY-RUN ONLY)
+            test_write_only = unwrap(client.getInput("Test_Write_Permissions_Only")) or False
+            if test_write_only:
+                logger.info("DRY-RUN: Testing write access for importer storage only")
+                
+                # Get group name for path resolution
+                group_name = conn.getGroupFromContext().getName()
+                
+                # Perform the write access check with existing connection
+                success, result_message = check_write_access_for_importer(group_name, conn=conn)
+                client.setOutput("Message", rstring(result_message))
+                if not success:
+                    raise RuntimeError(result_message)
+                logger.info(f"Write access check successful: {result_message}")
+                return
 
             # Get task_id if provided for status updates
             task_id = None
@@ -2705,7 +2890,7 @@ def runScript() -> None:
             message += "\nWorkflow execution completed successfully."
 
             # Update task status to IMPORTED on successful import
-            if task_id and slurmClient.track_workflows:
+            if task_id and slurmClient and slurmClient.track_workflows:
                 try:
                     slurmClient.workflowTracker.update_task_status(
                         task_id, "IMPORTED")
@@ -2741,18 +2926,23 @@ def runScript() -> None:
         finally:
             # Step 6: Cleanup resources - always runs regardless of success/failure
             # Be defensive - don't let cleanup errors mask the original failure
-            try:
-                cleanup_message = cleanup_resources(
-                    client, slurmClient, slurm_job_id,
-                    slurm_data_path, folder, log_file)
-                message += cleanup_message
-            except Exception as cleanup_error:
-                logger.error(f"Cleanup failed: {cleanup_error}", exc_info=True)
-                # Don't add cleanup errors to message if script already failed
+            # Only run cleanup if we have the required variables
+            if slurm_job_id is not None and slurmClient is not None:
+                try:
+                    cleanup_message = cleanup_resources(
+                        client, slurmClient, slurm_job_id,
+                        slurm_data_path, folder, log_file)
+                    message += cleanup_message
+                except Exception as cleanup_error:
+                    logger.error(f"Cleanup failed: {cleanup_error}", exc_info=True)
+                    # Don't add cleanup errors to message if script already failed
+            else:
+                logger.debug("Skipping cleanup - required variables not initialized")
 
             # Always try to set outputs - but don't overwrite failure messages
             try:
-                client.setOutput("Workflow_UUID", rstring(wf_id))
+                if wf_id is not None:
+                    client.setOutput("Workflow_UUID", rstring(str(wf_id)))
                 # Only set success message if we haven't already set a failure message
                 if not message.startswith("FAILED:"):
                     client.setOutput("Message", rstring(str(message)))

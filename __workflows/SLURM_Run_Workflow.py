@@ -94,6 +94,109 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
 VERSION = "2.3.0"
 
 
+def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway, client: omscripts.client) -> None:
+    """
+    Check if we have write access to importer storage before starting workflow.
+    
+    This performs an early validation to ensure we can write to the permanent
+    storage location that will be needed if using the importer workflow. This
+    allows us to fail fast with a clear error message before doing expensive
+    SLURM operations.
+    
+    Args:
+        slurmClient: Active SLURM client connection
+        conn: OMERO BlitzGateway connection
+        client: OMERO script client needed for script execution
+        
+    Raises:
+        RuntimeError: If write access validation fails
+    """
+    if not IMPORTER_ENABLED:
+        logger.info("Importer not enabled, skipping write access check")
+        return
+        
+    logger.info("Validating importer write access before starting workflow")
+    
+    try:
+        group_name = conn.getGroupFromContext().getName()
+        
+        # Call the import results script with write access check enabled
+        svc = conn.getScriptService()
+        scripts = svc.getScripts()
+        
+        # Find the import script
+        script_matches = [(unwrap(s.id), unwrap(s.getVersion()), unwrap(s.getName()))
+                         for s in scripts if unwrap(s.getName()) in IMPORT_SCRIPTS]
+        
+        if not script_matches:
+            raise RuntimeError(f"Import script not found: {IMPORT_SCRIPTS}")
+            
+        script_id, script_version, script_name = script_matches[0]
+        
+        # Get a valid job ID from the list instead of using a dummy value
+        # We need this because the script validates job IDs against completed jobs
+        try:
+            # Get list of completed jobs to find a valid job ID for validation
+            dummy_job_id = "validation_check"
+            
+            # Try to get available job list from slurmClient
+            if hasattr(slurmClient, 'list_completed_jobs'):
+                completed_jobs_list = slurmClient.list_completed_jobs()
+                if completed_jobs_list:
+                    # Use the first available job ID for validation
+                    dummy_job_id = completed_jobs_list[0]
+                    logger.info(f"Using job ID '{dummy_job_id}' for write access validation")
+                else:
+                    logger.warning("No completed jobs found, using fallback job ID")
+                    dummy_job_id = "1"  # Basic fallback
+            
+        except Exception as job_list_error:
+            logger.warning(f"Could not get completed jobs list for validation: {job_list_error}")
+            # If we can't get the job list, we'll have to skip this validation
+            # or use a very basic fallback
+            dummy_job_id = "1"
+        
+        # Prepare inputs for write access validation (DRY-RUN ONLY)
+        inputs = {
+            "Test_Write_Permissions_Only": rbool(True),
+            constants.results.OUTPUT_SLURM_JOB_ID: rstring(dummy_job_id)
+        }
+        
+        logger.info(f"Calling {script_name} for write access validation with job ID: {dummy_job_id}")
+        
+        try:
+            rv = runOMEROScript(client, svc, script_id, inputs)
+            
+            # Check if the script executed successfully
+            if rv is None:
+                raise RuntimeError("No response from write access validation script")
+            
+            # Check for the standard Message output - this contains the real error/success message
+            if 'Message' in rv:
+                message = unwrap(rv['Message'])
+                if "Write access confirmed" not in message and "Importer not enabled" not in message:
+                    # The script returned a failure message - forward it directly without extra wrapping
+                    raise RuntimeError(message)
+                logger.info(f"Write access validation successful: {message}")
+            else:
+                # No message indicates script execution problem
+                raise RuntimeError("Write access validation script completed but returned no status message")
+                
+        except RuntimeError:
+            # Re-raise RuntimeError as-is (these are our validation failure messages)
+            raise
+        except Exception as script_error:
+            # Handle unexpected script execution errors
+            raise RuntimeError(f"Unexpected error during write access validation: {str(script_error)}")
+            
+    except Exception as e:
+        # The validation worked, but found an issue that prevents workflow execution
+        error_msg = f"Write access validation failed - workflow cannot proceed.\\n" + \
+                   f"{str(e)}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+
 def runScript():
     """Main entry point for the SLURM workflow execution script.
 
@@ -366,6 +469,10 @@ def runScript():
                 group
             )
             wf_failed = False  # wf state
+
+            # Early validation: Check importer write access if needed
+            # This prevents expensive SLURM operations if we can't write results
+            validate_importer_write_access(slurmClient, conn, client)
 
             logger.info('''
             # --------------------------------------------
