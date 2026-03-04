@@ -165,22 +165,47 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
         logger.info(f"Calling {script_name} for write access validation with job ID: {dummy_job_id}")
         
         try:
-            rv = runOMEROScript(client, svc, script_id, inputs)
+            rv, job = runOMEROScript(client, svc, script_id, inputs)
             
             # Check if the script executed successfully
-            if rv is None:
+            if rv is None or job is None:
                 raise RuntimeError("No response from write access validation script")
             
-            # Check for the standard Message output - this contains the real error/success message
+            # Get job status ID for logging
+            job_status_id = None
+            try:
+                job_status = job.getStatus()
+                job_status_id = unwrap(job_status.getId())
+                logger.debug(f"Write access validation job status ID: {job_status_id}")
+            except Exception as job_error:
+                logger.warning(f"Could not get job status: {job_error}")
+            
+            # Get message content
+            message = ""
             if 'Message' in rv:
                 message = unwrap(rv['Message'])
-                if "Write access confirmed" not in message and "Importer not enabled" not in message:
-                    # The script returned a failure message - forward it directly without extra wrapping
-                    raise RuntimeError(message)
-                logger.info(f"Write access validation successful: {message}")
-            else:
-                # No message indicates script execution problem
-                raise RuntimeError("Write access validation script completed but returned no status message")
+                if message:
+                    logger.info(f"Write access validation message: {message}")
+            
+            # Check for any failure indicators
+            failure_indicators = [
+                "Script execution failed:",
+                "Permission denied", 
+                "FAILED:",
+                "RuntimeError:",
+                "Exception:",
+                "ERROR:"
+            ]
+            
+            # Fail if: status indicates error (6=Error, 9=Cancelled) OR message contains failure indicators
+            if (job_status_id in [6, 9] or 
+                any(indicator in message for indicator in failure_indicators)):
+                error_message = message or f"Script failed with status ID: {job_status_id}"
+                raise RuntimeError(error_message)
+            
+            # If we got here without failures, treat as success
+            logger.info("Write access validation completed successfully")
+            return
                 
         except RuntimeError:
             # Re-raise RuntimeError as-is (these are our validation failure messages)
@@ -858,11 +883,24 @@ def convertDataOnSLURM(client: omscripts.client,
         raise
     # Execute the conversion script with comprehensive error detection
     try:
-        rv = runOMEROScript(client, svc, script_id, inputs)
+        rv, job = runOMEROScript(client, svc, script_id, inputs)
 
-        # Determine if the script actually succeeded
+        # Determine if the script actually succeeded using job status
         success = False
         msg = ""
+        
+        # Get job status
+        job_status_id = None
+        if job:
+            try:
+                job_status = job.getStatus()
+                job_status_id = unwrap(job_status.getId())
+                logger.debug(f"Conversion script job status ID: {job_status_id}")
+                # Success if job finished (status ID 8)
+                success = job_status_id == 8
+            except Exception as job_error:
+                logger.warning(f"Could not get job status: {job_error}")
+                success = False
 
         if rv and isinstance(rv, dict):
             # Extract the Message content if available
@@ -995,7 +1033,18 @@ def exportImageToSLURM(client: omscripts.client,
         logger.error(
             f"Database error adding export task to workflow {wf_id}: {db_e}")
         raise
-    rv = runOMEROScript(client, svc, script_id, inputs)
+    rv, job = runOMEROScript(client, svc, script_id, inputs)
+    
+    # Check job status for success/failure
+    job_status_id = None
+    if job:
+        try:
+            job_status = job.getStatus()
+            job_status_id = unwrap(job_status.getId())
+            logger.debug(f"Export script job status ID: {job_status_id}")
+        except Exception as job_error:
+            logger.warning(f"Could not get job status: {job_error}")
+    
     if 'Message' in rv:
         msg = unwrap(rv['Message'])
     else:
@@ -1012,7 +1061,7 @@ def exportImageToSLURM(client: omscripts.client,
 def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
                    slurmClient=None):
     """
-    Execute an OMERO script and return its results.
+    Execute an OMERO script and return its results and job information.
 
     Args:
         client: OMERO script client
@@ -1024,9 +1073,10 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
             sub-script are visible in real time.
 
     Returns:
-        dict: Script execution results
+        tuple: (results_dict, job_info) where job_info contains status information
     """
     rv = None
+    job = None
 
     script_id = int(script_id)
     # params = svc.getParams(script_id) # we can dynamically get them
@@ -1064,9 +1114,10 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
                         pass
         cb.close()
         rv = proc.getResults(0)
+        job = proc.getJob()  # Get job status information
     finally:
         proc.close(False)
-    return rv
+    return rv, job
 
 
 def importResultsToOmero(client: omscripts.client,
@@ -1270,16 +1321,27 @@ def importResultsToOmero(client: omscripts.client,
     # Add task_id to inputs so Import_Results can update task status during import
     inputs["Task_ID"] = rstring(str(task_id))
     slurmClient.workflowTracker.start_task(task_id)
-    rv = runOMEROScript(client, svc, script_id, inputs, slurmClient=slurmClient)
+    rv, job = runOMEROScript(client, svc, script_id, inputs, slurmClient=slurmClient)
+    
+    # Check job status for success/failure
+    job_status_id = None
+    script_failed = False
+    if job:
+        try:
+            job_status = job.getStatus()
+            job_status_id = unwrap(job_status.getId())
+            logger.debug(f"Import script job status ID: {job_status_id}")
+            # Script failed if status is Error (6) or Cancelled (9)
+            script_failed = job_status_id in [6, 9]
+        except Exception as job_error:
+            logger.warning(f"Could not get job status: {job_error}")
+            script_failed = True  # Assume failure if we can't get status
+    
     try:
         msg = unwrap(rv['Message'])
-        # Check if the script actually failed by looking for error indicators
-        if ("Script execution failed:" in msg or 
-            "ERROR:" in msg.upper() or 
-            "FAILED:" in msg or
-            "RuntimeError:" in msg or
-            "Exception:" in msg):
-            logger.error(f"Import script failed: {msg}")
+        
+        if script_failed:
+            logger.error(f"Import script failed with status ID {job_status_id}: {msg}")
             slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
             wf_failed = True  # Mark workflow as failed
             raise RuntimeError(f"Import script failed: {msg}")
