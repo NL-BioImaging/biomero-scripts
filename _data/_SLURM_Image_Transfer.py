@@ -236,7 +236,7 @@ def save_as_ome_tiff(conn, image, folder_name=None):
             f.write(piece)
 
 
-def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None):
+def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None, ome_version=None):
     """Export plate as ZARR format using omero-cli-zarr.
     
     Args:
@@ -245,16 +245,18 @@ def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None):
         plate: OMERO plate wrapper to export.
         folder_name (str, optional): Target folder for export.
         client: OMERO client (unused, for compatibility).
+        ome_version (str, optional): OMERO version for export.
     """
     # TODO use raw converter directly
     # (1) find out the plate's file
     # (2) (a) if not zarr: subprocess raw on that file
     # (2) (b) if zarr: copy/scp directly
     save_as_zarr(conn, suuid, plate, folder_name,
-                 constants.transfer.DATA_TYPE_PLATE)
+                 constants.transfer.DATA_TYPE_PLATE,
+                 ome_version)
 
 
-def save_image_as_zarr(conn, suuid, image, folder_name=None):
+def save_image_as_zarr(conn, suuid, image, folder_name=None, ome_version=None):
     """Export image as ZARR format using omero-cli-zarr.
     
     Args:
@@ -262,12 +264,14 @@ def save_image_as_zarr(conn, suuid, image, folder_name=None):
         suuid: Session UUID for authentication.
         image: OMERO image wrapper to export.
         folder_name (str, optional): Target folder for export.
+        ome_version (str, optional): OMERO version for export.
     """
     save_as_zarr(conn, suuid, image, folder_name,
-                 constants.transfer.DATA_TYPE_IMAGE)
+                 constants.transfer.DATA_TYPE_IMAGE,
+                 ome_version)
     
 
-def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
+def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_version=None):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
     Args:
@@ -276,6 +280,7 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
         object: OMERO object wrapper (Image or Plate) to export.
         folder_name (str, optional): Target folder for export.
         data_type (str, optional): Type of OMERO object for appropriate export.
+        ome_version (str, optional): Ome-zarr version to use for export.
     
     Raises:
         ValueError: If unsupported data_type is provided.
@@ -302,11 +307,17 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None):
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
+    command = f'omero zarr -s "{conn.host}" -k "{suuid}"'
+    if ome_version:
+        command += f' --format {ome_version}'   # argument only available in ome-cli-zarr v0.8.0+
+    command += f' export --output "{exp_dir}"'
     if data_type == constants.transfer.DATA_TYPE_PLATE:
-        command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output "{exp_dir}" export Plate:{object.getId()}'
+        command += f' Plate:{object.getId()}'
     elif data_type == constants.transfer.DATA_TYPE_IMAGE:
-        command = f'omero zarr -s "{conn.host}" -k "{suuid}" --output "{exp_dir}" export Image:{object.getId()}'
+        command += f' Image:{object.getId()}'
     else:
+        log(f"OMERO ZARR command for {data_type}: {command}")
+        print(f"OMERO ZARR command for {data_type}: {command}")
         raise ValueError(f"No OMERO ZARR command known for data_type: {data_type}")
     log(f"OMERO ZARR command for {data_type}: {command}")
     cmd = cmd1 + " && " + command
@@ -459,6 +470,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     folder_name = script_params[constants.transfer.FOLDER]
     folder_name = os.path.basename(folder_name)
     format = script_params[constants.transfer.FORMAT]
+    ome_version = script_params[constants.transfer.OME_VERSION]
     project_z = constants.transfer.Z in script_params and \
         script_params[constants.transfer.Z] == constants.transfer.Z_MAXPROJ
 
@@ -584,7 +596,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     if format == constants.transfer.FORMAT_ZARR and data_type == constants.transfer.DATA_TYPE_PLATE:
         for plate in objects:
             log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
-            save_plate_as_zarr(conn, suuid, plate, folder_name, client)
+            save_plate_as_zarr(conn, suuid, plate, folder_name, client, ome_version=ome_version)
             write_logfile(exp_dir)
             
     for img in images:
@@ -603,7 +615,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_ZARR:
-            save_image_as_zarr(conn, suuid, img, folder_name)
+            save_image_as_zarr(conn, suuid, img, folder_name, ome_version=ome_version)
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -763,6 +775,8 @@ def run_script():
         formats = [rstring(constants.transfer.FORMAT_TIFF),
                    rstring(constants.transfer.FORMAT_OMETIFF),
                    rstring(constants.transfer.FORMAT_ZARR)]
+        ome_zarr_version = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
+                            rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
         default_z_option = constants.transfer.Z_DEFAULT
         z_choices = [rstring(default_z_option),
                      rstring(constants.transfer.Z_ALL),
@@ -886,6 +900,11 @@ def run_script():
                 constants.transfer.FORMAT, grouping="5.1",
                 description="Format to save image", values=formats,
                 default=constants.transfer.FORMAT_ZARR),
+
+            scripts.String(
+                constants.transfer.OME_VERSION, grouping="5.2",
+                description="Ome-zarr version", values=ome_zarr_version,
+                default=constants.transfer.OME_ZARR_VERSION_0_4),
 
             scripts.String(
                 constants.transfer.FOLDER, grouping="3",
