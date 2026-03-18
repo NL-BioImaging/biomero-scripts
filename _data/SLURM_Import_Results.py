@@ -176,6 +176,41 @@ else:
     IMPORTER_CONFIG = None
 
 
+def find_supported_image_paths(base_path: str, recursive: bool = True) -> List[str]:
+    """Find all supported image files and directories (e.g., ZARR) in a path.
+    
+    Some image formats like ZARR are stored as directories, while others are files.
+    This function handles both cases for any supported extension.
+    
+    Args:
+        base_path: Base directory to search.
+        recursive: Whether to search recursively. Defaults to True.
+        
+    Returns:
+        List of paths to supported image files and directories.
+    """
+    if recursive:
+        all_paths = glob.glob(os.path.join(base_path, "**", "*"), recursive=True)
+    else:
+        all_paths = glob.glob(os.path.join(base_path, "*"))
+    
+    image_paths = []
+    logger.debug(f"Scanning for image files in: {base_path}")
+    logger.debug(f"Found {len(all_paths)} total paths to check")
+    
+    for path in all_paths:
+        for ext in SUPPORTED_IMAGE_EXTENSIONS:
+            if path.endswith(ext):
+                # Check if it's either a file or directory with supported extension
+                if os.path.isfile(path) or os.path.isdir(path):
+                    logger.debug(f"Found supported image: {path}")
+                    image_paths.append(path)
+                    break  # Don't check other extensions for this path
+    
+    logger.info(f"Found {len(image_paths)} supported image files/directories in {base_path}")            
+    return image_paths
+
+
 def getOriginalFilename(name: str) -> str:
     """Extract original filename from processed file path.
 
@@ -337,9 +372,8 @@ def saveImagesToOmeroAsAttachments(
     Returns:
         Message to add to script output.
     """
-    all_files = glob.iglob(folder+'**/**', recursive=True)
-    files = [f for f in all_files if os.path.isfile(f)
-             and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+    # Handle both regular image files and ZARR directories
+    files = find_supported_image_paths(folder)
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
@@ -1275,9 +1309,7 @@ def create_metadata_csv(
             metadata_rows.append(['Workflow_ID', str(wf_id)])
 
     # Use the same file discovery logic as upload orders to find where to put metadata.csv
-    all_files = glob.glob(os.path.join(target_path, "**", "*"), recursive=True)
-    image_files = [f for f in all_files if os.path.isfile(f)
-                   and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+    image_files = find_supported_image_paths(target_path)
 
     # Create metadata.csv in same directories as image files
     created_files = []
@@ -1588,12 +1620,7 @@ def create_upload_orders_for_results(
         return []
 
     # Find only image files (CSV tables handled by zip workflow)
-    # Fix: Use proper glob pattern to find files recursively
-    all_files = glob.glob(os.path.join(
-        results_path, "**", "*"), recursive=True)
-
-    image_files = [f for f in all_files if os.path.isfile(f)
-                   and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+    image_files = find_supported_image_paths(results_path)
 
     if not image_files:
         logger.warning(
@@ -2063,8 +2090,11 @@ def process_importer_workflow(
             message += f"\nSome imports failed for UUIDs: {failed_uuids}"
             # Import failures are logged but don't stop the workflow
     else:
-        message += "\nNo image files found for importer"
-        logger.warning("No image files found for importer processing")
+        error_msg = "CRITICAL: No image files found for importer processing - workflow failed!"
+        logger.error(error_msg)
+        logger.error(f"Searched in: {permanent_storage_path}")
+        logger.error(f"Supported extensions: {SUPPORTED_IMAGE_EXTENSIONS}")
+        sys.exit(1)  # Exit with failure code - this should trigger workflow failure
 
     return message
 
