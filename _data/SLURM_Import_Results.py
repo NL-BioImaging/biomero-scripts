@@ -211,11 +211,92 @@ def find_supported_image_paths(base_path: str, recursive: bool = True) -> List[s
     return image_paths
 
 
+def find_label_zarr_paths(base_path: str) -> List[str]:
+    """Find label zarr directories within zarr files.
+    
+    Searches for subdirectories matching the pattern: *.zarr/labels/*/
+    where the subdirectory itself is a valid zarr array (contains .zattrs, .zgroup, etc.)
+    
+    Args:
+        base_path: Base directory to search for zarr files.
+        
+    Returns:
+        List of paths to label zarr directories.
+    """
+    label_zarrs = []
+    logger.debug(f"Scanning for label zarr directories in: {base_path}")
+    
+    # Find all .zarr directories first
+    zarr_pattern = os.path.join(base_path, "**", "*.zarr")
+    zarr_dirs = [path for path in glob.glob(zarr_pattern, recursive=True) if os.path.isdir(path)]
+    
+    for zarr_dir in zarr_dirs:
+        labels_dir = os.path.join(zarr_dir, "labels")
+        if os.path.isdir(labels_dir):
+            # Look for subdirectories in labels/ that are themselves zarr arrays
+            for item in os.listdir(labels_dir):
+                potential_label_zarr = os.path.join(labels_dir, item)
+                if os.path.isdir(potential_label_zarr):
+                    # Check if this is a valid zarr array (has .zattrs or .zgroup)
+                    has_zattrs = os.path.exists(os.path.join(potential_label_zarr, ".zattrs"))
+                    has_zgroup = os.path.exists(os.path.join(potential_label_zarr, ".zgroup"))
+                    
+                    if has_zattrs or has_zgroup:
+                        # Check if it already has .zarr extension
+                        if not item.endswith('.zarr'):
+                            # Rename the directory to have .zarr extension on disk
+                            label_zarr_path = potential_label_zarr + ".zarr"
+                            new_item_name = item + ".zarr"
+                            try:
+                                os.rename(potential_label_zarr, label_zarr_path)
+                                logger.info(f"Renamed label zarr: {potential_label_zarr} -> {label_zarr_path}")
+                                
+                                # Update the .zattrs file in the labels directory to reflect the rename
+                                labels_zattrs_path = os.path.join(labels_dir, ".zattrs")
+                                if os.path.exists(labels_zattrs_path):
+                                    try:
+                                        import json
+                                        with open(labels_zattrs_path, 'r') as f:
+                                            zattrs_data = json.load(f)
+                                        
+                                        # Update the labels list if it exists
+                                        if 'labels' in zattrs_data and isinstance(zattrs_data['labels'], list):
+                                            # Replace old name with new name
+                                            if item in zattrs_data['labels']:
+                                                zattrs_data['labels'][zattrs_data['labels'].index(item)] = new_item_name
+                                            elif new_item_name not in zattrs_data['labels']:
+                                                # If old name not found but new name not present, add it
+                                                zattrs_data['labels'].append(new_item_name)
+                                        
+                                        # Write back the updated .zattrs
+                                        with open(labels_zattrs_path, 'w') as f:
+                                            json.dump(zattrs_data, f, indent=2)
+                                        logger.info(f"Updated labels/.zattrs to reference {new_item_name}")
+                                        
+                                    except (json.JSONDecodeError, IOError) as e:
+                                        logger.warning(f"Failed to update labels/.zattrs after rename: {e}")
+                                
+                                label_zarrs.append(label_zarr_path)
+                                logger.debug(f"Found label zarr: {label_zarr_path}")
+                            except OSError as e:
+                                logger.error(f"Failed to rename label zarr {potential_label_zarr}: {e}")
+                                # Still add the original path in case of failure
+                                label_zarrs.append(potential_label_zarr)
+                                logger.debug(f"Found label zarr (rename failed): {potential_label_zarr}")
+                        else:
+                            # Already has .zarr extension
+                            label_zarrs.append(potential_label_zarr)
+                            logger.debug(f"Found label zarr: {potential_label_zarr}")
+    
+    logger.info(f"Found {len(label_zarrs)} label zarr directories in {base_path}")
+    return label_zarrs
+
+
 def getOriginalFilename(name: str) -> str:
     """Extract original filename from processed file path.
 
     Extracts the base filename from a processed file path by removing workflow
-    processing suffixes.
+    processing suffixes. Handles zarr directories and regular files.
 
     Args:
         name: Path/name of processed file.
@@ -223,13 +304,22 @@ def getOriginalFilename(name: str) -> str:
     Returns:
         Original filename if pattern matches, otherwise input name.
 
-    Example:
+    Examples:
         >>> getOriginalFilename("/../../Cells Apoptotic.png_merged_z01_t01.tiff")
         "Cells Apoptotic.png"
+        >>> getOriginalFilename("/out/Cell-Granules.tif.zarr")
+        "Cell-Granules.tif"
     """
+    # Handle zarr directories - extract original filename by removing .zarr extension
+    if name.endswith('.zarr'):
+        basename = os.path.basename(name)
+        # Remove .zarr extension to get original filename
+        return basename.replace('.zarr', '')
+    
+    # Handle standard processed files (original logic for backward compatibility)
     match = re.match(pattern=".+\/(.+\.[A-Za-z]+).+\.[tiff|png]", string=name)
     if match:
-        name = match.group(1)
+        return match.group(1)
 
     return name
 
@@ -1598,9 +1688,10 @@ def create_upload_orders_for_results(
     destination_type: str,
     destination_id: int,
     results_path: str,
-    wf_id: UUID
+    wf_id: UUID,
+    client: Any = None
 ) -> List[Dict[str, Any]]:
-    """Create upload orders for SLURM results (images only).
+    """Create upload orders for SLURM results (images and optionally label zarrs).
 
     Args:
         group_name: OMERO group name.
@@ -1609,6 +1700,7 @@ def create_upload_orders_for_results(
         destination_id: Destination ID in OMERO.
         results_path: Path to results in importer storage.
         wf_id: Workflow UUID for tracking.
+        client: OMERO script client for accessing input parameters (optional).
 
     Returns:
         List of created upload orders.
@@ -1628,8 +1720,23 @@ def create_upload_orders_for_results(
 
     orders = []
 
-    # Create order for image files if any exist
-    if image_files:
+    # Check if label zarr import is enabled
+    import_label_zarrs = unwrap(client.getInput("Import_Label_Zarrs")) if client else True
+    import_only_labels = unwrap(client.getInput("Import_Only_Labels")) if client else True
+    
+    # First check if there are actually label zarr files available
+    label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
+    
+    # Determine if we should skip main image import (only when both label options are true AND labels exist)
+    skip_main_images = import_label_zarrs and import_only_labels and len(label_zarr_files) > 0
+    
+    # Safety check: if Import_Only_Labels=true but no label zarrs found, warn and import main images
+    if import_label_zarrs and import_only_labels and len(label_zarr_files) == 0:
+        logger.warning("Import_Only_Labels=true but no label zarr directories found. Falling back to main image import to avoid empty import.")
+        skip_main_images = False
+
+    # Create order for image files if any exist (unless we're only importing labels)
+    if image_files and not skip_main_images:
         image_order = {
             "Group": group_name,
             "Username": username,
@@ -1644,12 +1751,38 @@ def create_upload_orders_for_results(
         create_upload_order(image_order)
         orders.append(image_order)
         logger.info(f"Created image upload order for {len(image_files)} files")
+    elif image_files and skip_main_images:
+        logger.info(f"Skipping main image import for {len(image_files)} files (Import_Only_Labels=true, {len(label_zarr_files)} label zarr directories found)")
+            
+    # Create orders for label zarr directories if enabled and found
+    if import_label_zarrs and label_zarr_files:
+        label_order = {
+            "Group": group_name,
+            "Username": username,
+            "DestinationID": destination_id,
+            "DestinationType": destination_type,
+            # Generate unique order ID (importer needs string)
+            "UUID": str(uuid.uuid4()),
+            "Files": label_zarr_files,
+            "wf_id": wf_id,
+            "source": "SLURM_Results_Labels"
+        }
+        create_upload_order(label_order)
+        orders.append(label_order)
+        logger.info(f"Created label zarr upload order for {len(label_zarr_files)} label zarr directories")
+    elif import_label_zarrs:
+        logger.info("No label zarr directories found (Import_Label_Zarrs=true but workflow likely produced non-zarr results)")
+    else:
+        logger.info("Label zarr import is disabled")
 
     return orders
 
 
 def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
-    """Rename files in importer storage according to rename pattern.
+    """Rename files and directories in importer storage according to rename pattern.
+
+    Handles both regular image files and zarr directories. Zarr directories
+    are renamed as complete units while preserving their internal structure.
 
     Args:
         client: OMERO script client for accessing rename settings.
@@ -1665,13 +1798,26 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
     if not rename_enabled:
         return "\\nFile renaming skipped (disabled)"
 
-    # Find all image files in results path
+    # Find all image files and zarr directories in results path
     all_files = []
+    zarr_dirs = []
+    
     for root, dirs, files in os.walk(results_path):
+        # Check for zarr directories
+        for dir_name in dirs:
+            if dir_name.endswith('.zarr'):
+                zarr_path = os.path.join(root, dir_name)
+                zarr_dirs.append(zarr_path)
+        
+        # Check for regular image files
         for file in files:
             file_path = os.path.join(root, file)
             if any(file_path.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS):
                 all_files.append(file_path)
+    
+    # Process zarr directories first (they take precedence)
+    for zarr_path in zarr_dirs:
+        all_files.append(zarr_path)
 
     renamed_count = 0
     message = ""
@@ -1700,21 +1846,52 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
                         f"Target file already exists, skipping: {new_file_path}")
                     continue
 
-                # Perform the rename
+                # For zarr directories, add small delay and permission check
+                if file_path.endswith('.zarr'):
+                    import time
+                    time.sleep(1)  # Brief delay to let any file handles settle
+                    
+                    # Check basic permissions
+                    try:
+                        # Test if we can write to the parent directory
+                        parent_dir = os.path.dirname(file_path)
+                        test_file = os.path.join(parent_dir, '.test_write_permission')
+                        with open(test_file, 'w') as f:
+                            f.write('test')
+                        os.remove(test_file)
+                    except Exception as perm_e:
+                        logger.error(f"Permission check failed for {parent_dir}: {perm_e}")
+                        message += f"\nWarning: No write permission for zarr rename in {parent_dir}: {perm_e}"
+                        continue
+
+                # Perform the rename (works for both files and directories)
                 os.rename(file_path, new_file_path)
                 renamed_count += 1
-                logger.info(f"Successfully renamed file: {new_file_path}")
+                file_type = "directory" if os.path.isdir(new_file_path) else "file"
+                logger.info(f"Successfully renamed {file_type}: {new_file_path}")
 
+            else:
+                logger.debug(
+                    f"No rename needed for: {os.path.basename(file_path)}")
+
+        except PermissionError as pe:
+            logger.error(f"Permission denied renaming {file_path}: {pe}")
+            logger.error(f"Source exists: {os.path.exists(file_path)}, Source is dir: {os.path.isdir(file_path)}")
+            logger.error(f"Parent dir writable: {os.access(os.path.dirname(file_path), os.W_OK)}")
+            if file_path.endswith('.zarr'):
+                message += f"\\nWarning: Permission denied renaming zarr directory {os.path.basename(file_path)}. This is often due to filesystem permissions or the directory being in use. The zarr will be imported with its original name."
+            else:
+                message += f"\\nWarning: Permission denied renaming {os.path.basename(file_path)}: {pe}"
         except Exception as e:
-            logger.error(f"Failed to rename file {file_path}: {e}")
+            logger.error(f"Failed to rename file/directory {file_path}: {e}")
             message += f"\\nWarning: Failed to rename {os.path.basename(file_path)}: {e}"
 
     if renamed_count > 0:
-        message += f"\\nRenamed {renamed_count} files in importer storage"
-        logger.info(f"Completed renaming {renamed_count} files")
+        message += f"\\nRenamed {renamed_count} files/directories in importer storage"
+        logger.info(f"Completed renaming {renamed_count} files/directories")
     else:
-        message += "\\nNo files needed renaming"
-        logger.info("No files required renaming")
+        message += "\\nNo files/directories needed renaming"
+        logger.info("No files/directories required renaming")
 
     return message
 
@@ -2050,7 +2227,7 @@ def process_importer_workflow(
     logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
         group_name, username, "Dataset", dataset_id,
-        permanent_storage_path, wf_id)
+        permanent_storage_path, wf_id, client)
 
     if orders:
         message += f"\nCreated {len(orders)} upload orders for biomero-importer:"
@@ -2636,6 +2813,16 @@ def runScript() -> None:
                            grouping="06.4",
                            description="A new name for the imported images.",
                            default="{original_file}_IMPORTED.{ext}"),
+            scripts.Bool("Import_Label_Zarrs",
+                         optional=True,
+                         grouping="06.5",
+                         description="Also import label zarr directories (segmentation results) as separate datasets",
+                         default=True),
+            scripts.Bool("Import_Only_Labels",
+                         optional=True,
+                         grouping="06.6",
+                         description="Import ONLY label zarr directories (requires Import_Label_Zarrs=true). Skips main image import.",
+                         default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE,
                          optional=False,
                          grouping="07",
