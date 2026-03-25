@@ -85,10 +85,12 @@ else:
 CONVERSION_SCRIPTS = [constants.CONVERSION_SCRIPT]
 DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
              rstring(constants.transfer.DATA_TYPE_IMAGE),
-             rstring(constants.transfer.DATA_TYPE_PLATE)]
+             rstring(constants.transfer.DATA_TYPE_PLATE),
+             rstring(constants.transfer.DATA_TYPE_SCREEN)]
 OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_PARENT,
                   constants.workflow.OUTPUT_NEW_DATASET,
+                  constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
 VERSION = "2.3.0"
@@ -324,6 +326,10 @@ def runScript():
             omscripts.String(constants.workflow.OUTPUT_NEW_DATASET, optional=True,
                              grouping="02.5",
                              description="Name for the new dataset w/ result images",
+                             default=constants.workflow.NO),
+            omscripts.String(constants.workflow.OUTPUT_NEW_SCREEN, optional=True,
+                             grouping="02.5.1",
+                             description="Name for the new screen w/ result images",
                              default=constants.workflow.NO),
             omscripts.Bool(constants.workflow.OUTPUT_DUPLICATES,
                            optional=True,
@@ -1263,6 +1269,21 @@ def importResultsToOmero(client: omscripts.client,
 
     else:
         inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET] = rbool(
+            False)
+
+    if selected_output[constants.workflow.OUTPUT_NEW_SCREEN]:
+        inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN] = rbool(
+            True)
+        inputs[
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME
+        ] = client.getInput(constants.workflow.OUTPUT_NEW_SCREEN)
+        # duplicate screen name check
+        inputs[
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE
+        ] = client.getInput(constants.workflow.OUTPUT_DUPLICATES)
+
+    else:
+        inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN] = rbool(
             False)
 
     if selected_output[constants.workflow.OUTPUT_ATTACH]:

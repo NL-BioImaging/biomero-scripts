@@ -680,6 +680,32 @@ def getUserProjects() -> List[Any]:
         client.closeSession()
 
 
+def getUserScreens() -> List[Any]:
+    """Get OMERO Screens that user has access to.
+
+    Returns:
+        List of screen IDs and names formatted as strings.
+
+    Raises:
+        Exception: If connection or query fails.
+    """
+    try:
+        client = omero.client()
+        client.createSession()
+        conn = omero.gateway.BlitzGateway(client_obj=client)
+        conn.SERVICE_OPTS.setOmeroGroup(-1)
+        objparams = [rstring('%d: %s' % (d.id, d.getName()))
+                     for d in conn.getObjects('Screen')
+                     if type(d) == omero.gateway.ScreenWrapper]
+        if not objparams:
+            objparams = [rstring('<No objects found>')]
+        return objparams
+    except Exception as e:
+        return ['Exception: %s' % e]
+    finally:
+        client.closeSession()
+
+
 def get_current_user_groups(conn: BlitzGateway) -> List[str]:
     """Get OMERO groups that the current user belongs to.
     
@@ -1899,10 +1925,11 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
 def add_metadata_to_imported_images(
     conn: BlitzGateway,
     slurmClient: SlurmClient,
-    dataset_id: int,
+    destination_id: int,
     order_uuids: List[str],
     wf_id: str,
-    job_id: str
+    job_id: str,
+    destination_type: str = "Dataset"
 ) -> str:
     """Add metadata to images imported by biomero-importer using UUID search.
 
@@ -1913,10 +1940,11 @@ def add_metadata_to_imported_images(
     Args:
         conn: OMERO BlitzGateway connection
         slurmClient: SlurmClient instance
-        dataset_id: ID of the dataset containing imported images  
+        destination_id: ID of the dataset/screen containing imported images  
         order_uuids: List of upload order UUIDs to search for
         wf_id: Workflow UUID for metadata
         job_id: SLURM job ID for metadata
+        destination_type: Type of destination ("Dataset" or "Screen")
 
     Returns:
         Status message describing metadata addition results
@@ -1971,14 +1999,29 @@ def add_metadata_to_imported_images(
         imported_images = unique_images
 
         if not imported_images:
-            # Fallback: check dataset for any images (less precise but better than nothing)
+            # Fallback: check destination for any images (less precise but better than nothing)
             logger.info(
-                f"No images found with order UUIDs, checking dataset {dataset_id}")
-            dataset = conn.getObject("Dataset", dataset_id)
-            if dataset:
-                imported_images = list(dataset.listChildren())
-                logger.info(
-                    f"Fallback: found {len(imported_images)} images in dataset")
+                f"No images found with order UUIDs, checking {destination_type.lower()} {destination_id}")
+            
+            if destination_type.lower() == "screen":
+                # For screens, search plates within the screen, then images within those plates
+                screen_obj = conn.getObject("Screen", destination_id)
+                if screen_obj:
+                    for plate in screen_obj.listChildren():
+                        for well in plate.listChildren():
+                            for ws in well.listChildren():
+                                img = ws.getImage()
+                                if img:
+                                    imported_images.append(img)
+                    logger.info(
+                        f"Fallback: found {len(imported_images)} images in screen")
+            else:
+                # For datasets, search images directly
+                dataset_obj = conn.getObject("Dataset", destination_id)
+                if dataset_obj:
+                    imported_images = list(dataset_obj.listChildren())
+                    logger.info(
+                        f"Fallback: found {len(imported_images)} images in dataset")
 
         if not imported_images:
             return "No imported images found for metadata addition"
@@ -2148,11 +2191,11 @@ def process_importer_workflow(
     task_id: Optional[UUID] = None
 
 ) -> str:
-    """Process dataset image imports via biomero-importer from comprehensive permanent storage.
+    """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
 
     This function processes image imports using the biomero-importer while ALL workflow
     results (images, CSVs, metadata, etc.) are preserved in permanent storage for
-    complete data archival and future analysis.
+    complete data archival and future analysis. Supports both dataset and screen destinations.
 
     Args:
         client: OMERO script client.
@@ -2171,66 +2214,93 @@ def process_importer_workflow(
     message = ""
     logger.info("Processing importer workflow...")
 
-    # Handle file renaming if enabled
-    rename_enabled = unwrap(client.getInput(
-        constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
+    # Determine destination type (dataset or screen)
+    use_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET))
+    use_screen = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN))
+    
+    if use_dataset and use_screen:
+        logger.warning("Both dataset and screen output selected - using dataset")
+        use_screen = False
+    elif not use_dataset and not use_screen:
+        logger.error("Neither dataset nor screen output selected")
+        return "Error: No valid destination type selected"
+    
+    destination_type = "Screen" if use_screen else "Dataset"
+    logger.info(f"Selected destination type: {destination_type}")
 
-    if rename_enabled:
-        logger.info("Renaming files in importer storage...")
-        rename_message = rename_files_in_importer_storage(client,
-                                                          permanent_storage_path)
-        message += rename_message
-        logger.info("File renaming completed")
+    # Handle file renaming if enabled (only for datasets, skip for screens)
+    if use_dataset:
+        rename_enabled = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
+
+        if rename_enabled:
+            logger.info("Renaming files in importer storage...")
+            rename_message = rename_files_in_importer_storage(client,
+                                                              permanent_storage_path)
+            message += rename_message
+            logger.info("File renaming completed")
+        else:
+            logger.info("Skipping file renaming (not enabled)")
     else:
-        logger.info("Skipping file renaming (not enabled)")
+        logger.info("Skipping file renaming for screen destination")
 
-    # Get dataset info from existing parameters
-    dataset_name = unwrap(client.getInput(
-        constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
-    logger.info(f"Setting up dataset '{dataset_name}'...")
+    # Get destination info from parameters
+    if use_screen:
+        destination_name = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME))
+        create_new_destination = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE))
+    else:
+        destination_name = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
+        create_new_destination = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
+    
+    logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
+    destination_id = None
 
-    # Check if dataset exists or create new one
-    create_new_dataset = unwrap(client.getInput(
-        constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
-    dataset_id = None
-
-    if not create_new_dataset:
+    # Check if destination exists or create new one
+    if not create_new_destination:
         try:
-            existing_datasets_w_name = [d.id for d in conn.getObjects(
-                'Dataset', attributes={"name": dataset_name})]
-            if existing_datasets_w_name:
-                dataset_id = existing_datasets_w_name[0]
-                create_new_dataset = False
-                logger.info(f"Using existing dataset ID: {dataset_id}")
+            existing_objects_w_name = [d.id for d in conn.getObjects(
+                destination_type, attributes={"name": destination_name})]
+            if existing_objects_w_name:
+                destination_id = existing_objects_w_name[0]
+                create_new_destination = False
+                logger.info(f"Using existing {destination_type.lower()} ID: {destination_id}")
             else:
-                create_new_dataset = True
-                logger.info("Dataset not found, will create new one")
+                create_new_destination = True
+                logger.info(f"{destination_type} not found, will create new one")
         except Exception:
-            create_new_dataset = True
+            create_new_destination = True
             logger.info(
-                "Error checking for existing dataset, will create new one")
+                f"Error checking for existing {destination_type.lower()}, will create new one")
 
-    if create_new_dataset:
-        logger.info("Creating new dataset...")
-        dataset = omero.model.DatasetI()
-        dataset.name = rstring(dataset_name)
+    if create_new_destination:
+        logger.info(f"Creating new {destination_type.lower()}...")
+        if use_screen:
+            destination_obj = omero.model.ScreenI()
+        else:
+            destination_obj = omero.model.DatasetI()
+        
+        destination_obj.name = rstring(destination_name)
         desc = f"Images from SLURM job {slurm_job_id}"
         if wf_id:
             desc += f" (Workflow {wf_id})"
-        dataset.description = rstring(desc)
+        destination_obj.description = rstring(desc)
         update_service = conn.getUpdateService()
-        dataset = update_service.saveAndReturnObject(dataset)
-        dataset_id = dataset.id.val
-        logger.info(f"Created new dataset ID: {dataset_id}")
+        destination_obj = update_service.saveAndReturnObject(destination_obj)
+        destination_id = destination_obj.id.val
+        logger.info(f"Created new {destination_type.lower()} ID: {destination_id}")
 
     # Create upload order for images only
     logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
-        group_name, username, "Dataset", dataset_id,
+        group_name, username, destination_type, destination_id,
         permanent_storage_path, wf_id, client)
 
     if orders:
-        message += f"\nCreated {len(orders)} upload orders for biomero-importer:"
+        message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
         for order in orders:
             file_count = len(order.get('Files', []))
             message += f"\n  - Order {order['UUID']}: {file_count} files"
@@ -2252,14 +2322,14 @@ def process_importer_workflow(
 
         if all_successful:
             logger.info("All imports completed successfully")
-            message += "\nAll dataset imports completed successfully!"
+            message += f"\nAll {destination_type.lower()} imports completed successfully!"
 
             # Post-processing: Add metadata to newly imported images using UUID search
             logger.info("Adding metadata to imported images...")
             order_uuids = [order.get('UUID')
                            for order in orders if order.get('UUID')]
             post_processing_message = add_metadata_to_imported_images(
-                conn, slurmClient, dataset_id, order_uuids, wf_id, slurm_job_id)
+                conn, slurmClient, destination_id, order_uuids, wf_id, slurm_job_id, destination_type)
             if post_processing_message:
                 message += f"\n{post_processing_message}"
         else:
@@ -2813,6 +2883,21 @@ def runScript() -> None:
                            grouping="06.4",
                            description="A new name for the imported images.",
                            default="{original_file}_IMPORTED.{ext}"),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_SCREEN,
+                         optional=False,
+                         grouping="07",
+                         description="Import all result as a new screen via biomero-importer",
+                         default=False),
+            scripts.String(constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME,
+                           optional=True,
+                           grouping="07.1",
+                           description="Name for the new screen w/ results",
+                           default="Imported_Results"),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE,
+                         optional=True,
+                         grouping="07.2",
+                         description="If there is already a screen with this name, still create new one? (True) or add to it? (False) ",
+                         default=False),
             scripts.Bool("Import_Label_Zarrs",
                          optional=True,
                          grouping="06.5",
@@ -2944,6 +3029,8 @@ def runScript() -> None:
             # Determine which operations are requested
             use_importer_for_datasets = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_NEW_DATASET))
+            use_importer_for_screens = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_SCREEN))
             process_csv_tables = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_TABLE))
             process_attachments = (unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)) or
@@ -2952,11 +3039,11 @@ def runScript() -> None:
 
             # Debug the workflow decisions
             logger.info(
-                f"Workflow decisions: use_importer_for_datasets={use_importer_for_datasets}, process_csv_tables={process_csv_tables}, process_attachments={process_attachments}")
+                f"Workflow decisions: use_importer_for_datasets={use_importer_for_datasets}, use_importer_for_screens={use_importer_for_screens}, process_csv_tables={process_csv_tables}, process_attachments={process_attachments}")
 
-            # Initialize importer only if needed for dataset imports
+            # Initialize importer only if needed for dataset or screen imports
             importer_initialized = False
-            if use_importer_for_datasets:
+            if use_importer_for_datasets or use_importer_for_screens:
                 importer_initialized = initialize_importer()
 
             # Ask job State
@@ -3073,8 +3160,8 @@ def runScript() -> None:
                     logger.warning(
                         f"Failed to copy log file to permanent storage: {_log_copy_err}")
 
-            # IMPORTER WORKFLOW - Dataset image imports
-            if use_importer_for_datasets:
+            # IMPORTER WORKFLOW - Dataset and screen image imports
+            if use_importer_for_datasets or use_importer_for_screens:
                 importer_message = process_importer_workflow(
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
