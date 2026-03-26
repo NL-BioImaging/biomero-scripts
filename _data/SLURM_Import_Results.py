@@ -1747,8 +1747,8 @@ def create_upload_orders_for_results(
     orders = []
 
     # Check if label zarr import is enabled
-    import_label_zarrs = unwrap(client.getInput("Import_Label_Zarrs")) if client else True
-    import_only_labels = unwrap(client.getInput("Import_Only_Labels")) if client else True
+    import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
+    import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
     
     # First check if there are actually label zarr files available
     label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
@@ -1931,16 +1931,15 @@ def add_metadata_to_imported_images(
     job_id: str,
     destination_type: str = "Dataset"
 ) -> str:
-    """Add metadata to images imported by biomero-importer using UUID search.
+    """Add metadata to images/plates imported by biomero-importer using UUID search.
 
-    Searches for images that have the specific import order UUIDs in their metadata
-    (added by biomero-importer) and adds workflow metadata annotations.
-    Much more reliable than time-based approaches.
+    For Dataset workflows: Searches for images and adds metadata to individual images.
+    For Screen workflows: Searches for plates and adds metadata to plates themselves.
 
     Args:
         conn: OMERO BlitzGateway connection
         slurmClient: SlurmClient instance
-        destination_id: ID of the dataset/screen containing imported images  
+        destination_id: ID of the dataset/screen containing imported images/plates
         order_uuids: List of upload order UUIDs to search for
         wf_id: Workflow UUID for metadata
         job_id: SLURM job ID for metadata
@@ -1950,6 +1949,12 @@ def add_metadata_to_imported_images(
         Status message describing metadata addition results
     """
     try:
+        # For Screen destinations (plate workflows), add metadata to plates
+        if destination_type.lower() == "screen":
+            return add_metadata_to_imported_plates(
+                conn, slurmClient, destination_id, order_uuids, wf_id, job_id)
+        
+        # For Dataset destinations (image workflows), add metadata to images
         if not order_uuids:
             return "No upload order UUIDs provided for image search"
 
@@ -1999,35 +2004,17 @@ def add_metadata_to_imported_images(
         imported_images = unique_images
 
         if not imported_images:
-            # Fallback: check destination for any images (less precise but better than nothing)
-            logger.info(
-                f"No images found with order UUIDs, checking {destination_type.lower()} {destination_id}")
-            
-            if destination_type.lower() == "screen":
-                # For screens, search plates within the screen, then images within those plates
-                screen_obj = conn.getObject("Screen", destination_id)
-                if screen_obj:
-                    for plate in screen_obj.listChildren():
-                        for well in plate.listChildren():
-                            for ws in well.listChildren():
-                                img = ws.getImage()
-                                if img:
-                                    imported_images.append(img)
-                    logger.info(
-                        f"Fallback: found {len(imported_images)} images in screen")
-            else:
-                # For datasets, search images directly
-                dataset_obj = conn.getObject("Dataset", destination_id)
-                if dataset_obj:
-                    imported_images = list(dataset_obj.listChildren())
-                    logger.info(
-                        f"Fallback: found {len(imported_images)} images in dataset")
+            # Fallback for datasets: search images directly (dataset workflows only)
+            logger.info(f"No images found with order UUIDs, checking dataset {destination_id}")
+            dataset_obj = conn.getObject("Dataset", destination_id)
+            if dataset_obj:
+                imported_images = list(dataset_obj.listChildren())
+                logger.info(f"Fallback: found {len(imported_images)} images in dataset")
 
         if not imported_images:
             return "No imported images found for metadata addition"
 
-        logger.info(
-            f"Adding metadata to {len(imported_images)} imported images")
+        logger.info(f"Adding metadata to {len(imported_images)} imported images")
 
         # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
         metadata_added = 0
@@ -2037,11 +2024,9 @@ def add_metadata_to_imported_images(
                 add_image_annotations(
                     conn, slurmClient, img.getId(), job_id, wf_id=wf_id)
                 metadata_added += 1
-                logger.debug(
-                    f"Added metadata to image {img.getId()}: {img.getName()}")
+                logger.debug(f"Added metadata to image {img.getId()}: {img.getName()}")
             except Exception as img_error:
-                logger.warning(
-                    f"Failed to add metadata to image {img.getId()}: {img_error}")
+                logger.warning(f"Failed to add metadata to image {img.getId()}: {img_error}")
 
         message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
         logger.info(message)
@@ -2054,8 +2039,136 @@ def add_metadata_to_imported_images(
         return error_msg
 
 
+def add_metadata_to_imported_plates(
+    conn: BlitzGateway,
+    slurmClient: SlurmClient,
+    destination_id: int,
+    order_uuids: List[str],
+    wf_id: str,
+    job_id: str
+) -> str:
+    """Add metadata to plates imported by biomero-importer using UUID search.
+    
+    For plate workflows, add metadata to the plate itself rather than individual images.
+    This is more appropriate as the workflow operates on the plate level.
+    
+    Args:
+        conn: OMERO BlitzGateway connection
+        slurmClient: SlurmClient instance
+        destination_id: Screen ID containing imported plates
+        order_uuids: List of upload order UUIDs to search for
+        wf_id: Workflow UUID for metadata
+        job_id: SLURM job ID for metadata
+        
+    Returns:
+        Status message describing metadata addition results
+    """
+    try:
+        if not order_uuids:
+            return "No upload order UUIDs provided for plate search"
+
+        logger.info(f"Searching for plates imported with UUIDs: {order_uuids}")
+
+        # Search for plates with any of the import order UUIDs in their annotations
+        query_service = conn.getQueryService()
+        imported_plates = []
+
+        for uuid in order_uuids:
+            # HQL to find plates with this specific UUID in map annotations
+            hql = """
+            SELECT DISTINCT plate.id, plate.name
+            FROM Plate plate
+            JOIN plate.annotationLinks pal
+            JOIN pal.child ann
+            JOIN ann.mapValue mv
+            WHERE TYPE(ann) = MapAnnotation
+            AND mv.value = :uuid
+            """
+
+            import omero.sys
+            params = omero.sys.ParametersI()
+            params.addString("uuid", uuid)
+
+            results = query_service.projection(hql, params, conn.SERVICE_OPTS)
+
+            if results:
+                plate_ids = [result[0].val for result in results]
+                uuid_plates = [conn.getObject("Plate", plate_id)
+                              for plate_id in plate_ids]
+                uuid_plates = [plate for plate in uuid_plates if plate is not None]
+                imported_plates.extend(uuid_plates)
+                logger.info(f"Found {len(uuid_plates)} plates for UUID {uuid}")
+            else:
+                logger.warning(f"No plates found with UUID {uuid}")
+
+        # Remove duplicates
+        seen_ids = set()
+        unique_plates = []
+        for plate in imported_plates:
+            if plate.getId() not in seen_ids:
+                unique_plates.append(plate)
+                seen_ids.add(plate.getId())
+        imported_plates = unique_plates
+
+        if not imported_plates:
+            # Fallback: check screen for recently imported plates
+            logger.info(f"No plates found with order UUIDs, checking screen {destination_id}")
+            screen_obj = conn.getObject("Screen", destination_id)
+            if screen_obj:
+                # Get all plates and try to find ones with import UUIDs
+                all_plates = list(screen_obj.listChildren())
+                for plate in all_plates:
+                    # Check if this plate has any of our UUIDs in its metadata
+                    annotations = plate.listAnnotations()
+                    for ann in annotations:
+                        if hasattr(ann, 'getMapValue') and ann.getMapValue():
+                            for key, value in ann.getMapValue():
+                                if value in order_uuids:
+                                    imported_plates.append(plate)
+                                    break
+                            if plate in imported_plates:
+                                break
+                logger.info(f"Fallback: found {len(imported_plates)} plates in screen with matching UUIDs")
+
+        if not imported_plates:
+            return "No imported plates found for metadata addition"
+
+        logger.info(f"Adding metadata to {len(imported_plates)} imported plates")
+
+        # Add metadata to each imported plate
+        metadata_added = 0
+        for plate in imported_plates:
+            try:
+                # Add annotations to the plate (using same pattern but for plate objects)
+                add_plate_annotations(
+                    conn, slurmClient, plate.getId(), job_id, wf_id=wf_id)
+                metadata_added += 1
+                logger.debug(f"Added metadata to plate {plate.getId()}: {plate.getName()}")
+            except Exception as plate_error:
+                logger.warning(f"Failed to add metadata to plate {plate.getId()}: {plate_error}")
+
+        message = f"Added workflow metadata to {metadata_added}/{len(imported_plates)} imported plates"
+        logger.info(message)
+        return message
+
+    except Exception as e:
+        error_msg = f"Failed to add metadata to imported plates: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return error_msg
+
+
+def add_plate_annotations(conn, slurmClient, plate_id, job_id, wf_id=None):
+    """Add workflow metadata annotations to a plate"""
+    add_object_annotations(conn, slurmClient, "Plate", plate_id, job_id, wf_id)
+
+
 def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
-    object_type = "Image"  # Set to Image when it's a dataset
+    """Add workflow metadata annotations to an image"""
+    add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
+
+
+def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf_id=None):
+    """Generic function to add workflow metadata annotations to any OMERO object (Image, Plate, etc.)"""
     ns_wf = "biomero/workflow"
     if slurmClient.track_workflows and wf_id:
         try:
@@ -2324,8 +2437,8 @@ def process_importer_workflow(
             logger.info("All imports completed successfully")
             message += f"\nAll {destination_type.lower()} imports completed successfully!"
 
-            # Post-processing: Add metadata to newly imported images using UUID search
-            logger.info("Adding metadata to imported images...")
+            # Post-processing: Add metadata to newly imported images/plates using UUID search
+            logger.info(f"Adding metadata to imported {destination_type.lower()}s...")
             order_uuids = [order.get('UUID')
                            for order in orders if order.get('UUID')]
             post_processing_message = add_metadata_to_imported_images(
@@ -2493,7 +2606,7 @@ def cleanup_resources(
     message = ""
 
     # Cleanup SLURM files if requested
-    if unwrap(client.getInput("Cleanup?")):
+    if unwrap(client.getInput(constants.CLEANUP)):
         logger.info(
             "=== CLEANUP: Removing temporary files (PRESERVING importer storage) ===")
 
@@ -2829,118 +2942,118 @@ def runScript() -> None:
             scripts.String(constants.results.OUTPUT_SLURM_JOB_ID,
                            optional=False, grouping="01.1",
                            values=_oldjobs),
-            scripts.String("workflow_uuid",
+            scripts.String(constants.results.WORKFLOW_UUID,
                            optional=True, grouping="01.2",
                            description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
-            scripts.String("Task_ID",
+            scripts.String(constants.results.TASK_ID,
                            optional=True, grouping="01.3",
                            description="Task ID for biomero workflow tracking and status updates"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
-                         grouping="03",
+                         grouping="02",
                          description="Attach all results in zip to a project",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PROJECT_ID,
-                         optional=True, grouping="03.1",
+                         optional=True, grouping="02.1",
                          description="Project to attach workflow results to",
                          values=_projects),
-            scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
-                         optional=False,
-                         grouping="05",
-                         description="Attach all results to original images as attachments",
-                         default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
                          optional=False,
-                         grouping="04",
+                         grouping="03",
                          description="Attach all results in zip to a plate",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
-                         optional=True, grouping="04.1",
+                         optional=True, grouping="03.1",
                          description="Plate to attach workflow results to",
                          values=_plates),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
+                         optional=False,
+                         grouping="04",
+                         description="Attach all results to original images as attachments",
+                         default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET,
                          optional=False,
-                         grouping="06",
+                         grouping="05",
                          description="Import all result as a new dataset via biomero-importer",
                          default=True),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME,
                            optional=True,
-                           grouping="06.1",
+                           grouping="05.1",
                            description="Name for the new dataset w/ results",
                            default="Imported_Results"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE,
                          optional=True,
-                         grouping="06.2",
+                         grouping="05.2",
                          description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
-                         grouping="06.3",
+                         grouping="05.3",
                          description="Rename all imported files as below. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}_IMPORTED.{ext}",
                          default=True),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME,
                            optional=True,
-                           grouping="06.4",
+                           grouping="05.4",
                            description="A new name for the imported images.",
                            default="{original_file}_IMPORTED.{ext}"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_SCREEN,
                          optional=False,
-                         grouping="07",
+                         grouping="06",
                          description="Import all result as a new screen via biomero-importer",
                          default=False),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME,
                            optional=True,
-                           grouping="07.1",
+                           grouping="06.1",
                            description="Name for the new screen w/ results",
                            default="Imported_Results"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE,
                          optional=True,
-                         grouping="07.2",
+                         grouping="06.2",
                          description="If there is already a screen with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
-            scripts.Bool("Import_Label_Zarrs",
+            scripts.Bool(constants.results.IMPORT_LABEL_ZARRS,
                          optional=True,
-                         grouping="06.5",
+                         grouping="07",
                          description="Also import label zarr directories (segmentation results) as separate datasets",
                          default=True),
-            scripts.Bool("Import_Only_Labels",
+            scripts.Bool(constants.results.IMPORT_ONLY_LABELS,
                          optional=True,
-                         grouping="06.6",
+                         grouping="07.1",
                          description="Import ONLY label zarr directories (requires Import_Label_Zarrs=true). Skips main image import.",
                          default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE,
                          optional=False,
-                         grouping="07",
+                         grouping="08",
                          description="Add all csv files as OMERO.tables to the chosen dataset",
                          default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE_DATASET,
                          optional=True,
-                         grouping="07.1",
+                         grouping="08.1",
                          description="Attach to the dataset chosen below",
                          default=True),
             scripts.List(constants.results.OUTPUT_ATTACH_TABLE_DATASET_ID,
                          optional=True,
-                         grouping="07.2",
+                         grouping="08.2",
                          description="Dataset to attach workflow results to",
                          values=_datasets),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE_PLATE,
                          optional=True,
-                         grouping="07.3",
+                         grouping="08.3",
                          description="Attach to the plate chosen below",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_TABLE_PLATE_ID,
                          optional=True,
-                         grouping="07.4",
+                         grouping="08.4",
                          description="Plate to attach workflow results to",
                          values=_plates),
-            scripts.Bool("Cleanup?",
-                         optional=True,
-                         grouping="08",
-                         description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
-                         default=True),
-            scripts.Bool("Test_Write_Permissions_Only",
+            scripts.Bool(constants.CLEANUP,
                          optional=True,
                          grouping="09",
+                         description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
+                         default=True),
+            scripts.Bool(constants.results.TEST_WRITE_PERMISSIONS_ONLY,
+                         optional=True,
+                         grouping="09.1",
                          description="DRY-RUN ONLY: Test write permissions to importer storage and exit (no actual import). " + \
                                     "Use this to validate storage configuration before running expensive workflows.",
                          default=False),
@@ -2971,7 +3084,7 @@ def runScript() -> None:
             logger.info(f"Import Results: {scriptParams}\n")
 
             # Check if this is a write access validation request (DRY-RUN ONLY)
-            test_write_only = unwrap(client.getInput("Test_Write_Permissions_Only")) or False
+            test_write_only = unwrap(client.getInput(constants.results.TEST_WRITE_PERMISSIONS_ONLY)) or False
             if test_write_only:
                 logger.info("DRY-RUN: Testing write access for importer storage only")
                 
@@ -2989,7 +3102,7 @@ def runScript() -> None:
             # Get task_id if provided for status updates
             task_id = None
             try:
-                task_id_input = unwrap(client.getInput("Task_ID"))
+                task_id_input = unwrap(client.getInput(constants.results.TASK_ID))
                 if task_id_input and task_id_input.strip():
                     # Convert to UUID object
                     task_id = uuid.UUID(task_id_input.strip())
@@ -3008,7 +3121,7 @@ def runScript() -> None:
             # Get and validate workflow ID using proper UUID parsing
             script_wf_id = None
             try:
-                wf_uuid_input = unwrap(client.getInput("workflow_uuid"))
+                wf_uuid_input = unwrap(client.getInput(constants.results.WORKFLOW_UUID))
                 if wf_uuid_input and wf_uuid_input.strip():
                     # Validate UUID format immediately
                     script_wf_id = uuid.UUID(wf_uuid_input.strip())
@@ -3246,7 +3359,7 @@ def runScript() -> None:
             # Always try to set outputs - but don't overwrite failure messages
             try:
                 if wf_id is not None:
-                    client.setOutput("Workflow_UUID", rstring(str(wf_id)))
+                    client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
                 # Only set success message if we haven't already set a failure message
                 if not message.startswith("FAILED:"):
                     client.setOutput("Message", rstring(str(message)))

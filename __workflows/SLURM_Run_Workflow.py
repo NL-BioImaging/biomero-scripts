@@ -160,7 +160,7 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
         
         # Prepare inputs for write access validation (DRY-RUN ONLY)
         inputs = {
-            "Test_Write_Permissions_Only": rbool(True),
+            constants.results.TEST_WRITE_PERMISSIONS_ONLY: rbool(True),
             constants.results.OUTPUT_SLURM_JOB_ID: rstring(dummy_job_id)
         }
         
@@ -299,7 +299,7 @@ def runScript():
             omscripts.Bool(constants.workflow.EMAIL, grouping="01.3",
                            description=email_descr,
                            default=True),
-            omscripts.Bool("Use_ZARR_Format", grouping="01.4",
+            omscripts.Bool(constants.workflow.USE_ZARR_FORMAT, grouping="01.4",
                            description="Skip TIFF conversion and run "
                            "workflows directly on ZARR data (experimental). "
                            "Use this for workflows that support ZARR input.",
@@ -341,7 +341,7 @@ def runScript():
                            grouping="02.8",
                            description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
                            default=True),
-            omscripts.Bool("Cleanup?",
+            omscripts.Bool(constants.CLEANUP,
                            optional=True,
                            grouping="02.9", 
                            description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
@@ -488,7 +488,7 @@ def runScript():
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
             # Get ZARR format preference
-            use_zarr_format = unwrap(client.getInput("Use_ZARR_Format"))
+            use_zarr_format = unwrap(client.getInput(constants.workflow.USE_ZARR_FORMAT))
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")
@@ -868,11 +868,11 @@ def convertDataOnSLURM(client: omscripts.client,
         raise Exception(f"Conversion script not found: {CONVERSION_SCRIPTS}")
 
     inputs = {
-        "Input data": rstring(zipfile),
-        "Source format": rstring(source_format),
-        "Target format": rstring(target_format),
-        "Cleanup?": client.getInput("Cleanup?") or rbool(True),
-        "Parent_Workflow_ID": rstring(str(wf_id))
+        constants.conversion.INPUT_DATA: rstring(zipfile),
+        constants.conversion.SOURCE_FORMAT: rstring(source_format),
+        constants.conversion.TARGET_FORMAT: rstring(target_format),
+        constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
+        constants.conversion.PARENT_WORKFLOW_ID: rstring(str(wf_id))
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
@@ -1175,8 +1175,8 @@ def importResultsToOmero(client: omscripts.client,
     inputs = {
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
         constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id)),
-        "Cleanup?": client.getInput("Cleanup?") or rbool(True),
-        "Workflow_UUID": rstring(str(wf_id))
+        constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
+        constants.results.WORKFLOW_UUID_OUTPUT: rstring(str(wf_id))
     }
 
     # Get a 'parent' dataset or plate of input images
