@@ -49,7 +49,7 @@ CONV_OPTIONS_SOURCE = ['zarr']
 CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 
 # Version constant for easy version management
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 
 def runScript():
