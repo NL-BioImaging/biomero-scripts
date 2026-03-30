@@ -380,6 +380,16 @@ def runScript():
                                     description=version_descr,
                                     values=_workflow_available_versions[wf])
             input_list.append(wf_v)
+            # List available custom models for this workflow
+            available_models = slurmClient.get_available_models(wf)
+            if available_models:
+                models_descr = f"Custom models available for {wf}"
+                wf_m = omscripts.String(f"{wf}_Models",
+                                        grouping=f"{parameter_group}.0.1",
+                                        description=models_descr,
+                                        values=available_models,
+                                        optional=True)
+                input_list.append(wf_m)
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
