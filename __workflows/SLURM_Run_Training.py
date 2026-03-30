@@ -452,9 +452,9 @@ def upload_results(conn, slurmClient, folder_name, dataset_ids, slurm_job_id):
                 desc=f"Trained model: {model_id}",
             )
             # Rename file to zip_filename
-            orig_file = file_ann.getFile()
-            orig_file.setName(zip_filename)
-            orig_file.save()
+            orig_file = file_ann.getFile()._obj
+            orig_file.setName(rstring(zip_filename))
+            conn.getUpdateService().saveObject(orig_file)
 
             dataset.linkAnnotation(file_ann)
             print(f"Model zip uploaded as FileAnnotation {file_ann.getId()}")
@@ -570,15 +570,19 @@ def runScript():
         workflow = unwrap(client.getInput("Workflow"))
         version = unwrap(client.getInput("Workflow_Version"))
         data_mode = unwrap(client.getInput("Data_Mode"))
-        mask_suffix = unwrap(client.getInput("Mask_Suffix")) or "_label"
-        val_split = unwrap(client.getInput("Val_Split")) or 0.2
-        test_split = unwrap(client.getInput("Test_Split")) or 0.0
-        model_name = unwrap(client.getInput("Model_Name")) or "my_model"
-        n_epochs = unwrap(client.getInput("N_Epochs")) or 100
-        learning_rate = unwrap(client.getInput("Learning_Rate")) or 0.00001
-        weight_decay = unwrap(client.getInput("Weight_Decay")) or 0.1
-        batch_size = unwrap(client.getInput("Batch_Size")) or 1
-        channels_str = unwrap(client.getInput("Channels")) or "0,0"
+        def get_input(name, default):
+            val = unwrap(client.getInput(name))
+            return default if val is None else val
+
+        mask_suffix = get_input("Mask_Suffix", "_label")
+        val_split = get_input("Val_Split", 0.2)
+        test_split = get_input("Test_Split", 0.0)
+        model_name = get_input("Model_Name", "my_model")
+        n_epochs = get_input("N_Epochs", 100)
+        learning_rate = get_input("Learning_Rate", 0.00001)
+        weight_decay = get_input("Weight_Decay", 0.1)
+        batch_size = get_input("Batch_Size", 1)
+        channels_str = get_input("Channels", "0,0")
 
         channels = [int(c.strip()) for c in channels_str.split(",")]
 
@@ -616,10 +620,11 @@ def runScript():
             # Poll for completion
             msg = poll_job(slurmClient, slurm_job_id, conn, client)
 
-            # Upload results back to OMERO
-            upload_results(
-                conn, slurmClient, folder_name,
-                ids, slurm_job_id)
+            # Upload results back to OMERO (only if completed)
+            if "COMPLETED" in msg:
+                upload_results(
+                    conn, slurmClient, folder_name,
+                    ids, slurm_job_id)
 
         client.setOutput("Message", rstring(msg))
 
