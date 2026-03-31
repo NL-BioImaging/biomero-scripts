@@ -493,6 +493,42 @@ def poll_job(slurmClient, slurm_job_id, conn, client):
 # Result upload
 # ---------------------------------------------------------------------------
 
+def persist_model_to_slurm(slurmClient, workflow, folder_name):
+    """Copy the trained model from the output dir to the persistent models dir.
+
+    This makes the model available for inference via ``get_available_models()``.
+    The container itself can't write to the models bind mount, so this copy
+    is done server-side via SSH after the SLURM job completes.
+    """
+    wf = workflow.lower()
+    data_path = slurmClient.slurm_data_path
+    out_path = f"{data_path}/{folder_name}/data/out"
+    model_path = slurmClient.slurm_model_paths.get(wf)
+    if not model_path or not slurmClient.slurm_models_path:
+        print("No models path configured, skipping model persist")
+        return
+
+    models_dir = f"{slurmClient.slurm_models_path}/{model_path}"
+
+    # Read training_results.yaml to get the model_id
+    # Then copy the model directory contents to the models dir
+    cmd = f"""
+model_id=$(python3 -c "import yaml; d=yaml.safe_load(open('{out_path}/training_results.yaml')); print(d.get('model_id',''))" 2>/dev/null)
+if [ -n "$model_id" ] && [ -d "{out_path}/$model_id" ]; then
+    cp -v "{out_path}/$model_id"/* "{models_dir}/$model_id" 2>/dev/null || \
+    {{ mkdir -p "{models_dir}" && cp -v "{out_path}/$model_id"/* "{models_dir}/" ; }}
+    echo "Model persisted to {models_dir}/$model_id"
+else
+    echo "WARNING: Could not find model to persist (model_id=$model_id)"
+fi
+"""
+    try:
+        result = slurmClient.run_commands([cmd])
+        print(f"Persist model result: {result.stdout.strip()}")
+    except Exception as e:
+        print(f"WARNING: Could not persist model to models dir: {e}")
+
+
 def upload_results(conn, slurmClient, folder_name, dataset_ids, slurm_job_id):
     """Download training results from SLURM and upload to OMERO."""
     import yaml
@@ -721,6 +757,13 @@ def runScript():
 
             # Upload results back to OMERO (only if completed)
             if "COMPLETED" in msg:
+                # Persist trained model to the SLURM models directory so it
+                # is available for inference via get_available_models().
+                # The container can't write there (Singularity bind is
+                # read-only), so we do it here via SSH.
+                persist_model_to_slurm(
+                    slurmClient, workflow, folder_name)
+
                 upload_results(
                     conn, slurmClient, folder_name,
                     ids, slurm_job_id)
