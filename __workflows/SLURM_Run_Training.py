@@ -551,18 +551,13 @@ def upload_results(conn, slurmClient, folder_name, dataset_ids, slurm_job_id):
 
     model_id = results.get("model_id", f"model_{slurm_job_id}")
 
-    # Find and download model zip
-    zip_filename = f"{model_id}.zip"
-    zip_path = None
-    with tempfile.NamedTemporaryFile(
-            suffix=".zip", delete=False) as tmp:
-        try:
-            slurmClient.get(f"{out_path}/{zip_filename}", tmp.name)
-            zip_path = tmp.name
-        except Exception as e:
-            print(f"Could not download model zip: {e}")
+    # NOTE: Model zip upload skipped for now — the file is ~1.2GB and
+    # downloading via SSH + uploading to OMERO is too slow/fragile.
+    # The model is persisted on SLURM (see persist_model_to_slurm) and
+    # available for inference via get_available_models().
+    # TODO: implement model upload as a separate async step.
 
-    # Upload to OMERO for each source dataset
+    # Upload results as MapAnnotation to each source dataset
     for dataset_id in dataset_ids:
         dataset = conn.getObject("Dataset", dataset_id)
         if not dataset:
@@ -571,23 +566,6 @@ def upload_results(conn, slurmClient, folder_name, dataset_ids, slurm_job_id):
         group_id = dataset.getDetails().getGroup().getId()
         conn.SERVICE_OPTS.setOmeroGroup(group_id)
 
-        # Upload model zip as FileAnnotation
-        if zip_path and os.path.exists(zip_path):
-            file_ann = conn.createFileAnnfromLocalFile(
-                zip_path,
-                mimetype="application/zip",
-                ns=NS_TRAINING_MODEL,
-                desc=f"Trained model: {model_id}",
-            )
-            # Rename file to zip_filename
-            orig_file = file_ann.getFile()._obj
-            orig_file.setName(rstring(zip_filename))
-            conn.getUpdateService().saveObject(orig_file)
-
-            dataset.linkAnnotation(file_ann)
-            print(f"Model zip uploaded as FileAnnotation {file_ann.getId()}")
-
-        # Upload results as MapAnnotation
         if results:
             map_data = [
                 [str(k), str(v)] for k, v in results.items()
@@ -599,10 +577,6 @@ def upload_results(conn, slurmClient, folder_name, dataset_ids, slurm_job_id):
             map_ann.save()
             dataset.linkAnnotation(map_ann)
             print(f"Results uploaded as MapAnnotation {map_ann.getId()}")
-
-    # Cleanup zip
-    if zip_path and os.path.exists(zip_path):
-        os.remove(zip_path)
 
 
 # ---------------------------------------------------------------------------
