@@ -660,11 +660,13 @@ def runScript():
 
         with SlurmClient.from_config() as slurmClient:
             # Start tracking the workflow
+            user = conn.getUserId()
+            group = conn.getGroupFromContext().id
             wf_id = slurmClient.workflowTracker.initiate_workflow(
                 workflow,
                 f"Training {workflow} v{version}",
-                conn.getUser().getId(),
-                conn.getGroupFromContext().getId()
+                user,
+                group
             )
 
             # Generate a unique folder name for this training run
