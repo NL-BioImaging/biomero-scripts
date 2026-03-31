@@ -371,6 +371,76 @@ def write_config_to_slurm(slurmClient, folder_name, workflow,
 
 
 # ---------------------------------------------------------------------------
+# Training job submission
+# ---------------------------------------------------------------------------
+
+def run_training_job(slurmClient, workflow, workflow_version, folder_name,
+                     wf_id=None):
+    """Submit a training job to SLURM with a training-specific sbatch command.
+
+    Unlike inference, training needs:
+    - TRAINING_MODE=true env var passed to the container
+    - /data bound so training data is accessible
+    - Models dir bound to /tmp/models for cpsam cache
+    - No inference-specific CLI parameters
+
+    Returns:
+        Tuple of (result, slurm_job_id, wf_id, task_id)
+    """
+    wf = workflow.lower()
+    model_path = slurmClient.slurm_model_paths[wf]
+    image = slurmClient.slurm_model_images[wf].split("/")[1]
+    data_path = f"{slurmClient.slurm_data_path}/{folder_name}"
+    image_path = f"{slurmClient.slurm_images_path}/{model_path}"
+    sif_name = f"{image}_{workflow_version}.sif"
+
+    # Models bind
+    models_bind = ""
+    if slurmClient.slurm_models_path:
+        models_path = f"{slurmClient.slurm_models_path}/{model_path}"
+        models_bind = f"--bind {models_path}:/tmp/models"
+
+    # Data bind — needed because /data is not in default Singularity bind paths
+    data_bind = "--bind /data:/data"
+    if slurmClient.slurm_data_bind_path is not None:
+        data_bind = f"--bind {slurmClient.slurm_data_bind_path}"
+
+    # Track task
+    task_id = slurmClient.workflowTracker.add_task_to_workflow(
+        wf_id, workflow, workflow_version, folder_name, {})
+    slurmClient.workflowTracker.start_task(task_id)
+
+    # Build inline sbatch script (heredoc) to avoid needing a separate job file
+    sbatch_cmd = f"""sbatch --job-name=omero-training-{workflow} \
+        --cpus-per-task=4 --mem=8GB --time=02:00:00 \
+        --output=omero-%j.log --open-mode=append \
+        <<'TRAINING_EOF'
+#!/bin/bash
+echo "BIOMERO Training Job: {workflow} v{workflow_version}"
+echo "Data: {data_path}"
+module load singularity > /dev/null 2>&1 || true
+mkdir -p {models_path}/cellpose 2>/dev/null || true
+singularity run --nv {data_bind} {models_bind} \
+    --env TRAINING_MODE=true \
+    "{image_path}/{sif_name}" \
+    --infolder "{data_path}/data/in" \
+    --outfolder "{data_path}/data/out" \
+    --gtfolder "{data_path}/data/gt" \
+    --local -nmc
+TRAINING_EOF"""
+
+    print(f"Submitting training job for {workflow} on {folder_name}")
+    result = slurmClient.run_commands([sbatch_cmd])
+    slurm_job_id = slurmClient.extract_job_id(result)
+
+    if task_id:
+        slurmClient.workflowTracker.add_job_id(task_id, slurm_job_id)
+        slurmClient.workflowTracker.add_result(task_id, result)
+
+    return result, slurm_job_id, wf_id, task_id
+
+
+# ---------------------------------------------------------------------------
 # Job polling
 # ---------------------------------------------------------------------------
 
@@ -589,6 +659,14 @@ def runScript():
         username = conn.getUser().getName()
 
         with SlurmClient.from_config() as slurmClient:
+            # Start tracking the workflow
+            wf_id = slurmClient.workflowTracker.initiate_workflow(
+                workflow,
+                f"Training {workflow} v{version}",
+                conn.getUser().getId(),
+                conn.getGroupFromContext().getId()
+            )
+
             # Generate a unique folder name for this training run
             timestamp = int(timesleep.time())
             folder_name = f"training_{workflow}_{timestamp}"
@@ -609,12 +687,9 @@ def runScript():
                 weight_decay, batch_size, channels,
                 ids, username)
 
-            # Run training workflow
-            result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
-                workflow_name=workflow,
-                workflow_version=version,
-                input_data=folder_name,
-                training_mode="true",
+            # Run training workflow (custom sbatch, not the inference job script)
+            result, slurm_job_id, wf_id, task_id = run_training_job(
+                slurmClient, workflow, version, folder_name, wf_id=wf_id,
             )
 
             # Poll for completion
@@ -625,11 +700,19 @@ def runScript():
                 upload_results(
                     conn, slurmClient, folder_name,
                     ids, slurm_job_id)
+                slurmClient.workflowTracker.complete_workflow(wf_id)
+            else:
+                slurmClient.workflowTracker.fail_workflow(wf_id, msg)
 
         client.setOutput("Message", rstring(msg))
 
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
+        if 'slurmClient' in locals() and 'wf_id' in locals() and wf_id is not None:
+            try:
+                slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+            except Exception:
+                pass
         client.setOutput("Message", rstring(f"Error: {traceback.format_exc()}"))
     finally:
         client.closeSession()
