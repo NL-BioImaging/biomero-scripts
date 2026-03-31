@@ -376,13 +376,16 @@ def write_config_to_slurm(slurmClient, folder_name, workflow,
 
 def run_training_job(slurmClient, workflow, workflow_version, folder_name,
                      wf_id=None):
-    """Submit a training job to SLURM with a training-specific sbatch command.
+    """Submit a training job to SLURM with a training-specific sbatch script.
 
     Unlike inference, training needs:
     - TRAINING_MODE=true env var passed to the container
     - /data bound so training data is accessible
     - Models dir bound to /tmp/models for cpsam cache
     - No inference-specific CLI parameters
+
+    Writes a temporary job script to SLURM and sbatches it, since the
+    inference job scripts have wrong parameters for training.
 
     Returns:
         Tuple of (result, slurm_job_id, wf_id, task_id)
@@ -396,13 +399,14 @@ def run_training_job(slurmClient, workflow, workflow_version, folder_name,
 
     # Models bind
     models_bind = ""
+    models_path = ""
     if slurmClient.slurm_models_path:
         models_path = f"{slurmClient.slurm_models_path}/{model_path}"
         models_bind = f"--bind {models_path}:/tmp/models"
 
     # Data bind — needed because /data is not in default Singularity bind paths
     data_bind = "--bind /data:/data"
-    if slurmClient.slurm_data_bind_path is not None:
+    if slurmClient.slurm_data_bind_path:
         data_bind = f"--bind {slurmClient.slurm_data_bind_path}"
 
     # Track task
@@ -410,27 +414,45 @@ def run_training_job(slurmClient, workflow, workflow_version, folder_name,
         wf_id, workflow, workflow_version, folder_name, {})
     slurmClient.workflowTracker.start_task(task_id)
 
-    # Build inline sbatch script (heredoc) to avoid needing a separate job file
-    sbatch_cmd = f"""sbatch --job-name=omero-training-{workflow} \
-        --cpus-per-task=4 --mem=8GB --time=02:00:00 \
-        --output=omero-%j.log --open-mode=append \
-        <<'TRAINING_EOF'
-#!/bin/bash
+    # Write a training job script to SLURM, then sbatch it.
+    # (Heredocs don't work reliably through SSH/run_commands.)
+    script_content = f"""#!/bin/bash
+#SBATCH --job-name=omero-training-{workflow}
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=5GB
+#SBATCH --time=02:00:00
+#SBATCH --output=omero-%j.log
+#SBATCH --open-mode=append
+
 echo "BIOMERO Training Job: {workflow} v{workflow_version}"
 echo "Data: {data_path}"
 module load singularity > /dev/null 2>&1 || true
 mkdir -p {models_path}/cellpose 2>/dev/null || true
-singularity run --nv {data_bind} {models_bind} \
-    --env TRAINING_MODE=true \
-    "{image_path}/{sif_name}" \
-    --infolder "{data_path}/data/in" \
-    --outfolder "{data_path}/data/out" \
-    --gtfolder "{data_path}/data/gt" \
+singularity run --nv {data_bind} {models_bind} \\
+    --env TRAINING_MODE=true \\
+    "{image_path}/{sif_name}" \\
+    --infolder "{data_path}/data/in" \\
+    --outfolder "{data_path}/data/out" \\
+    --gtfolder "{data_path}/data/gt" \\
     --local -nmc
-TRAINING_EOF"""
+"""
+    # Upload script to SLURM
+    script_remote = f"{data_path}/train_job.sh"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh",
+                                     delete=False) as tmp:
+        tmp.write(script_content)
+        tmp_path = tmp.name
+    try:
+        slurmClient.put(tmp_path, script_remote)
+    finally:
+        os.remove(tmp_path)
 
+    # Make executable and submit
     print(f"Submitting training job for {workflow} on {folder_name}")
-    result = slurmClient.run_commands([sbatch_cmd])
+    result = slurmClient.run_commands([
+        f"chmod +x {script_remote}",
+        f"sbatch {script_remote}",
+    ])
     slurm_job_id = slurmClient.extract_job_id(result)
 
     if task_id:
