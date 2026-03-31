@@ -517,7 +517,8 @@ model_id=$(python3 -c "import yaml; d=yaml.safe_load(open('{out_path}/training_r
 if [ -n "$model_id" ] && [ -d "{out_path}/$model_id" ]; then
     cp -v "{out_path}/$model_id"/* "{models_dir}/$model_id" 2>/dev/null || \
     {{ mkdir -p "{models_dir}" && cp -v "{out_path}/$model_id"/* "{models_dir}/" ; }}
-    echo "Model persisted to {models_dir}/$model_id"
+    cp -v "{out_path}/training_results.yaml" "{models_dir}/${{model_id}}_training_results.yaml" 2>/dev/null || true
+    echo "Model and metadata persisted to {models_dir}/$model_id"
 else
     echo "WARNING: Could not find model to persist (model_id=$model_id)"
 fi
