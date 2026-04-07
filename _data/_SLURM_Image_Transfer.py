@@ -307,10 +307,10 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_vers
 
     # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
     cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    command = f'omero zarr -s "{conn.host}" -k "{suuid}"'
+    command = f'omero zarr -s "{conn.host}" -k "{suuid}" export'
     if ome_version:
         command += f' --format {ome_version}'   # argument only available in ome-cli-zarr v0.8.0+
-    command += f' export --output "{exp_dir}"'
+    command += f' --output "{exp_dir}"'
     if data_type == constants.transfer.DATA_TYPE_PLATE:
         command += f' Plate:{object.getId()}'
     elif data_type == constants.transfer.DATA_TYPE_IMAGE:
