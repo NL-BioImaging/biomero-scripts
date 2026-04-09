@@ -76,7 +76,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 # Version constant for easy version management
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 # keep track of log strings.
 log_strings = []
@@ -726,8 +726,9 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         namespace=namespace, mimetype=mimetype)
     message += ann_message
     
-    # Clean up file annotation if transfer and unpack were successful
-    if transfer_successful and unpack_successful and file_annotation:
+    # Clean up file annotation if transfer and unpack were successful AND cleanup is enabled
+    cleanup_enabled = script_params.get("Cleanup?", True)
+    if transfer_successful and unpack_successful and file_annotation and cleanup_enabled:
         try:
             conn.deleteObjects("FileAnnotation", [file_annotation.id],
                                deleteAnns=True, deleteChildren=True, wait=True)
@@ -742,6 +743,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                            f"{cleanup_error}")
             message += (f"Warning: Could not cleanup temporary file "
                         f"annotation: {cleanup_error}\n")
+    elif transfer_successful and unpack_successful and file_annotation and not cleanup_enabled:
+        message += ("File annotation preserved in OMERO as requested. "
+                    "You can download the zip/ZARR from the attachments.\n")
+        logger.info(f"File annotation {file_annotation.id} preserved for download")
 
     return file_annotation, message
 
@@ -910,6 +915,11 @@ def run_script():
                 constants.transfer.FOLDER, grouping="3",
                 description="Name of folder (and zip file) to store images. Don't use spaces!",
                 default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
+
+            scripts.Bool(
+                "Cleanup?", grouping="4",
+                description="Remove zip/annotation from OMERO after successful transfer to SLURM. Uncheck to keep downloadable copy in OMERO.",
+                default=True),
 
             version=VERSION,
             authors=["Torec Luik", "William Moore", "OME Team"],

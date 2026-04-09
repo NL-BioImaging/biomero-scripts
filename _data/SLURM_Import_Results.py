@@ -129,7 +129,7 @@ if not IMPORTER_ENABLED:
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
 # Version constant for easy version management
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 OBJECT_TYPES = (
     'Plate',
@@ -176,11 +176,127 @@ else:
     IMPORTER_CONFIG = None
 
 
+def find_supported_image_paths(base_path: str, recursive: bool = True) -> List[str]:
+    """Find all supported image files and directories (e.g., ZARR) in a path.
+    
+    Some image formats like ZARR are stored as directories, while others are files.
+    This function handles both cases for any supported extension.
+    
+    Args:
+        base_path: Base directory to search.
+        recursive: Whether to search recursively. Defaults to True.
+        
+    Returns:
+        List of paths to supported image files and directories.
+    """
+    if recursive:
+        all_paths = glob.glob(os.path.join(base_path, "**", "*"), recursive=True)
+    else:
+        all_paths = glob.glob(os.path.join(base_path, "*"))
+    
+    image_paths = []
+    logger.debug(f"Scanning for image files in: {base_path}")
+    logger.debug(f"Found {len(all_paths)} total paths to check")
+    
+    for path in all_paths:
+        for ext in SUPPORTED_IMAGE_EXTENSIONS:
+            if path.endswith(ext):
+                # Check if it's either a file or directory with supported extension
+                if os.path.isfile(path) or os.path.isdir(path):
+                    logger.debug(f"Found supported image: {path}")
+                    image_paths.append(path)
+                    break  # Don't check other extensions for this path
+    
+    logger.info(f"Found {len(image_paths)} supported image files/directories in {base_path}")            
+    return image_paths
+
+
+def find_label_zarr_paths(base_path: str) -> List[str]:
+    """Find label zarr directories within zarr files.
+    
+    Searches for subdirectories matching the pattern: *.zarr/labels/*/
+    where the subdirectory itself is a valid zarr array (contains .zattrs, .zgroup, etc.)
+    
+    Args:
+        base_path: Base directory to search for zarr files.
+        
+    Returns:
+        List of paths to label zarr directories.
+    """
+    label_zarrs = []
+    logger.debug(f"Scanning for label zarr directories in: {base_path}")
+    
+    # Find all .zarr directories first
+    zarr_pattern = os.path.join(base_path, "**", "*.zarr")
+    zarr_dirs = [path for path in glob.glob(zarr_pattern, recursive=True) if os.path.isdir(path)]
+    
+    for zarr_dir in zarr_dirs:
+        labels_dir = os.path.join(zarr_dir, "labels")
+        if os.path.isdir(labels_dir):
+            # Look for subdirectories in labels/ that are themselves zarr arrays
+            for item in os.listdir(labels_dir):
+                potential_label_zarr = os.path.join(labels_dir, item)
+                if os.path.isdir(potential_label_zarr):
+                    # Check if this is a valid zarr array (has .zattrs or .zgroup)
+                    has_zattrs = os.path.exists(os.path.join(potential_label_zarr, ".zattrs"))
+                    has_zgroup = os.path.exists(os.path.join(potential_label_zarr, ".zgroup"))
+                    
+                    if has_zattrs or has_zgroup:
+                        # Check if it already has .zarr extension
+                        if not item.endswith('.zarr'):
+                            # Rename the directory to have .zarr extension on disk
+                            label_zarr_path = potential_label_zarr + ".zarr"
+                            new_item_name = item + ".zarr"
+                            try:
+                                os.rename(potential_label_zarr, label_zarr_path)
+                                logger.info(f"Renamed label zarr: {potential_label_zarr} -> {label_zarr_path}")
+                                
+                                # Update the .zattrs file in the labels directory to reflect the rename
+                                labels_zattrs_path = os.path.join(labels_dir, ".zattrs")
+                                if os.path.exists(labels_zattrs_path):
+                                    try:
+                                        import json
+                                        with open(labels_zattrs_path, 'r') as f:
+                                            zattrs_data = json.load(f)
+                                        
+                                        # Update the labels list if it exists
+                                        if 'labels' in zattrs_data and isinstance(zattrs_data['labels'], list):
+                                            # Replace old name with new name
+                                            if item in zattrs_data['labels']:
+                                                zattrs_data['labels'][zattrs_data['labels'].index(item)] = new_item_name
+                                            elif new_item_name not in zattrs_data['labels']:
+                                                # If old name not found but new name not present, add it
+                                                zattrs_data['labels'].append(new_item_name)
+                                        
+                                        # Write back the updated .zattrs
+                                        with open(labels_zattrs_path, 'w') as f:
+                                            json.dump(zattrs_data, f, indent=2)
+                                        logger.info(f"Updated labels/.zattrs to reference {new_item_name}")
+                                        
+                                    except (json.JSONDecodeError, IOError) as e:
+                                        logger.warning(f"Failed to update labels/.zattrs after rename: {e}")
+                                
+                                label_zarrs.append(label_zarr_path)
+                                logger.debug(f"Found label zarr: {label_zarr_path}")
+                            except OSError as e:
+                                logger.error(f"Failed to rename label zarr {potential_label_zarr}: {e}")
+                                # Still add the original path in case of failure
+                                label_zarrs.append(potential_label_zarr)
+                                logger.debug(f"Found label zarr (rename failed): {potential_label_zarr}")
+                        else:
+                            # Already has .zarr extension
+                            label_zarrs.append(potential_label_zarr)
+                            logger.debug(f"Found label zarr: {potential_label_zarr}")
+    
+    logger.info(f"Found {len(label_zarrs)} label zarr directories in {base_path}")
+    return label_zarrs
+
+
 def getOriginalFilename(name: str) -> str:
     """Extract original filename from processed file path.
 
     Extracts the base filename from a processed file path by removing workflow
-    processing suffixes.
+    processing suffixes. Handles zarr directories and regular files.
 
     Args:
         name: Path/name of processed file.
@@ -188,13 +304,22 @@ def getOriginalFilename(name: str) -> str:
     Returns:
         Original filename if pattern matches, otherwise input name.
 
-    Example:
+    Examples:
         >>> getOriginalFilename("/../../Cells Apoptotic.png_merged_z01_t01.tiff")
         "Cells Apoptotic.png"
+        >>> getOriginalFilename("/out/Cell-Granules.tif.zarr")
+        "Cell-Granules.tif"
     """
+    # Handle zarr directories - extract original filename by removing .zarr extension
+    if name.endswith('.zarr'):
+        basename = os.path.basename(name)
+        # Remove .zarr extension to get original filename
+        return basename.replace('.zarr', '')
+    
+    # Handle standard processed files (original logic for backward compatibility)
     match = re.match(pattern=".+\/(.+\.[A-Za-z]+).+\.[tiff|png]", string=name)
     if match:
-        name = match.group(1)
+        return match.group(1)
 
     return name
 
@@ -337,9 +462,8 @@ def saveImagesToOmeroAsAttachments(
     Returns:
         Message to add to script output.
     """
-    all_files = glob.iglob(folder+'**/**', recursive=True)
-    files = [f for f in all_files if os.path.isfile(f)
-             and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+    # Handle both regular image files and ZARR directories
+    files = find_supported_image_paths(folder)
     # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
     #               and f.endswith('.tiff')]  # out folder
     # files += more_files
@@ -547,6 +671,32 @@ def getUserProjects() -> List[Any]:
                      for d in conn.getObjects('Project')
                      if type(d) == omero.gateway.ProjectWrapper]
         #  if type(d) == omero.model.ProjectI
+        if not objparams:
+            objparams = [rstring('<No objects found>')]
+        return objparams
+    except Exception as e:
+        return ['Exception: %s' % e]
+    finally:
+        client.closeSession()
+
+
+def getUserScreens() -> List[Any]:
+    """Get OMERO Screens that user has access to.
+
+    Returns:
+        List of screen IDs and names formatted as strings.
+
+    Raises:
+        Exception: If connection or query fails.
+    """
+    try:
+        client = omero.client()
+        client.createSession()
+        conn = omero.gateway.BlitzGateway(client_obj=client)
+        conn.SERVICE_OPTS.setOmeroGroup(-1)
+        objparams = [rstring('%d: %s' % (d.id, d.getName()))
+                     for d in conn.getObjects('Screen')
+                     if type(d) == omero.gateway.ScreenWrapper]
         if not objparams:
             objparams = [rstring('<No objects found>')]
         return objparams
@@ -1275,9 +1425,7 @@ def create_metadata_csv(
             metadata_rows.append(['Workflow_ID', str(wf_id)])
 
     # Use the same file discovery logic as upload orders to find where to put metadata.csv
-    all_files = glob.glob(os.path.join(target_path, "**", "*"), recursive=True)
-    image_files = [f for f in all_files if os.path.isfile(f)
-                   and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+    image_files = find_supported_image_paths(target_path)
 
     # Create metadata.csv in same directories as image files
     created_files = []
@@ -1566,9 +1714,10 @@ def create_upload_orders_for_results(
     destination_type: str,
     destination_id: int,
     results_path: str,
-    wf_id: UUID
+    wf_id: UUID,
+    client: Any = None
 ) -> List[Dict[str, Any]]:
-    """Create upload orders for SLURM results (images only).
+    """Create upload orders for SLURM results (images and optionally label zarrs).
 
     Args:
         group_name: OMERO group name.
@@ -1577,6 +1726,7 @@ def create_upload_orders_for_results(
         destination_id: Destination ID in OMERO.
         results_path: Path to results in importer storage.
         wf_id: Workflow UUID for tracking.
+        client: OMERO script client for accessing input parameters (optional).
 
     Returns:
         List of created upload orders.
@@ -1588,12 +1738,7 @@ def create_upload_orders_for_results(
         return []
 
     # Find only image files (CSV tables handled by zip workflow)
-    # Fix: Use proper glob pattern to find files recursively
-    all_files = glob.glob(os.path.join(
-        results_path, "**", "*"), recursive=True)
-
-    image_files = [f for f in all_files if os.path.isfile(f)
-                   and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
+    image_files = find_supported_image_paths(results_path)
 
     if not image_files:
         logger.warning(
@@ -1601,8 +1746,23 @@ def create_upload_orders_for_results(
 
     orders = []
 
-    # Create order for image files if any exist
-    if image_files:
+    # Check if label zarr import is enabled
+    import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
+    import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
+    
+    # First check if there are actually label zarr files available
+    label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
+    
+    # Determine if we should skip main image import (only when both label options are true AND labels exist)
+    skip_main_images = import_label_zarrs and import_only_labels and len(label_zarr_files) > 0
+    
+    # Safety check: if Import_Only_Labels=true but no label zarrs found, warn and import main images
+    if import_label_zarrs and import_only_labels and len(label_zarr_files) == 0:
+        logger.warning("Import_Only_Labels=true but no label zarr directories found. Falling back to main image import to avoid empty import.")
+        skip_main_images = False
+
+    # Create order for image files if any exist (unless we're only importing labels)
+    if image_files and not skip_main_images:
         image_order = {
             "Group": group_name,
             "Username": username,
@@ -1617,12 +1777,38 @@ def create_upload_orders_for_results(
         create_upload_order(image_order)
         orders.append(image_order)
         logger.info(f"Created image upload order for {len(image_files)} files")
+    elif image_files and skip_main_images:
+        logger.info(f"Skipping main image import for {len(image_files)} files (Import_Only_Labels=true, {len(label_zarr_files)} label zarr directories found)")
+            
+    # Create orders for label zarr directories if enabled and found
+    if import_label_zarrs and label_zarr_files:
+        label_order = {
+            "Group": group_name,
+            "Username": username,
+            "DestinationID": destination_id,
+            "DestinationType": destination_type,
+            # Generate unique order ID (importer needs string)
+            "UUID": str(uuid.uuid4()),
+            "Files": label_zarr_files,
+            "wf_id": wf_id,
+            "source": "SLURM_Results_Labels"
+        }
+        create_upload_order(label_order)
+        orders.append(label_order)
+        logger.info(f"Created label zarr upload order for {len(label_zarr_files)} label zarr directories")
+    elif import_label_zarrs:
+        logger.info("No label zarr directories found (Import_Label_Zarrs=true but workflow likely produced non-zarr results)")
+    else:
+        logger.info("Label zarr import is disabled")
 
     return orders
 
 
 def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
-    """Rename files in importer storage according to rename pattern.
+    """Rename files and directories in importer storage according to rename pattern.
+
+    Handles both regular image files and zarr directories. Zarr directories
+    are renamed as complete units while preserving their internal structure.
 
     Args:
         client: OMERO script client for accessing rename settings.
@@ -1638,13 +1824,26 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
     if not rename_enabled:
         return "\\nFile renaming skipped (disabled)"
 
-    # Find all image files in results path
+    # Find all image files and zarr directories in results path
     all_files = []
+    zarr_dirs = []
+    
     for root, dirs, files in os.walk(results_path):
+        # Check for zarr directories
+        for dir_name in dirs:
+            if dir_name.endswith('.zarr'):
+                zarr_path = os.path.join(root, dir_name)
+                zarr_dirs.append(zarr_path)
+        
+        # Check for regular image files
         for file in files:
             file_path = os.path.join(root, file)
             if any(file_path.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS):
                 all_files.append(file_path)
+    
+    # Process zarr directories first (they take precedence)
+    for zarr_path in zarr_dirs:
+        all_files.append(zarr_path)
 
     renamed_count = 0
     message = ""
@@ -1673,21 +1872,52 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
                         f"Target file already exists, skipping: {new_file_path}")
                     continue
 
-                # Perform the rename
+                # For zarr directories, add small delay and permission check
+                if file_path.endswith('.zarr'):
+                    import time
+                    time.sleep(1)  # Brief delay to let any file handles settle
+                    
+                    # Check basic permissions
+                    try:
+                        # Test if we can write to the parent directory
+                        parent_dir = os.path.dirname(file_path)
+                        test_file = os.path.join(parent_dir, '.test_write_permission')
+                        with open(test_file, 'w') as f:
+                            f.write('test')
+                        os.remove(test_file)
+                    except Exception as perm_e:
+                        logger.error(f"Permission check failed for {parent_dir}: {perm_e}")
+                        message += f"\nWarning: No write permission for zarr rename in {parent_dir}: {perm_e}"
+                        continue
+
+                # Perform the rename (works for both files and directories)
                 os.rename(file_path, new_file_path)
                 renamed_count += 1
-                logger.info(f"Successfully renamed file: {new_file_path}")
+                file_type = "directory" if os.path.isdir(new_file_path) else "file"
+                logger.info(f"Successfully renamed {file_type}: {new_file_path}")
 
+            else:
+                logger.debug(
+                    f"No rename needed for: {os.path.basename(file_path)}")
+
+        except PermissionError as pe:
+            logger.error(f"Permission denied renaming {file_path}: {pe}")
+            logger.error(f"Source exists: {os.path.exists(file_path)}, Source is dir: {os.path.isdir(file_path)}")
+            logger.error(f"Parent dir writable: {os.access(os.path.dirname(file_path), os.W_OK)}")
+            if file_path.endswith('.zarr'):
+                message += f"\\nWarning: Permission denied renaming zarr directory {os.path.basename(file_path)}. This is often due to filesystem permissions or the directory being in use. The zarr will be imported with its original name."
+            else:
+                message += f"\\nWarning: Permission denied renaming {os.path.basename(file_path)}: {pe}"
         except Exception as e:
-            logger.error(f"Failed to rename file {file_path}: {e}")
+            logger.error(f"Failed to rename file/directory {file_path}: {e}")
             message += f"\\nWarning: Failed to rename {os.path.basename(file_path)}: {e}"
 
     if renamed_count > 0:
-        message += f"\\nRenamed {renamed_count} files in importer storage"
-        logger.info(f"Completed renaming {renamed_count} files")
+        message += f"\\nRenamed {renamed_count} files/directories in importer storage"
+        logger.info(f"Completed renaming {renamed_count} files/directories")
     else:
-        message += "\\nNo files needed renaming"
-        logger.info("No files required renaming")
+        message += "\\nNo files/directories needed renaming"
+        logger.info("No files/directories required renaming")
 
     return message
 
@@ -1695,29 +1925,36 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
 def add_metadata_to_imported_images(
     conn: BlitzGateway,
     slurmClient: SlurmClient,
-    dataset_id: int,
+    destination_id: int,
     order_uuids: List[str],
     wf_id: str,
-    job_id: str
+    job_id: str,
+    destination_type: str = "Dataset"
 ) -> str:
-    """Add metadata to images imported by biomero-importer using UUID search.
+    """Add metadata to images/plates imported by biomero-importer using UUID search.
 
-    Searches for images that have the specific import order UUIDs in their metadata
-    (added by biomero-importer) and adds workflow metadata annotations.
-    Much more reliable than time-based approaches.
+    For Dataset workflows: Searches for images and adds metadata to individual images.
+    For Screen workflows: Searches for plates and adds metadata to plates themselves.
 
     Args:
         conn: OMERO BlitzGateway connection
         slurmClient: SlurmClient instance
-        dataset_id: ID of the dataset containing imported images  
+        destination_id: ID of the dataset/screen containing imported images/plates
         order_uuids: List of upload order UUIDs to search for
         wf_id: Workflow UUID for metadata
         job_id: SLURM job ID for metadata
+        destination_type: Type of destination ("Dataset" or "Screen")
 
     Returns:
         Status message describing metadata addition results
     """
     try:
+        # For Screen destinations (plate workflows), add metadata to plates
+        if destination_type.lower() == "screen":
+            return add_metadata_to_imported_plates(
+                conn, slurmClient, destination_id, order_uuids, wf_id, job_id)
+        
+        # For Dataset destinations (image workflows), add metadata to images
         if not order_uuids:
             return "No upload order UUIDs provided for image search"
 
@@ -1767,20 +2004,17 @@ def add_metadata_to_imported_images(
         imported_images = unique_images
 
         if not imported_images:
-            # Fallback: check dataset for any images (less precise but better than nothing)
-            logger.info(
-                f"No images found with order UUIDs, checking dataset {dataset_id}")
-            dataset = conn.getObject("Dataset", dataset_id)
-            if dataset:
-                imported_images = list(dataset.listChildren())
-                logger.info(
-                    f"Fallback: found {len(imported_images)} images in dataset")
+            # Fallback for datasets: search images directly (dataset workflows only)
+            logger.info(f"No images found with order UUIDs, checking dataset {destination_id}")
+            dataset_obj = conn.getObject("Dataset", destination_id)
+            if dataset_obj:
+                imported_images = list(dataset_obj.listChildren())
+                logger.info(f"Fallback: found {len(imported_images)} images in dataset")
 
         if not imported_images:
             return "No imported images found for metadata addition"
 
-        logger.info(
-            f"Adding metadata to {len(imported_images)} imported images")
+        logger.info(f"Adding metadata to {len(imported_images)} imported images")
 
         # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
         metadata_added = 0
@@ -1790,11 +2024,9 @@ def add_metadata_to_imported_images(
                 add_image_annotations(
                     conn, slurmClient, img.getId(), job_id, wf_id=wf_id)
                 metadata_added += 1
-                logger.debug(
-                    f"Added metadata to image {img.getId()}: {img.getName()}")
+                logger.debug(f"Added metadata to image {img.getId()}: {img.getName()}")
             except Exception as img_error:
-                logger.warning(
-                    f"Failed to add metadata to image {img.getId()}: {img_error}")
+                logger.warning(f"Failed to add metadata to image {img.getId()}: {img_error}")
 
         message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
         logger.info(message)
@@ -1807,8 +2039,136 @@ def add_metadata_to_imported_images(
         return error_msg
 
 
+def add_metadata_to_imported_plates(
+    conn: BlitzGateway,
+    slurmClient: SlurmClient,
+    destination_id: int,
+    order_uuids: List[str],
+    wf_id: str,
+    job_id: str
+) -> str:
+    """Add metadata to plates imported by biomero-importer using UUID search.
+    
+    For plate workflows, add metadata to the plate itself rather than individual images.
+    This is more appropriate as the workflow operates on the plate level.
+    
+    Args:
+        conn: OMERO BlitzGateway connection
+        slurmClient: SlurmClient instance
+        destination_id: Screen ID containing imported plates
+        order_uuids: List of upload order UUIDs to search for
+        wf_id: Workflow UUID for metadata
+        job_id: SLURM job ID for metadata
+        
+    Returns:
+        Status message describing metadata addition results
+    """
+    try:
+        if not order_uuids:
+            return "No upload order UUIDs provided for plate search"
+
+        logger.info(f"Searching for plates imported with UUIDs: {order_uuids}")
+
+        # Search for plates with any of the import order UUIDs in their annotations
+        query_service = conn.getQueryService()
+        imported_plates = []
+
+        for uuid in order_uuids:
+            # HQL to find plates with this specific UUID in map annotations
+            hql = """
+            SELECT DISTINCT plate.id, plate.name
+            FROM Plate plate
+            JOIN plate.annotationLinks pal
+            JOIN pal.child ann
+            JOIN ann.mapValue mv
+            WHERE TYPE(ann) = MapAnnotation
+            AND mv.value = :uuid
+            """
+
+            import omero.sys
+            params = omero.sys.ParametersI()
+            params.addString("uuid", uuid)
+
+            results = query_service.projection(hql, params, conn.SERVICE_OPTS)
+
+            if results:
+                plate_ids = [result[0].val for result in results]
+                uuid_plates = [conn.getObject("Plate", plate_id)
+                              for plate_id in plate_ids]
+                uuid_plates = [plate for plate in uuid_plates if plate is not None]
+                imported_plates.extend(uuid_plates)
+                logger.info(f"Found {len(uuid_plates)} plates for UUID {uuid}")
+            else:
+                logger.warning(f"No plates found with UUID {uuid}")
+
+        # Remove duplicates
+        seen_ids = set()
+        unique_plates = []
+        for plate in imported_plates:
+            if plate.getId() not in seen_ids:
+                unique_plates.append(plate)
+                seen_ids.add(plate.getId())
+        imported_plates = unique_plates
+
+        if not imported_plates:
+            # Fallback: check screen for recently imported plates
+            logger.info(f"No plates found with order UUIDs, checking screen {destination_id}")
+            screen_obj = conn.getObject("Screen", destination_id)
+            if screen_obj:
+                # Get all plates and try to find ones with import UUIDs
+                all_plates = list(screen_obj.listChildren())
+                for plate in all_plates:
+                    # Check if this plate has any of our UUIDs in its metadata
+                    annotations = plate.listAnnotations()
+                    for ann in annotations:
+                        if hasattr(ann, 'getMapValue') and ann.getMapValue():
+                            for key, value in ann.getMapValue():
+                                if value in order_uuids:
+                                    imported_plates.append(plate)
+                                    break
+                            if plate in imported_plates:
+                                break
+                logger.info(f"Fallback: found {len(imported_plates)} plates in screen with matching UUIDs")
+
+        if not imported_plates:
+            return "No imported plates found for metadata addition"
+
+        logger.info(f"Adding metadata to {len(imported_plates)} imported plates")
+
+        # Add metadata to each imported plate
+        metadata_added = 0
+        for plate in imported_plates:
+            try:
+                # Add annotations to the plate (using same pattern but for plate objects)
+                add_plate_annotations(
+                    conn, slurmClient, plate.getId(), job_id, wf_id=wf_id)
+                metadata_added += 1
+                logger.debug(f"Added metadata to plate {plate.getId()}: {plate.getName()}")
+            except Exception as plate_error:
+                logger.warning(f"Failed to add metadata to plate {plate.getId()}: {plate_error}")
+
+        message = f"Added workflow metadata to {metadata_added}/{len(imported_plates)} imported plates"
+        logger.info(message)
+        return message
+
+    except Exception as e:
+        error_msg = f"Failed to add metadata to imported plates: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return error_msg
+
+
+def add_plate_annotations(conn, slurmClient, plate_id, job_id, wf_id=None):
+    """Add workflow metadata annotations to a plate"""
+    add_object_annotations(conn, slurmClient, "Plate", plate_id, job_id, wf_id)
+
+
 def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
-    object_type = "Image"  # Set to Image when it's a dataset
+    """Add workflow metadata annotations to an image"""
+    add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
+
+
+def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf_id=None):
+    """Generic function to add workflow metadata annotations to any OMERO object (Image, Plate, etc.)"""
     ns_wf = "biomero/workflow"
     if slurmClient.track_workflows and wf_id:
         try:
@@ -1944,11 +2304,11 @@ def process_importer_workflow(
     task_id: Optional[UUID] = None
 
 ) -> str:
-    """Process dataset image imports via biomero-importer from comprehensive permanent storage.
+    """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
 
     This function processes image imports using the biomero-importer while ALL workflow
     results (images, CSVs, metadata, etc.) are preserved in permanent storage for
-    complete data archival and future analysis.
+    complete data archival and future analysis. Supports both dataset and screen destinations.
 
     Args:
         client: OMERO script client.
@@ -1967,66 +2327,93 @@ def process_importer_workflow(
     message = ""
     logger.info("Processing importer workflow...")
 
-    # Handle file renaming if enabled
-    rename_enabled = unwrap(client.getInput(
-        constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
+    # Determine destination type (dataset or screen)
+    use_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET))
+    use_screen = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN))
+    
+    if use_dataset and use_screen:
+        logger.warning("Both dataset and screen output selected - using dataset")
+        use_screen = False
+    elif not use_dataset and not use_screen:
+        logger.error("Neither dataset nor screen output selected")
+        return "Error: No valid destination type selected"
+    
+    destination_type = "Screen" if use_screen else "Dataset"
+    logger.info(f"Selected destination type: {destination_type}")
 
-    if rename_enabled:
-        logger.info("Renaming files in importer storage...")
-        rename_message = rename_files_in_importer_storage(client,
-                                                          permanent_storage_path)
-        message += rename_message
-        logger.info("File renaming completed")
+    # Handle file renaming if enabled (only for datasets, skip for screens)
+    if use_dataset:
+        rename_enabled = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
+
+        if rename_enabled:
+            logger.info("Renaming files in importer storage...")
+            rename_message = rename_files_in_importer_storage(client,
+                                                              permanent_storage_path)
+            message += rename_message
+            logger.info("File renaming completed")
+        else:
+            logger.info("Skipping file renaming (not enabled)")
     else:
-        logger.info("Skipping file renaming (not enabled)")
+        logger.info("Skipping file renaming for screen destination")
 
-    # Get dataset info from existing parameters
-    dataset_name = unwrap(client.getInput(
-        constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
-    logger.info(f"Setting up dataset '{dataset_name}'...")
+    # Get destination info from parameters
+    if use_screen:
+        destination_name = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME))
+        create_new_destination = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE))
+    else:
+        destination_name = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
+        create_new_destination = unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
+    
+    logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
+    destination_id = None
 
-    # Check if dataset exists or create new one
-    create_new_dataset = unwrap(client.getInput(
-        constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
-    dataset_id = None
-
-    if not create_new_dataset:
+    # Check if destination exists or create new one
+    if not create_new_destination:
         try:
-            existing_datasets_w_name = [d.id for d in conn.getObjects(
-                'Dataset', attributes={"name": dataset_name})]
-            if existing_datasets_w_name:
-                dataset_id = existing_datasets_w_name[0]
-                create_new_dataset = False
-                logger.info(f"Using existing dataset ID: {dataset_id}")
+            existing_objects_w_name = [d.id for d in conn.getObjects(
+                destination_type, attributes={"name": destination_name})]
+            if existing_objects_w_name:
+                destination_id = existing_objects_w_name[0]
+                create_new_destination = False
+                logger.info(f"Using existing {destination_type.lower()} ID: {destination_id}")
             else:
-                create_new_dataset = True
-                logger.info("Dataset not found, will create new one")
+                create_new_destination = True
+                logger.info(f"{destination_type} not found, will create new one")
         except Exception:
-            create_new_dataset = True
+            create_new_destination = True
             logger.info(
-                "Error checking for existing dataset, will create new one")
+                f"Error checking for existing {destination_type.lower()}, will create new one")
 
-    if create_new_dataset:
-        logger.info("Creating new dataset...")
-        dataset = omero.model.DatasetI()
-        dataset.name = rstring(dataset_name)
+    if create_new_destination:
+        logger.info(f"Creating new {destination_type.lower()}...")
+        if use_screen:
+            destination_obj = omero.model.ScreenI()
+        else:
+            destination_obj = omero.model.DatasetI()
+        
+        destination_obj.name = rstring(destination_name)
         desc = f"Images from SLURM job {slurm_job_id}"
         if wf_id:
             desc += f" (Workflow {wf_id})"
-        dataset.description = rstring(desc)
+        destination_obj.description = rstring(desc)
         update_service = conn.getUpdateService()
-        dataset = update_service.saveAndReturnObject(dataset)
-        dataset_id = dataset.id.val
-        logger.info(f"Created new dataset ID: {dataset_id}")
+        destination_obj = update_service.saveAndReturnObject(destination_obj)
+        destination_id = destination_obj.id.val
+        logger.info(f"Created new {destination_type.lower()} ID: {destination_id}")
 
     # Create upload order for images only
     logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
-        group_name, username, "Dataset", dataset_id,
-        permanent_storage_path, wf_id)
+        group_name, username, destination_type, destination_id,
+        permanent_storage_path, wf_id, client)
 
     if orders:
-        message += f"\nCreated {len(orders)} upload orders for biomero-importer:"
+        message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
         for order in orders:
             file_count = len(order.get('Files', []))
             message += f"\n  - Order {order['UUID']}: {file_count} files"
@@ -2048,14 +2435,14 @@ def process_importer_workflow(
 
         if all_successful:
             logger.info("All imports completed successfully")
-            message += "\nAll dataset imports completed successfully!"
+            message += f"\nAll {destination_type.lower()} imports completed successfully!"
 
-            # Post-processing: Add metadata to newly imported images using UUID search
-            logger.info("Adding metadata to imported images...")
+            # Post-processing: Add metadata to newly imported images/plates using UUID search
+            logger.info(f"Adding metadata to imported {destination_type.lower()}s...")
             order_uuids = [order.get('UUID')
                            for order in orders if order.get('UUID')]
             post_processing_message = add_metadata_to_imported_images(
-                conn, slurmClient, dataset_id, order_uuids, wf_id, slurm_job_id)
+                conn, slurmClient, destination_id, order_uuids, wf_id, slurm_job_id, destination_type)
             if post_processing_message:
                 message += f"\n{post_processing_message}"
         else:
@@ -2063,8 +2450,11 @@ def process_importer_workflow(
             message += f"\nSome imports failed for UUIDs: {failed_uuids}"
             # Import failures are logged but don't stop the workflow
     else:
-        message += "\nNo image files found for importer"
-        logger.warning("No image files found for importer processing")
+        error_msg = "CRITICAL: No image files found for importer processing - workflow failed!"
+        logger.error(error_msg)
+        logger.error(f"Searched in: {permanent_storage_path}")
+        logger.error(f"Supported extensions: {SUPPORTED_IMAGE_EXTENSIONS}")
+        sys.exit(1)  # Exit with failure code - this should trigger workflow failure
 
     return message
 
@@ -2216,7 +2606,7 @@ def cleanup_resources(
     message = ""
 
     # Cleanup SLURM files if requested
-    if unwrap(client.getInput("Cleanup?")):
+    if unwrap(client.getInput(constants.CLEANUP)):
         logger.info(
             "=== CLEANUP: Removing temporary files (PRESERVING importer storage) ===")
 
@@ -2552,93 +2942,118 @@ def runScript() -> None:
             scripts.String(constants.results.OUTPUT_SLURM_JOB_ID,
                            optional=False, grouping="01.1",
                            values=_oldjobs),
-            scripts.String("workflow_uuid",
+            scripts.String(constants.results.WORKFLOW_UUID,
                            optional=True, grouping="01.2",
                            description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
-            scripts.String("Task_ID",
+            scripts.String(constants.results.TASK_ID,
                            optional=True, grouping="01.3",
                            description="Task ID for biomero workflow tracking and status updates"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
-                         grouping="03",
+                         grouping="02",
                          description="Attach all results in zip to a project",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PROJECT_ID,
-                         optional=True, grouping="03.1",
+                         optional=True, grouping="02.1",
                          description="Project to attach workflow results to",
                          values=_projects),
-            scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
-                         optional=False,
-                         grouping="05",
-                         description="Attach all results to original images as attachments",
-                         default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
                          optional=False,
-                         grouping="04",
+                         grouping="03",
                          description="Attach all results in zip to a plate",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
-                         optional=True, grouping="04.1",
+                         optional=True, grouping="03.1",
                          description="Plate to attach workflow results to",
                          values=_plates),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
+                         optional=False,
+                         grouping="04",
+                         description="Attach all results to original images as attachments",
+                         default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET,
                          optional=False,
-                         grouping="06",
+                         grouping="05",
                          description="Import all result as a new dataset via biomero-importer",
                          default=True),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME,
                            optional=True,
-                           grouping="06.1",
+                           grouping="05.1",
                            description="Name for the new dataset w/ results",
                            default="Imported_Results"),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE,
                          optional=True,
-                         grouping="06.2",
+                         grouping="05.2",
                          description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
-                         grouping="06.3",
+                         grouping="05.3",
                          description="Rename all imported files as below. You can use variables {original_file}, {original_ext}, {file}, and {ext}. E.g. {original_file}_IMPORTED.{ext}",
                          default=True),
             scripts.String(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME,
                            optional=True,
-                           grouping="06.4",
+                           grouping="05.4",
                            description="A new name for the imported images.",
                            default="{original_file}_IMPORTED.{ext}"),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_SCREEN,
+                         optional=False,
+                         grouping="06",
+                         description="Import all result as a new screen via biomero-importer",
+                         default=False),
+            scripts.String(constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME,
+                           optional=True,
+                           grouping="06.1",
+                           description="Name for the new screen w/ results",
+                           default="Imported_Results"),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE,
+                         optional=True,
+                         grouping="06.2",
+                         description="If there is already a screen with this name, still create new one? (True) or add to it? (False) ",
+                         default=False),
+            scripts.Bool(constants.results.IMPORT_LABEL_ZARRS,
+                         optional=True,
+                         grouping="07",
+                         description="Also import label zarr directories (segmentation results) as separate datasets",
+                         default=True),
+            scripts.Bool(constants.results.IMPORT_ONLY_LABELS,
+                         optional=True,
+                         grouping="07.1",
+                         description="Import ONLY label zarr directories (requires Import_Label_Zarrs=true). Skips main image import.",
+                         default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE,
                          optional=False,
-                         grouping="07",
+                         grouping="08",
                          description="Add all csv files as OMERO.tables to the chosen dataset",
                          default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE_DATASET,
                          optional=True,
-                         grouping="07.1",
+                         grouping="08.1",
                          description="Attach to the dataset chosen below",
                          default=True),
             scripts.List(constants.results.OUTPUT_ATTACH_TABLE_DATASET_ID,
                          optional=True,
-                         grouping="07.2",
+                         grouping="08.2",
                          description="Dataset to attach workflow results to",
                          values=_datasets),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE_PLATE,
                          optional=True,
-                         grouping="07.3",
+                         grouping="08.3",
                          description="Attach to the plate chosen below",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_TABLE_PLATE_ID,
                          optional=True,
-                         grouping="07.4",
+                         grouping="08.4",
                          description="Plate to attach workflow results to",
                          values=_plates),
-            scripts.Bool("Cleanup?",
-                         optional=True,
-                         grouping="08",
-                         description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
-                         default=True),
-            scripts.Bool("Test_Write_Permissions_Only",
+            scripts.Bool(constants.CLEANUP,
                          optional=True,
                          grouping="09",
+                         description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
+                         default=True),
+            scripts.Bool(constants.results.TEST_WRITE_PERMISSIONS_ONLY,
+                         optional=True,
+                         grouping="09.1",
                          description="DRY-RUN ONLY: Test write permissions to importer storage and exit (no actual import). " + \
                                     "Use this to validate storage configuration before running expensive workflows.",
                          default=False),
@@ -2669,7 +3084,7 @@ def runScript() -> None:
             logger.info(f"Import Results: {scriptParams}\n")
 
             # Check if this is a write access validation request (DRY-RUN ONLY)
-            test_write_only = unwrap(client.getInput("Test_Write_Permissions_Only")) or False
+            test_write_only = unwrap(client.getInput(constants.results.TEST_WRITE_PERMISSIONS_ONLY)) or False
             if test_write_only:
                 logger.info("DRY-RUN: Testing write access for importer storage only")
                 
@@ -2687,7 +3102,7 @@ def runScript() -> None:
             # Get task_id if provided for status updates
             task_id = None
             try:
-                task_id_input = unwrap(client.getInput("Task_ID"))
+                task_id_input = unwrap(client.getInput(constants.results.TASK_ID))
                 if task_id_input and task_id_input.strip():
                     # Convert to UUID object
                     task_id = uuid.UUID(task_id_input.strip())
@@ -2706,7 +3121,7 @@ def runScript() -> None:
             # Get and validate workflow ID using proper UUID parsing
             script_wf_id = None
             try:
-                wf_uuid_input = unwrap(client.getInput("workflow_uuid"))
+                wf_uuid_input = unwrap(client.getInput(constants.results.WORKFLOW_UUID))
                 if wf_uuid_input and wf_uuid_input.strip():
                     # Validate UUID format immediately
                     script_wf_id = uuid.UUID(wf_uuid_input.strip())
@@ -2727,6 +3142,8 @@ def runScript() -> None:
             # Determine which operations are requested
             use_importer_for_datasets = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_NEW_DATASET))
+            use_importer_for_screens = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_SCREEN))
             process_csv_tables = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_TABLE))
             process_attachments = (unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)) or
@@ -2735,11 +3152,11 @@ def runScript() -> None:
 
             # Debug the workflow decisions
             logger.info(
-                f"Workflow decisions: use_importer_for_datasets={use_importer_for_datasets}, process_csv_tables={process_csv_tables}, process_attachments={process_attachments}")
+                f"Workflow decisions: use_importer_for_datasets={use_importer_for_datasets}, use_importer_for_screens={use_importer_for_screens}, process_csv_tables={process_csv_tables}, process_attachments={process_attachments}")
 
-            # Initialize importer only if needed for dataset imports
+            # Initialize importer only if needed for dataset or screen imports
             importer_initialized = False
-            if use_importer_for_datasets:
+            if use_importer_for_datasets or use_importer_for_screens:
                 importer_initialized = initialize_importer()
 
             # Ask job State
@@ -2856,8 +3273,8 @@ def runScript() -> None:
                     logger.warning(
                         f"Failed to copy log file to permanent storage: {_log_copy_err}")
 
-            # IMPORTER WORKFLOW - Dataset image imports
-            if use_importer_for_datasets:
+            # IMPORTER WORKFLOW - Dataset and screen image imports
+            if use_importer_for_datasets or use_importer_for_screens:
                 importer_message = process_importer_workflow(
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
@@ -2942,7 +3359,7 @@ def runScript() -> None:
             # Always try to set outputs - but don't overwrite failure messages
             try:
                 if wf_id is not None:
-                    client.setOutput("Workflow_UUID", rstring(str(wf_id)))
+                    client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
                 # Only set success message if we haven't already set a failure message
                 if not message.startswith("FAILED:"):
                     client.setOutput("Message", rstring(str(message)))

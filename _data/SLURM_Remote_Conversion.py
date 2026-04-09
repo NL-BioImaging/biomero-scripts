@@ -47,13 +47,9 @@ logger = logging.getLogger(__name__)
 
 CONV_OPTIONS_SOURCE = ['zarr']
 CONV_OPTIONS_TARGET = ['tiff', 'zarr']
-INPUT_DATA = "Input data"
-SOURCE = "Source format"
-TARGET = "Target format"
-CLEANUP = "Cleanup?"
 
 # Version constant for easy version management
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 
 def runScript():
@@ -102,21 +98,21 @@ def runScript():
         client = scripts.client(
             script_name,
             script_descr,
-            scripts.String(INPUT_DATA, grouping="01",
+            scripts.String(constants.conversion.INPUT_DATA, grouping="01",
                            description=name_descr,
                            values=_datafiles),
-            scripts.String(SOURCE, grouping="02.1",
+            scripts.String(constants.conversion.SOURCE_FORMAT, grouping="02.1",
                            description=conversion_descr,
                            values=CONV_OPTIONS_SOURCE,
                            default='zarr'),
-            scripts.String(TARGET, grouping="02.2",
+            scripts.String(constants.conversion.TARGET_FORMAT, grouping="02.2",
                            description=conversion_descr,
                            values=CONV_OPTIONS_TARGET,
                            default='tiff'),
-            scripts.Bool(CLEANUP, grouping="03",
+            scripts.Bool(constants.CLEANUP, grouping="03",
                          description=cleanup_descr,
                          default=True),
-            scripts.String("Parent_Workflow_ID", grouping="04",
+            scripts.String(constants.conversion.PARENT_WORKFLOW_ID, grouping="04",
                            description="Internal parameter for parent wf",
                            optional=True),
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
@@ -133,11 +129,11 @@ def runScript():
             message = ""
             logger.info(f"Converting: {scriptParams}\n")
 
-            zipfile = scriptParams[INPUT_DATA]
-            convert_from = scriptParams[SOURCE]
-            convert_to = scriptParams[TARGET]
-            cleanup = scriptParams[CLEANUP]
-            parent_wf_id = scriptParams.get("Parent_Workflow_ID")
+            zipfile = scriptParams[constants.conversion.INPUT_DATA]
+            convert_from = scriptParams[constants.conversion.SOURCE_FORMAT]
+            convert_to = scriptParams[constants.conversion.TARGET_FORMAT]
+            cleanup = scriptParams[constants.CLEANUP]
+            parent_wf_id = scriptParams.get(constants.conversion.PARENT_WORKFLOW_ID)
 
             # Connect to Omero
             conn = BlitzGateway(client_obj=client)
