@@ -780,8 +780,8 @@ def run_script():
         formats = [rstring(constants.transfer.FORMAT_TIFF),
                    rstring(constants.transfer.FORMAT_OMETIFF),
                    rstring(constants.transfer.FORMAT_OMEZARR)]
-        ome_zarr_version = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
-                            rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
+        ome_zarr_versions = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
+                             rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
         default_z_option = constants.transfer.Z_DEFAULT
         z_choices = [rstring(default_z_option),
                      rstring(constants.transfer.Z_ALL),
@@ -908,7 +908,7 @@ def run_script():
 
             scripts.String(
                 constants.transfer.OME_VERSION, grouping="5.2",
-                description="Ome-zarr version", values=ome_zarr_version,
+                description="Ome-zarr version", values=ome_zarr_versions,
                 default=constants.transfer.OME_ZARR_VERSION_0_4),
 
             scripts.String(

@@ -286,8 +286,8 @@ def runScript():
         # input and output.
         email_descr = "Do you want an email if your job is done or cancelled?"
 
-        ome_zarr_version = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
-                            rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
+        ome_zarr_versions = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
+                             rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
 
         input_list = [
             omscripts.String(
@@ -309,7 +309,7 @@ def runScript():
                            default=False),
             omscripts.String(
                             constants.transfer.OME_VERSION, grouping="01.4.1",
-                            description="Ome-zarr version", values=ome_zarr_version,
+                            description="Ome-zarr version", values=ome_zarr_versions,
                             default=constants.transfer.OME_ZARR_VERSION_0_4),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
