@@ -286,6 +286,9 @@ def runScript():
         # input and output.
         email_descr = "Do you want an email if your job is done or cancelled?"
 
+        ome_zarr_version = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
+                            rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
+
         input_list = [
             omscripts.String(
                 constants.transfer.DATA_TYPE, optional=False, grouping="01.1",
@@ -304,6 +307,10 @@ def runScript():
                            "workflows directly on ZARR data (experimental). "
                            "Use this for workflows that support ZARR input.",
                            default=False),
+            omscripts.String(
+                            constants.transfer.OME_VERSION, grouping="01.4.1",
+                            description="Ome-zarr version", values=ome_zarr_version,
+                            default=constants.transfer.OME_ZARR_VERSION_0_4),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
@@ -489,6 +496,7 @@ def runScript():
             group = conn.getGroupFromContext().id
             # Get ZARR format preference
             use_zarr_format = unwrap(client.getInput(constants.workflow.USE_ZARR_FORMAT))
+            ome_zarr_version = unwrap(client.getInput(constants.transfer.OME_ZARR_VERSION))
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")
@@ -1021,7 +1029,7 @@ def exportImageToSLURM(client: omscripts.client,
         constants.transfer.Z: rstring(constants.transfer.Z_MAXPROJ),
         constants.transfer.T: rstring(constants.transfer.T_DEFAULT),
         constants.transfer.FORMAT: rstring(
-            constants.transfer.FORMAT_ZARR),
+            constants.transfer.FORMAT_OMEZARR),
         constants.transfer.FOLDER: rstring(zipfile)
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
