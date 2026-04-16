@@ -496,7 +496,10 @@ def runScript():
             group = conn.getGroupFromContext().id
             # Get ZARR format preference
             use_zarr_format = unwrap(client.getInput(constants.workflow.USE_ZARR_FORMAT))
-            ome_zarr_version = unwrap(client.getInput(constants.transfer.OME_ZARR_VERSION))
+            if use_zarr_format:
+                ome_zarr_version = unwrap(client.getInput(constants.transfer.OME_VERSION))
+            else:
+                ome_zarr_version = constants.transfer.OME_ZARR_VERSION_0_4 # backward compatible
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")
@@ -523,7 +526,7 @@ def runScript():
             # Send data to Slurm, zipped, over SSH
             # Uses _SLURM_Image_Transfer script from Omero
             rv, task_id = exportImageToSLURM(client, conn, slurmClient,
-                                             zipfile, wf_id)
+                                             zipfile, wf_id, ome_zarr_version)
             logger.debug(f"Ran data export: {rv.keys()}, {rv}")
             if 'Message' in rv:
                 logger.info(rv['Message'].getValue())  # log
@@ -984,7 +987,8 @@ def exportImageToSLURM(client: omscripts.client,
                        conn: BlitzGateway,
                        slurmClient: SlurmClient,
                        zipfile: str,
-                       wf_id: UUID):
+                       wf_id: UUID,
+                       ome_zarr_version: str):
     """
     Export selected OMERO data to SLURM cluster for processing.
 
@@ -999,7 +1003,7 @@ def exportImageToSLURM(client: omscripts.client,
         slurmClient: Active SLURM client connection
         zipfile: Target filename for the exported data
         wf_id: Workflow UUID for tracking
-
+        ome_zarr_version: Version of OME-Zarr format to use
     Returns:
         tuple: (export_result_dict, task_id) containing script results and task ID
 
@@ -1030,6 +1034,7 @@ def exportImageToSLURM(client: omscripts.client,
         constants.transfer.T: rstring(constants.transfer.T_DEFAULT),
         constants.transfer.FORMAT: rstring(
             constants.transfer.FORMAT_OMEZARR),
+        constants.transfer.OME_VERSION: rstring(ome_zarr_version),
         constants.transfer.FOLDER: rstring(zipfile)
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}

@@ -470,7 +470,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     folder_name = script_params[constants.transfer.FOLDER]
     folder_name = os.path.basename(folder_name)
     format = script_params[constants.transfer.FORMAT]
-    ome_zarr_version = script_params[constants.transfer.OME_ZARR_VERSION]
+    ome_zarr_version = script_params[constants.transfer.OME_VERSION]
     project_z = constants.transfer.Z in script_params and \
         script_params[constants.transfer.Z] == constants.transfer.Z_MAXPROJ
 
