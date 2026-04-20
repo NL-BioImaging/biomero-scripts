@@ -2711,14 +2711,30 @@ def resolve_workflow_id(
         except Exception as e:
             logger.warning(f"Job tracker lookup failed: {e}")
 
-    # Step 4: Consistency validation (fail immediately if inconsistent)
+    # Step 4: Consistency validation
+    # job_tracker can return stale data when SLURM recycles job IDs, so it is
+    # treated as a lower-priority source.  If the authoritative sources
+    # (script_parameter and/or slurm_log) agree with each other, trust them
+    # and only warn about a job_tracker mismatch instead of failing hard.
     if validated_sources:
         unique_ids = set(validated_sources.values())
         if len(unique_ids) > 1:
-            raise RuntimeError(
-                f"Workflow ID inconsistency: {dict(validated_sources)}")
+            authoritative = {k: v for k, v in validated_sources.items()
+                             if k in ('script_parameter', 'slurm_log')}
+            authoritative_ids = set(authoritative.values())
+            if len(authoritative_ids) <= 1 and authoritative:
+                # Authoritative sources agree; job_tracker is likely stale
+                # (SLURM recycles job IDs across workflows)
+                logger.warning(
+                    f"Workflow ID mismatch in job_tracker (likely stale SLURM job ID reuse). "
+                    f"Trusting authoritative sources. All sources: {dict(validated_sources)}")
+                wf_id = list(authoritative.values())[0]
+            else:
+                raise RuntimeError(
+                    f"Workflow ID inconsistency: {dict(validated_sources)}")
+        else:
+            wf_id = list(validated_sources.values())[0]
 
-        wf_id = list(validated_sources.values())[0]
         sources = list(validated_sources.keys())
         logger.info(f"Workflow ID validated across {sources}: {wf_id}")
         return wf_id
@@ -3076,6 +3092,7 @@ def runScript() -> None:
             slurm_data_path = None
             folder = None
             log_file = None
+            script_failed = False
             
             scriptParams = client.getInputs(unwrap=True)
             conn = BlitzGateway(client_obj=client)
@@ -3317,6 +3334,7 @@ def runScript() -> None:
                         f"Failed to update task completion status: {db_e}")
 
         except Exception as e:
+            script_failed = True
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
 
@@ -3361,7 +3379,7 @@ def runScript() -> None:
                 if wf_id is not None:
                     client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
                 # Only set success message if we haven't already set a failure message
-                if not message.startswith("FAILED:"):
+                if not script_failed:
                     client.setOutput("Message", rstring(str(message)))
             except Exception as output_error:
                 logger.error(f"Failed to set output: {output_error}")
