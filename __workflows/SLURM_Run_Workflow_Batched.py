@@ -70,7 +70,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE]
 
 # Version constant for easy version management
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 
 def runScript():

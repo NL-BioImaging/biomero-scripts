@@ -51,7 +51,7 @@ from biomero import SlurmClient, constants
 import logging
 
 # Version constant for easy version management
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 logger = logging.getLogger(__name__)
 
