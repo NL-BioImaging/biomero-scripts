@@ -1207,7 +1207,7 @@ def extract_slurm_results_zip(
     # Copy zip from SLURM to local storage
     logger.info(f"Copying zip file to local storage: {local_tmp_storage}")
     try:
-        copy_result = slurmClient.copy_zip_locally(local_tmp_storage, filename)
+        copy_result = slurmClient.copy_zip_locally(local_tmp_storage, f"{slurm_data_path}/{filename}")
 
         # Validate copied zip file
         temporary_zip_file_path = f"{local_tmp_storage.rstrip('/')}/{filename}.zip"

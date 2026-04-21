@@ -1534,7 +1534,7 @@ def runScript():
                             logger.debug(f"{zip_result.stdout}")
 
                             copy_result = slurmClient.copy_zip_locally(
-                                local_tmp_storage, filename)
+                                local_tmp_storage, f"{data_location}/{filename}")
 
                             message += "\nSuccesfully copied zip."
                             logger.info(f"{message}")
