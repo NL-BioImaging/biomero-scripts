@@ -76,7 +76,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 # Version constant for easy version management
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 # keep track of log strings.
 log_strings = []

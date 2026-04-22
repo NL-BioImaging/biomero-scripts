@@ -58,7 +58,7 @@ import sys
 import pkg_resources
 
 # Version constant for easy version management
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 logger = logging.getLogger(__name__)
 

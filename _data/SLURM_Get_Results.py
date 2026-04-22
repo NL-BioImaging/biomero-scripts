@@ -65,7 +65,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 OBJECT_TYPES = (
     'Plate',
@@ -1518,6 +1518,16 @@ def runScript():
                     data_location = slurmClient.extract_data_location_from_log(
                         slurm_job_id)
                     logger.debug(f"Extracted {data_location}")
+
+                    # Normalize to absolute path - log may contain a relative path (e.g. "my-scratch/...")
+                    # which would break the 7z zip command (cd changes CWD, making relative paths wrong)
+                    if data_location and not data_location.startswith('/'):
+                        abs_result = slurmClient.run_commands([f'realpath "{data_location}"'])
+                        if abs_result.ok and abs_result.stdout.strip():
+                            data_location = abs_result.stdout.strip()
+                            logger.info(f"Resolved to absolute path: {data_location}")
+                        else:
+                            logger.warning(f"Could not resolve absolute path for '{data_location}', proceeding with relative path")
 
                     # zip and scp data location
                     if data_location:

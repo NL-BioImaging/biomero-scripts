@@ -93,7 +93,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 
 def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway, client: omscripts.client) -> None:
@@ -1029,13 +1029,15 @@ def exportImageToSLURM(client: omscripts.client,
         constants.transfer.IDS: client.getInput(constants.transfer.IDS),
         constants.transfer.SETTINGS: rbool(True),
         constants.transfer.CHANNELS: rbool(False),
+        constants.transfer.CHANNELS_GREY: rbool(False),
         constants.transfer.MERGED: rbool(True),
         constants.transfer.Z: rstring(constants.transfer.Z_MAXPROJ),
         constants.transfer.T: rstring(constants.transfer.T_DEFAULT),
         constants.transfer.FORMAT: rstring(
             constants.transfer.FORMAT_OMEZARR),
         constants.transfer.OME_VERSION: rstring(ome_zarr_version),
-        constants.transfer.FOLDER: rstring(zipfile)
+        constants.transfer.FOLDER: rstring(zipfile),
+        constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True)
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
@@ -1189,7 +1191,7 @@ def importResultsToOmero(client: omscripts.client,
         constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
         constants.results.OUTPUT_SLURM_JOB_ID: rstring(str(slurm_job_id)),
         constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
-        constants.results.WORKFLOW_UUID_OUTPUT: rstring(str(wf_id))
+        constants.results.WORKFLOW_UUID: rstring(str(wf_id))
     }
 
     # Get a 'parent' dataset or plate of input images
@@ -1338,6 +1340,14 @@ def importResultsToOmero(client: omscripts.client,
         inputs[
             constants.results.OUTPUT_ATTACH_TABLE
         ] = rbool(False)
+
+    # Explicitly set all import params for provenance/reproducibility.
+    # These match the defaults in the import scripts but are forwarded here
+    # so they are always recorded in task metadata regardless of how the
+    # import script is invoked. Run_Workflow owns the canonical values.
+    inputs[constants.results.IMPORT_LABEL_ZARRS] = rbool(True)
+    inputs[constants.results.IMPORT_ONLY_LABELS] = rbool(True)
+    inputs[constants.results.TEST_WRITE_PERMISSIONS_ONLY] = rbool(False)
 
     # Wait for Slurm Accounting to update
     wait_for_job_completion(slurmClient, slurm_job_id)

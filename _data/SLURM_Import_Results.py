@@ -129,7 +129,7 @@ if not IMPORTER_ENABLED:
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
 # Version constant for easy version management
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 OBJECT_TYPES = (
     'Plate',
@@ -1151,6 +1151,16 @@ def extract_slurm_results_zip(
 
     logger.info(f"Extracted data location: {slurm_data_path}")
 
+    # Normalize to absolute path - log may contain a relative path (e.g. "my-scratch/...")
+    # which would break the 7z zip command (cd changes CWD, making relative paths wrong)
+    if not slurm_data_path.startswith('/'):
+        abs_result = slurmClient.run_commands([f'realpath "{slurm_data_path}"'])
+        if abs_result.ok and abs_result.stdout.strip():
+            slurm_data_path = abs_result.stdout.strip()
+            logger.info(f"Resolved to absolute path: {slurm_data_path}")
+        else:
+            logger.warning(f"Could not resolve absolute path for '{slurm_data_path}', proceeding with relative path")
+
     # Poll SLURM until data/out contains files (NFS flush lag after job COMPLETED)
     out_dir = f"{slurm_data_path}/data/out"
     poll_interval = 15  # seconds
@@ -1829,12 +1839,18 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
     zarr_dirs = []
     
     for root, dirs, files in os.walk(results_path):
-        # Check for zarr directories
-        for dir_name in dirs:
-            if dir_name.endswith('.zarr'):
-                zarr_path = os.path.join(root, dir_name)
-                zarr_dirs.append(zarr_path)
-        
+        # Check for zarr directories - collect them but do NOT descend into them.
+        # Label zarrs (*.zarr/labels/*/zarr) are internal zarr structure and should
+        # not be treated as independent rename targets. Walking into zarr dirs also
+        # causes a path-invalidation bug: after the parent zarr is renamed, any
+        # child zarr paths collected earlier no longer exist.
+        zarr_subdirs = [d for d in dirs if d.endswith('.zarr')]
+        for dir_name in zarr_subdirs:
+            zarr_path = os.path.join(root, dir_name)
+            zarr_dirs.append(zarr_path)
+        # Prune zarr dirs so os.walk does not descend into them
+        dirs[:] = [d for d in dirs if not d.endswith('.zarr')]
+
         # Check for regular image files
         for file in files:
             file_path = os.path.join(root, file)
@@ -2157,6 +2173,129 @@ def add_metadata_to_imported_plates(
         return error_msg
 
 
+def rename_label_images_in_omero(
+    conn: BlitzGateway,
+    orders: List[Dict[str, Any]]
+) -> str:
+    """Rename label zarr images in OMERO to include their parent zarr name.
+
+    When importing label zarrs, all labels from one workflow run share the same
+    name (e.g. 'fractal_cellpose_sam_segmentation') with no way to tell which
+    parent image they belong to. This function renames them in OMERO to:
+        'ParentStem [label_name]'
+    e.g. 'Cell-Granules_result.tif [fractal_cellpose_sam_segmentation]'
+
+    This follows the same convention as multi-series files:
+        'Swiss Rolls GM1748.lif [TileScan_Day10_730]'
+
+    The path structure in the order is:
+        /.../ParentName.zarr/labels/label_name.zarr
+
+    Args:
+        conn: OMERO BlitzGateway connection.
+        orders: List of upload orders (only label orders are processed).
+
+    Returns:
+        Status message describing renames performed.
+    """
+    label_orders = [o for o in orders if o.get('source') == 'SLURM_Results_Labels']
+    if not label_orders:
+        return ""
+
+    import omero.sys
+    update_service = conn.getUpdateService()
+    query_service = conn.getQueryService()
+    renamed_count = 0
+    message = ""
+
+    for order in label_orders:
+        order_uuid = order.get('UUID')
+        files = order.get('Files', [])
+        if not order_uuid or not files:
+            continue
+
+        # Build filepath -> new OMERO name from path structure
+        filepath_to_name = {}
+        for fpath in files:
+            if '/labels/' not in fpath:
+                continue
+            parent_part, label_part = fpath.split('/labels/', 1)
+            parent_stem = os.path.basename(parent_part)
+            if parent_stem.endswith('.zarr'):
+                parent_stem = parent_stem[:-5]
+            label_stem = os.path.basename(label_part)
+            if label_stem.endswith('.zarr'):
+                label_stem = label_stem[:-5]
+            filepath_to_name[fpath] = f"{parent_stem} [{label_stem}]"
+
+        if not filepath_to_name:
+            logger.warning(f"No label paths with /labels/ structure in order {order_uuid}")
+            continue
+
+        # Find images biomero-importer tagged with this order UUID
+        hql = """
+            SELECT DISTINCT img.id
+            FROM Image img
+            JOIN img.annotationLinks ial
+            JOIN ial.child ann
+            JOIN ann.mapValue mv
+            WHERE TYPE(ann) = MapAnnotation
+            AND mv.value = :uuid
+        """
+        params_i = omero.sys.ParametersI()
+        params_i.addString("uuid", order_uuid)
+        results = query_service.projection(hql, params_i, conn.SERVICE_OPTS)
+        if not results:
+            logger.warning(f"No images found for label order UUID {order_uuid}")
+            continue
+
+        image_ids = [r[0].val for r in results]
+        new_names = list(filepath_to_name.values())
+
+        if len(image_ids) == len(files):
+            # 1-to-1 match by order position
+            for img_id, fpath in zip(image_ids, files):
+                new_name = filepath_to_name.get(fpath)
+                if not new_name:
+                    continue
+                img = conn.getObject("Image", img_id)
+                if img and img.getName() != new_name:
+                    img_obj = img._obj
+                    img_obj.name = rstring(new_name)
+                    update_service.saveObject(img_obj, conn.SERVICE_OPTS)
+                    renamed_count += 1
+                    logger.info(f"Renamed label image {img_id}: '{img.getName()}' -> '{new_name}'")
+        else:
+            # Count mismatch: match by label stem in current image name
+            logger.warning(
+                f"Image count ({len(image_ids)}) != file count ({len(files)}) "
+                f"for label order {order_uuid}, falling back to name-based matching")
+            for img_id in image_ids:
+                img = conn.getObject("Image", img_id)
+                if not img:
+                    continue
+                current_name = img.getName()
+                matched_name = None
+                for fpath, new_name in filepath_to_name.items():
+                    label_stem = os.path.basename(fpath.split('/labels/')[-1])
+                    if label_stem.endswith('.zarr'):
+                        label_stem = label_stem[:-5]
+                    if label_stem and label_stem in current_name:
+                        matched_name = new_name
+                        break
+                if matched_name and current_name != matched_name:
+                    img_obj = img._obj
+                    img_obj.name = rstring(matched_name)
+                    update_service.saveObject(img_obj, conn.SERVICE_OPTS)
+                    renamed_count += 1
+                    logger.info(f"Renamed label image {img_id}: '{current_name}' -> '{matched_name}'")
+
+    if renamed_count > 0:
+        message = f"\nRenamed {renamed_count} label image(s) in OMERO to include parent zarr name"
+    logger.info(f"Label image OMERO rename: {renamed_count} image(s) renamed")
+    return message
+
+
 def add_plate_annotations(conn, slurmClient, plate_id, job_id, wf_id=None):
     """Add workflow metadata annotations to a plate"""
     add_object_annotations(conn, slurmClient, "Plate", plate_id, job_id, wf_id)
@@ -2445,6 +2584,11 @@ def process_importer_workflow(
                 conn, slurmClient, destination_id, order_uuids, wf_id, slurm_job_id, destination_type)
             if post_processing_message:
                 message += f"\n{post_processing_message}"
+
+            # Rename label zarr images in OMERO: 'label_name' -> 'ParentZarr [label_name]'
+            rename_msg = rename_label_images_in_omero(conn, orders)
+            if rename_msg:
+                message += rename_msg
         else:
             logger.error(f"Some imports failed: {failed_uuids}")
             message += f"\nSome imports failed for UUIDs: {failed_uuids}"
