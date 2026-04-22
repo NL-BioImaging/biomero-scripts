@@ -292,67 +292,78 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
         img_name = os.path.join(folder_name, img_name)
     # check we don't overwrite existing file
     i = 1
-    path_name = img_name[:-(len(extension)+1)]
+    path_name = img_name[:-(len(extension) + 1)]
     while os.path.exists(img_name):
         img_name = "%s_(%d).%s" % (path_name, i, extension)
         i += 1
 
     log("  Saving file as: %s" % img_name)
 
-    curr_dir = os.getcwd()
-    exp_dir = os.path.join(curr_dir, folder_name)
+    filepath = None
+    annotations = object.listAnnotations()
+    for annotation in annotations:
+        if annotation.OMERO_TYPE == omero.model.MapAnnotationI:
+            for ann in annotation.getMapValue():
+                if ann.name in ['Filepath', 'Imported_from']:
+                    filepath = ann.value
 
-    # TODO: Check if import omero-cli-zarr and #export(...) works better than subprocess?
-    # https://github.com/ome/omero-cli-zarr/blob/a35ade1d8177585b3e21ef860fd645a8d6eb5aea/src/omero_zarr/cli.py#L327C9-L327C15
-
-    # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
-    cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
-    command = f'omero zarr -s "{conn.host}" -k "{suuid}" export'
-    if ome_zarr_version:
-        command += f' --format {ome_zarr_version}'   # argument only available in ome-cli-zarr v0.8.0+
-    command += f' --output "{exp_dir}"'
-    if data_type == constants.transfer.DATA_TYPE_PLATE:
-        command += f' Plate:{object.getId()}'
-    elif data_type == constants.transfer.DATA_TYPE_IMAGE:
-        command += f' Image:{object.getId()}'
+    if filepath and os.path.exists(filepath):
+        shutil.copytree(filepath, img_name, dirs_exist_ok=True)
     else:
-        log(f"OMERO ZARR command for {data_type}: {command}")
-        print(f"OMERO ZARR command for {data_type}: {command}")
-        raise ValueError(f"No OMERO ZARR command known for data_type: {data_type}")
-    log(f"OMERO ZARR command for {data_type}: {command}")
-    cmd = cmd1 + " && " + command
-    logger.debug(cmd)
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=True
-    )
-    stdout, stderr = process.communicate()
-    if stderr:
-        logger.warning(stderr.decode("utf-8"))
-    if process.returncode == 0:
-        log(f"OME ZARR CLI: {stdout}")
-        logger.debug(img_name)
-        
-        # Check for both .ome.zarr and .zarr extensions for compatibility
-        source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
-        source_zarr = f"{exp_dir}/{object.getId()}.zarr"
+        curr_dir = os.getcwd()
+        exp_dir = os.path.join(curr_dir, folder_name)
 
-        if os.path.exists(source_ome_zarr):
-            os.rename(source_ome_zarr, img_name)
-            log(f"Renamed .ome.zarr file: {source_ome_zarr} -> {img_name}")
-        elif os.path.exists(source_zarr):
-            os.rename(source_zarr, img_name)
-            log(f"Renamed .zarr file: {source_zarr} -> {img_name}")
+        # TODO: Check if import omero-cli-zarr and #export(...) works better than subprocess?
+        # https://github.com/ome/omero-cli-zarr/blob/a35ade1d8177585b3e21ef860fd645a8d6eb5aea/src/omero_zarr/cli.py#L327C9-L327C15
+
+        # command = f'omero zarr -s "$CONFIG_omero_master_host" -k "{suuid}" export --bf Image:{image.getId()}'
+        cmd1 = 'export JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:/bin/java::")'
+        command = f'omero zarr -s "{conn.host}" -k "{suuid}" export'
+        if ome_zarr_version:
+            command += f' --format {ome_zarr_version}'   # argument only available in ome-cli-zarr v0.8.0+
+        command += f' --output "{exp_dir}"'
+        if data_type == constants.transfer.DATA_TYPE_PLATE:
+            command += f' Plate:{object.getId()}'
+        elif data_type == constants.transfer.DATA_TYPE_IMAGE:
+            command += f' Image:{object.getId()}'
         else:
-            error_msg = (f"Neither {source_ome_zarr} nor {source_zarr} "
-                         f"found after ZARR export")
-            raise FileNotFoundError(error_msg)
-    else:
-        error_msg = f"ZARR export failed with return code {process.returncode}: {stderr.decode('utf-8') if stderr else 'Unknown error'}"
-        logger.error(f"Critical error: {error_msg}")
-        raise Exception(error_msg)
+            log(f"OMERO ZARR command for {data_type}: {command}")
+            print(f"OMERO ZARR command for {data_type}: {command}")
+            raise ValueError(f"No OMERO ZARR command known for data_type: {data_type}")
+        log(f"OMERO ZARR command for {data_type}: {command}")
+        cmd = cmd1 + " && " + command
+        logger.debug(cmd)
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True
+        )
+        stdout, stderr = process.communicate()
+        if stderr:
+            logger.warning(stderr.decode("utf-8"))
+        if process.returncode == 0:
+            log(f"OME ZARR CLI: {stdout}")
+            logger.debug(img_name)
+
+            # Check for both .ome.zarr and .zarr extensions for compatibility
+            source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
+            source_zarr = f"{exp_dir}/{object.getId()}.zarr"
+
+            if os.path.exists(source_ome_zarr):
+                os.rename(source_ome_zarr, img_name)
+                log(f"Renamed .ome.zarr file: {source_ome_zarr} -> {img_name}")
+            elif os.path.exists(source_zarr):
+                os.rename(source_zarr, img_name)
+                log(f"Renamed .zarr file: {source_zarr} -> {img_name}")
+            else:
+                error_msg = (f"Neither {source_ome_zarr} nor {source_zarr} "
+                             f"found after ZARR export")
+                raise FileNotFoundError(error_msg)
+        else:
+            error_msg = f"ZARR export failed with return code {process.returncode}: {stderr.decode('utf-8') if stderr else 'Unknown error'}"
+            logger.error(f"Critical error: {error_msg}")
+            raise Exception(error_msg)
     return  # shortcut
 
 
