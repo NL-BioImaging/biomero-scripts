@@ -297,8 +297,6 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
         img_name = "%s_(%d).%s" % (path_name, i, extension)
         i += 1
 
-    log("  Saving file as: %s" % img_name)
-
     filepath = None
     annotations = object.listAnnotations()
     for annotation in annotations:
@@ -308,8 +306,10 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
                     filepath = ann.value
 
     if filepath and filepath.lower().endswith('.zarr') and os.path.exists(filepath):
+        log(" Copying file as: %s" % img_name)
         shutil.copytree(filepath, img_name, dirs_exist_ok=True)
     else:
+        log("  Saving file as: %s" % img_name)
         curr_dir = os.getcwd()
         exp_dir = os.path.join(curr_dir, folder_name)
 
