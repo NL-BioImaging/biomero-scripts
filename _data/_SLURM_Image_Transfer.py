@@ -307,7 +307,7 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
                 if ann.name in ['Filepath', 'Imported_from']:
                     filepath = ann.value
 
-    if filepath and os.path.exists(filepath):
+    if filepath and filepath.lower().endswith('.zarr') and os.path.exists(filepath):
         shutil.copytree(filepath, img_name, dirs_exist_ok=True)
     else:
         curr_dir = os.getcwd()
