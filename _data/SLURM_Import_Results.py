@@ -129,7 +129,7 @@ if not IMPORTER_ENABLED:
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
 # Version constant for easy version management
-VERSION = "2.5.2"
+VERSION = "2.5.3"
 
 OBJECT_TYPES = (
     'Plate',
