@@ -237,11 +237,12 @@ def find_label_zarr_paths(base_path: str) -> List[str]:
             for item in os.listdir(labels_dir):
                 potential_label_zarr = os.path.join(labels_dir, item)
                 if os.path.isdir(potential_label_zarr):
-                    # Check if this is a valid zarr array (has .zattrs or .zgroup)
+                    # Check if this is a valid zarr array (has .zattrs or .zgroup or zarr.json)
                     has_zattrs = os.path.exists(os.path.join(potential_label_zarr, ".zattrs"))
                     has_zgroup = os.path.exists(os.path.join(potential_label_zarr, ".zgroup"))
+                    has_zarrjson = os.path.exists(os.path.join(potential_label_zarr, "zarr.json"))
                     
-                    if has_zattrs or has_zgroup:
+                    if has_zattrs or has_zgroup or has_zarrjson:
                         # Check if it already has .zarr extension
                         if not item.endswith('.zarr'):
                             # Rename the directory to have .zarr extension on disk
@@ -252,11 +253,18 @@ def find_label_zarr_paths(base_path: str) -> List[str]:
                                 logger.info(f"Renamed label zarr: {potential_label_zarr} -> {label_zarr_path}")
                                 
                                 # Update the .zattrs file in the labels directory to reflect the rename
+                                labels_attrs_path = None
                                 labels_zattrs_path = os.path.join(labels_dir, ".zattrs")
-                                if os.path.exists(labels_zattrs_path):
+                                labels_zarrjson_path = os.path.join(labels_dir, "zarr.json")
+                                if os.path.exists(labels_zarrjson_path):
+                                    labels_attrs_path = labels_zarrjson_path
+                                elif os.path.exists(labels_zattrs_path):
+                                    labels_attrs_path = labels_zattrs_path
+
+                                if labels_attrs_path:
                                     try:
                                         import json
-                                        with open(labels_zattrs_path, 'r') as f:
+                                        with open(labels_attrs_path, 'r') as f:
                                             zattrs_data = json.load(f)
                                         
                                         # Update the labels list if it exists
@@ -268,13 +276,13 @@ def find_label_zarr_paths(base_path: str) -> List[str]:
                                                 # If old name not found but new name not present, add it
                                                 zattrs_data['labels'].append(new_item_name)
                                         
-                                        # Write back the updated .zattrs
-                                        with open(labels_zattrs_path, 'w') as f:
+                                        # Write back the updated attrs
+                                        with open(labels_attrs_path, 'w') as f:
                                             json.dump(zattrs_data, f, indent=2)
-                                        logger.info(f"Updated labels/.zattrs to reference {new_item_name}")
+                                        logger.info(f"Updated labels/attrs to reference {new_item_name}")
                                         
                                     except (json.JSONDecodeError, IOError) as e:
-                                        logger.warning(f"Failed to update labels/.zattrs after rename: {e}")
+                                        logger.warning(f"Failed to update labels/attrs after rename: {e}")
                                 
                                 label_zarrs.append(label_zarr_path)
                                 logger.debug(f"Found label zarr: {label_zarr_path}")
