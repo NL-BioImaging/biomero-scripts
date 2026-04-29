@@ -66,6 +66,7 @@ DATATYPES = [rstring(constants.transfer.DATA_TYPE_DATASET),
 OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_PARENT,
                   constants.workflow.OUTPUT_NEW_DATASET,
+                  constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE]
 
@@ -173,6 +174,23 @@ def runScript():
                              grouping="02.5",
                              description="Name for the new dataset w/ result images",
                              default=constants.workflow.NO),
+            omscripts.String(constants.workflow.OUTPUT_NEW_SCREEN, optional=True,
+                             grouping="02.5.1",
+                             description="Name for the new screen w/ result images",
+                             default=constants.workflow.NO),
+            omscripts.Bool(constants.workflow.OUTPUT_DUPLICATES,
+                           optional=True,
+                           grouping="02.6",
+                           description="If a dataset already matches this name, still make a new one? (Note: for batched runs this is always False to share one dataset)",
+                           default=False),
+            omscripts.Long(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID,
+                           optional=True,
+                           grouping="02.61",
+                           description="Pinpoint an exact Dataset by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
+            omscripts.Long(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID,
+                           optional=True,
+                           grouping="02.62",
+                           description="Pinpoint an exact Screen by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             omscripts.Bool(constants.workflow.OUTPUT_CSV_TABLE,
                            optional=False,
                            grouping="02.8",
@@ -371,7 +389,8 @@ def runScript():
             logger.info(
                 f"Created {len(batch_ids_list)} batches from {len(image_ids)} images (batch size: {batch_size})")
 
-            # For batching, ensure we write to 1 dataset, not 1 for each batch
+            # For batching, force duplicate=False so all batches share one dataset/screen.
+            # Explicit Dataset_ID / Screen_ID overrides are kept as-is (already in inputs).
             inputs[constants.workflow.OUTPUT_DUPLICATES] = omscripts.rbool(
                 False)
             processes = {}

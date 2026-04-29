@@ -343,6 +343,14 @@ def runScript():
                            grouping="02.6",
                            description="If a dataset already matches this name, still make a new one?",
                            default=False),
+            omscripts.Long(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID,
+                           optional=True,
+                           grouping="02.61",
+                           description="Pinpoint an exact Dataset by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
+            omscripts.Long(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID,
+                           optional=True,
+                           grouping="02.62",
+                           description="Pinpoint an exact Screen by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             omscripts.Bool(constants.workflow.OUTPUT_CSV_TABLE,
                            optional=False,
                            grouping="02.8",
@@ -1281,6 +1289,10 @@ def importResultsToOmero(client: omscripts.client,
         inputs[
             constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE
         ] = client.getInput(constants.workflow.OUTPUT_DUPLICATES)
+        # Forward explicit dataset ID if provided (wins over name lookup)
+        dataset_id_override = client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID)
+        if dataset_id_override is not None:
+            inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET_ID] = dataset_id_override
 
     else:
         inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET] = rbool(
@@ -1296,6 +1308,10 @@ def importResultsToOmero(client: omscripts.client,
         inputs[
             constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE
         ] = client.getInput(constants.workflow.OUTPUT_DUPLICATES)
+        # Forward explicit screen ID if provided (wins over name lookup)
+        screen_id_override = client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID)
+        if screen_id_override is not None:
+            inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID] = screen_id_override
 
     else:
         inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN] = rbool(

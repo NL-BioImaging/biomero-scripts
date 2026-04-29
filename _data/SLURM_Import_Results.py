@@ -882,9 +882,20 @@ def upload_log_to_omero(
         # But you could add this as output if you wanted log instead
         # client.setOutput("File_Annotation", robject(annotation._obj))
 
-        # For now, we choose to add as a weblink button
+        # Build a fully-qualified URL so it works from any browser location.
+        # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
+        # the canonical absolute base; fall back to omero.web.prefix for a
+        # path-absolute URL, then bare path as last resort.
         obj_id = annotation.getFile().getId()
-        url = f"get_original_file/{obj_id}/"
+        try:
+            config = conn.getConfigService()
+            web_host = (config.getConfigValue("omero.client.web.host") or "").rstrip("/")
+            if not web_host:
+                web_prefix = (config.getConfigValue("omero.web.prefix") or "").rstrip("/")
+                web_host = web_prefix  # may still be empty → path-absolute
+        except Exception:
+            web_host = ""
+        url = f"{web_host}/webclient/get_original_file/{obj_id}/"
         client.setOutput("URL", wrap({"type": "URL", "href": url}))
 
         for project in projects:
@@ -2561,17 +2572,25 @@ def process_importer_workflow(
             constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME))
         create_new_destination = unwrap(client.getInput(
             constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE))
+        explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
     else:
         destination_name = unwrap(client.getInput(
             constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
         create_new_destination = unwrap(client.getInput(
             constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
+        explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
     
     logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
     destination_id = None
 
+    # If an explicit ID is provided, use it directly — skip name lookup entirely
+    if explicit_destination_id:
+        destination_id = int(explicit_destination_id)
+        create_new_destination = False
+        logger.info(
+            f"Using explicit {destination_type}_ID: {destination_id} (skipping name lookup)")
     # Check if destination exists or create new one
-    if not create_new_destination:
+    elif not create_new_destination:
         try:
             existing_objects_w_name = [d.id for d in conn.getObjects(
                 destination_type, attributes={"name": destination_name})]
@@ -3205,6 +3224,10 @@ def runScript() -> None:
                          grouping="05.2",
                          description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
+            scripts.Long(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID,
+                         optional=True,
+                         grouping="05.25",
+                         description="Pinpoint an exact Dataset by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
                          grouping="05.3",
@@ -3230,6 +3253,10 @@ def runScript() -> None:
                          grouping="06.2",
                          description="If there is already a screen with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
+            scripts.Long(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID,
+                         optional=True,
+                         grouping="06.25",
+                         description="Pinpoint an exact Screen by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             scripts.Bool(constants.results.IMPORT_LABEL_ZARRS,
                          optional=True,
                          grouping="07",
