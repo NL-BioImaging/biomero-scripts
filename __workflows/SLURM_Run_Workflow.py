@@ -476,12 +476,20 @@ def runScript():
                 raise ValueError(version_errors)
             # Check if user actually selected the output option
             selected_output = {}
+            dataset_id_override = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
+            screen_id_override = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
             for output_option in OUTPUT_OPTIONS:
                 selected_op = unwrap(client.getInput(output_option))
                 if (not selected_op) or (
                     selected_op == constants.workflow.NO) or (
                         type(selected_op) == list and constants.workflow.NO in selected_op):
-                    selected_output[output_option] = False
+                    # Still treat as selected if an explicit ID override was given
+                    if output_option == constants.workflow.OUTPUT_NEW_DATASET and dataset_id_override:
+                        selected_output[output_option] = True
+                    elif output_option == constants.workflow.OUTPUT_NEW_SCREEN and screen_id_override:
+                        selected_output[output_option] = True
+                    else:
+                        selected_output[output_option] = False
                 else:
                     selected_output[output_option] = True
                     logger.debug(
