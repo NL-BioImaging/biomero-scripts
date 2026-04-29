@@ -398,8 +398,6 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                logger.debug(f"{param_incr}, {k}, {param}")
-                logger.info(param)
                 # Convert the parameter from cy(tomine)type to om(ero)type
                 omtype_param = slurmClient.convert_cytype_to_omtype(
                     param["cytype"],

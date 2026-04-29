@@ -133,6 +133,9 @@ def runScript():
         # input and output.
         email_descr = "Do you want an email if your job is done or cancelled?"
 
+        ome_zarr_versions = [rstring(constants.transfer.OME_ZARR_VERSION_0_4),
+                             rstring(constants.transfer.OME_ZARR_VERSION_0_5)]
+
         input_list = [
             omscripts.String(
                 constants.transfer.DATA_TYPE, optional=False, grouping="01.1",
@@ -150,6 +153,15 @@ def runScript():
                           optional=False, grouping="01.4",
                           description="Number of images to send to 1 slurm job",
                           default=32),
+            omscripts.Bool(constants.workflow.USE_ZARR_FORMAT, grouping="01.5",
+                           description="Skip TIFF conversion and run "
+                           "workflows directly on ZARR data (experimental). "
+                           "Use this for workflows that support ZARR input.",
+                           default=False),
+            omscripts.String(
+                            constants.transfer.OME_VERSION, grouping="01.5.1",
+                            description="Ome-zarr version", values=ome_zarr_versions,
+                            default=constants.transfer.OME_ZARR_VERSION_0_4),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
@@ -363,31 +375,53 @@ def runScript():
                                                                 script_params)
                 UI_messages['Message'].extend(
                     [log_message])
-                images = []
-                wells = []
-                for plate in objects:
-                    wells.extend(list(plate.listChildren()))
-                for well in wells:
-                    nr_samples = well.countWellSample()
-                    for index in range(0, nr_samples):
-                        image = well.getImage(index)
-                        images.append(image)
-                if not images:
-                    error = f"No image found in plate(s) {data_ids} / {objects}"
-                    UI_messages['Message'].extend(
-                        [error])
-                    raise ValueError(error)
+                # Zarr plate-to-plate workflows output to a screen.
+                # In that case, keep Data_Type=Plate and batch by plate ID.
+                # Old-school plate workflows (no screen output) expand wells
+                # into individual images and output to a dataset.
+                output_screen = unwrap(client.getInput(
+                    constants.workflow.OUTPUT_NEW_SCREEN))
+                screen_id_override = unwrap(client.getInput(
+                    constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
+                use_screen_output = (
+                    output_screen and output_screen != constants.workflow.NO
+                ) or screen_id_override
+                if use_screen_output:
+                    # Plate-to-plate: batch by plate, preserve Data_Type=Plate
+                    if not objects:
+                        error = f"No plates found for IDs {data_ids}"
+                        UI_messages['Message'].extend([error])
+                        raise ValueError(error)
+                    image_ids = [plate.id for plate in objects]
+                    # DATA_TYPE stays Plate — sub-jobs receive Data_Type=Plate
                 else:
+                    # Old-school: expand wells → images, output to dataset
+                    images = []
+                    wells = []
+                    for plate in objects:
+                        wells.extend(list(plate.listChildren()))
+                    for well in wells:
+                        nr_samples = well.countWellSample()
+                        for index in range(0, nr_samples):
+                            image = well.getImage(index)
+                            images.append(image)
+                    if not images:
+                        error = f"No image found in plate(s) {data_ids} / {objects}"
+                        UI_messages['Message'].extend([error])
+                        raise ValueError(error)
                     image_ids = [img.id for img in images]
                     inputs[constants.transfer.DATA_TYPE] = rstring(
                         constants.transfer.DATA_TYPE_IMAGE)
             else:
                 raise ValueError(f"Not recognized input data: {data_type}. \
                     Expected one of {DATATYPES}")
+            # inputs[DATA_TYPE] may have been updated (e.g. plate → image for old-school wells mode)
+            effective_type = unwrap(inputs[constants.transfer.DATA_TYPE]) \
+                if constants.transfer.DATA_TYPE in inputs else data_type
             batch_ids = chunk(image_ids, batch_size)
             batch_ids_list = list(batch_ids)  # Convert generator to list
             logger.info(
-                f"Created {len(batch_ids_list)} batches from {len(image_ids)} images (batch size: {batch_size})")
+                f"Created {len(batch_ids_list)} batches from {len(image_ids)} {data_type}s (batch size: {batch_size})")
 
             # For batching, force duplicate=False so all batches share one dataset/screen.
             # Explicit Dataset_ID / Screen_ID overrides are kept as-is (already in inputs).
@@ -512,7 +546,7 @@ def runScript():
                                 # Add batch supervisor metadata for this completed batch
                                 try:
                                     add_batch_supervisor_metadata_for_batch(
-                                        conn, slurmClient, wf_id, i, batch, len(batch_ids_list), inputs)
+                                        conn, slurmClient, wf_id, i, batch, len(batch_ids_list), inputs, effective_type)
                                 except Exception as e:
                                     logger.warning(
                                         f"Failed to add batch supervisor metadata for batch {i}: {e}")
@@ -578,75 +612,134 @@ def chunk(lst, n):
     return iter(lambda: tuple(islice(it, n)), ())
 
 
-def add_batch_supervisor_metadata_for_batch(conn, slurmClient, supervisor_wf_id, batch_index, batch_image_ids, total_batches, base_inputs):
-    """Add batch supervisor metadata to images from a single completed batch.
+def add_batch_supervisor_metadata_for_batch(conn, slurmClient, supervisor_wf_id, batch_index, batch_ids, total_batches, base_inputs, effective_type=None):
+    """Add batch supervisor metadata to output objects from a single completed batch.
 
-    This function finds output images by matching the input image IDs and output settings
-    that were used for this specific batch, then adds supervisor workflow metadata.
+    For image workflows: annotates output images found via annotation query.
+    For plate workflows: annotates output plates found via annotation query.
 
     Args:
         conn: OMERO BlitzGateway connection
         slurmClient: SlurmClient for accessing workflow tracking
         supervisor_wf_id: UUID of the supervisor (batched) workflow
         batch_index: Index of this specific batch
-        batch_image_ids: List of input image IDs for this batch
+        batch_ids: List of input object IDs (plate IDs or image IDs) for this batch
         total_batches: Total number of batches
         base_inputs: Base input parameters used for all batches
+        effective_type: The data type actually sent to sub-jobs (e.g. 'Plate' or 'Image')
     """
     try:
+        import ezomero
         logger.debug(
             f"Adding batch supervisor metadata for batch {batch_index + 1}/{total_batches}")
 
-        # Extract the output settings that were used for all batches
-        output_settings = {}
-        if constants.workflow.OUTPUT_NEW_DATASET in base_inputs:
-            output_settings['New Dataset'] = unwrap(
-                base_inputs[constants.workflow.OUTPUT_NEW_DATASET])
-        if constants.workflow.OUTPUT_DUPLICATES in base_inputs:
-            output_settings['Allow duplicate?'] = unwrap(
-                base_inputs[constants.workflow.OUTPUT_DUPLICATES])
+        is_plate_mode = (effective_type == constants.transfer.DATA_TYPE_PLATE)
 
-        # Find the corresponding output images for this batch
-        output_images = find_output_images_for_batch(
-            conn, batch_image_ids)
+        if is_plate_mode:
+            # Plate mode: find output plates via annotation query (same as image mode but for Plate objects).
+            object_type = "Plate"
+            ids_key = "Input_Plate_IDs"
+            output_objects = find_output_plates_for_batch(conn, batch_ids)
+        else:
+            # Image mode: find output images via annotation query.
+            object_type = "Image"
+            ids_key = "Input_Image_IDs"
+            output_objects = find_output_images_for_batch(conn, batch_ids)
 
-        if output_images:
-            # Add batch supervisor metadata to found images
+        if output_objects:
             batch_supervisor_dict = {
                 'Batch_Supervisor_Workflow_ID': str(supervisor_wf_id),
                 'Batch_Index': str(batch_index + 1),  # 1-indexed for users
                 'Total_Batches': str(total_batches),
-                # First 10 IDs
-                'Input_Image_IDs': ', '.join(map(str, batch_image_ids[:10])) + ('...' if len(batch_image_ids) > 10 else '')
+                ids_key: ', '.join(map(str, batch_ids[:10])) + ('...' if len(batch_ids) > 10 else '')
             }
 
-            for img_id in output_images:
+            for obj_id in output_objects:
                 try:
-                    import ezomero
                     map_ann_id = ezomero.post_map_annotation(
                         conn=conn,
-                        object_type="Image",
-                        object_id=img_id,
+                        object_type=object_type,
+                        object_id=obj_id,
                         kv_dict=batch_supervisor_dict,
                         ns="biomero/workflow/batch",
                         across_groups=False
                     )
                     logger.debug(
-                        f"Added batch supervisor metadata to image {img_id}")
+                        f"Added batch supervisor metadata to {object_type} {obj_id}")
                 except Exception as e:
                     logger.warning(
-                        f"Failed to add batch supervisor metadata to image {img_id}: {e}")
+                        f"Failed to add batch supervisor metadata to {object_type} {obj_id}: {e}")
 
             logger.debug(
-                f"Added batch supervisor metadata to {len(output_images)} images")
+                f"Added batch supervisor metadata to {len(output_objects)} {object_type}(s)")
         else:
             logger.warning(
-                f"No output images found for batch {batch_index + 1}")
+                f"No output {object_type}(s) found for batch {batch_index + 1}")
 
     except Exception as e:
         logger.error(
             f"Error adding batch supervisor metadata for batch {batch_index + 1}: {e}")
         raise
+
+
+def find_output_plates_for_batch(conn, input_plate_ids):
+    """Find output plates created by a batch using input plate IDs.
+
+    Args:
+        conn: OMERO BlitzGateway connection
+        input_plate_ids: List of input plate IDs for this batch
+
+    Returns:
+        List of output plate IDs created by this batch
+    """
+    try:
+        query_service = conn.getQueryService()
+
+        import datetime
+        from omero.rtypes import rtime
+        cutoff = datetime.datetime.now(
+            datetime.timezone.utc) - datetime.timedelta(minutes=5)
+        params = omero.sys.ParametersI()
+        params.add("cutoff", rtime(int(cutoff.timestamp() * 1000)))
+
+        like_conditions = []
+        for i, plate_id in enumerate(input_plate_ids):
+            param_name = f"id_{i}"
+            like_conditions.append(f"mv.value like :{param_name}")
+            params.addString(param_name, f"%{plate_id}%")
+
+        like_clause = " and ".join(like_conditions)
+
+        hql = f"""
+        select distinct
+            plate.id as output_plate_id,
+            ma.id as annotation_id,
+            mv.value as input_data,
+            ev.time as creation_time
+        from Plate plate
+        join plate.annotationLinks l
+        join l.child ma
+        join ma.details.creationEvent ev
+        join ma.mapValue mvName
+        join ma.mapValue mv
+        where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
+          and mvName.name = 'Name'
+          and (mvName.value = 'SLURM_Get_Results.py' or mvName.value = 'SLURM_Import_Results.py')
+          and mv.name = 'Input_Data'
+          and ev.time > :cutoff
+          and ({like_clause})
+        """
+
+        results = query_service.projection(hql, params)
+
+        output_plate_ids = [result[0].val for result in results]
+        logger.debug(
+            f"Found {len(output_plate_ids)} output plates for batch with {len(input_plate_ids)} input plates")
+        return output_plate_ids
+
+    except Exception as e:
+        logger.error(f"Error finding output plates for batch: {e}")
+        return []
 
 
 def find_output_images_for_batch(conn, input_image_ids):
