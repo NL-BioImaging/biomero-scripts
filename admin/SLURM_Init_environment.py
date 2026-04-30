@@ -37,7 +37,7 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
-VERSION = "2.5.3"
+VERSION = "2.6.0"
 
 
 def runScript():
