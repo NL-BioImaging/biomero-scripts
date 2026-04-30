@@ -94,6 +94,14 @@ import ezomero
 
 from biomero import SlurmClient, constants
 
+try:
+    from omero_upload import upload_ln_s
+    INPLACE_ATTACHMENTS_AVAILABLE = True
+except ImportError:
+    INPLACE_ATTACHMENTS_AVAILABLE = False
+
+USE_INPLACE_ATTACHMENTS = os.getenv("USE_INPLACE_ATTACHMENTS", "true").lower() == "true"
+
 logger = logging.getLogger(__name__)
 
 # Check if importer is enabled via environment variable
@@ -427,10 +435,8 @@ def saveCSVToOmeroAsTable(
                 if wf_id:
                     description += f" from Workflow {wf_id}"
                 origFName = os.path.join(folder, table_name)
-                csv_file_attachment = conn.createFileAnnfromLocalFile(
-                    csv_path, origFilePathAndName=origFName,
-                    mimetype=mimetype,
-                    ns=namespace, desc=description)
+                csv_file_attachment = create_file_annotation_inplace(
+                    conn, csv_path, mimetype, namespace, description)
 
                 # Ensure the OMERO object is fully loaded
                 if data_type == 'Dataset':
@@ -786,6 +792,54 @@ def cleanup_tmp_files_locally(message: str, folder: str, log_file: str) -> str:
     return message
 
 
+def create_file_annotation_inplace(
+    conn: BlitzGateway,
+    file_path: str,
+    mimetype: str,
+    namespace: str,
+    description: str,
+) -> Any:
+    """Create a FileAnnotation using in-place (symlink) import if available.
+
+    When ``omero_upload`` is installed and ``USE_INPLACE_ATTACHMENTS`` is
+    enabled, the file is registered via a symlink inside the OMERO managed
+    repository so no data is copied.  The managed repository root is read
+    from OMERO's own ``omero.data.dir`` config value; the ``OMERO_DATA_DIR``
+    environment variable is used only as a last-resort fallback.
+    Falls back to a regular byte-copy upload when in-place is unavailable.
+
+    Args:
+        conn: Open OMERO BlitzGateway connection.
+        file_path: Absolute path to the file to register.
+        mimetype: MIME type string (e.g. ``"text/csv"``).
+        namespace: OMERO annotation namespace.
+        description: Human-readable description stored on the annotation.
+
+    Returns:
+        A :class:`omero.gateway.FileAnnotationWrapper` for the new annotation.
+    """
+    if INPLACE_ATTACHMENTS_AVAILABLE and USE_INPLACE_ATTACHMENTS:
+        # Resolve OMERO data dir from server config, fall back to env var
+        try:
+            omero_data_dir = conn.getConfigService().getConfigValue("omero.data.dir")
+        except Exception:
+            omero_data_dir = None
+        if not omero_data_dir:
+            omero_data_dir = os.getenv("OMERO_DATA_DIR", "/OMERO")
+        logger.debug(f"Creating in-place file annotation for {file_path} (data dir: {omero_data_dir})")
+        fo = upload_ln_s(conn.c, file_path, omero_data_dir, mimetype)
+        fa = omero.model.FileAnnotationI()
+        fa.setFile(fo._obj)
+        fa.setNs(rstring(namespace))
+        fa.setDescription(rstring(description))
+        fa = conn.getUpdateService().saveAndReturnObject(fa)
+        return omero.gateway.FileAnnotationWrapper(conn, fa)
+    else:
+        logger.debug(f"Creating regular (upload) file annotation for {file_path}")
+        return conn.createFileAnnfromLocalFile(
+            file_path, mimetype=mimetype, ns=namespace, desc=description)
+
+
 def upload_log_to_omero(
     client: Any,
     conn: BlitzGateway,
@@ -822,16 +876,26 @@ def upload_log_to_omero(
         description = f"Log from SLURM job {slurm_job_id}"
         if wf_id:
             description += f" (Workflow {wf_id})"
-        annotation = conn.createFileAnnfromLocalFile(
-            file, mimetype=mimetype,
-            ns=namespace, desc=description)
+        annotation = create_file_annotation_inplace(
+            conn, file, mimetype, namespace, description)
         # Already have other output in this script
         # But you could add this as output if you wanted log instead
         # client.setOutput("File_Annotation", robject(annotation._obj))
 
-        # For now, we choose to add as a weblink button
+        # Build a fully-qualified URL so it works from any browser location.
+        # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
+        # the canonical absolute base; fall back to omero.web.prefix for a
+        # path-absolute URL, then bare path as last resort.
         obj_id = annotation.getFile().getId()
-        url = f"get_original_file/{obj_id}/"
+        try:
+            config = conn.getConfigService()
+            web_host = (config.getConfigValue("omero.client.web.host") or "").rstrip("/")
+            if not web_host:
+                web_prefix = (config.getConfigValue("omero.web.prefix") or "").rstrip("/")
+                web_host = web_prefix  # may still be empty → path-absolute
+        except Exception:
+            web_host = ""
+        url = f"{web_host}/webclient/get_original_file/{obj_id}/"
         client.setOutput("URL", wrap({"type": "URL", "href": url}))
 
         for project in projects:
@@ -909,9 +973,8 @@ def upload_metadata_csv_to_omero(
         if wf_id:
             description += f" (Workflow {wf_id})"
 
-        annotation = conn.createFileAnnfromLocalFile(
-            renamed_metadata_file, mimetype=mimetype,
-            ns=namespace, desc=description)
+        annotation = create_file_annotation_inplace(
+            conn, renamed_metadata_file, mimetype, namespace, description)
 
         # Refresh objects to avoid UnloadedEntityException (works for Projects, Plates, Images)
         for obj in projects:
@@ -986,9 +1049,8 @@ def upload_zip_to_omero(
         description = f"Results from SLURM job {slurm_job_id}"
         if wf_id:
             description += f" (Workflow {wf_id})"
-        zip_annotation = conn.createFileAnnfromLocalFile(
-            f"{folder}.zip", mimetype=mimetype,
-            ns=namespace, desc=description)
+        zip_annotation = create_file_annotation_inplace(
+            conn, f"{folder}.zip", mimetype, namespace, description)
 
         client.setOutput("File_Annotation", robject(zip_annotation._obj))
 
@@ -2510,17 +2572,25 @@ def process_importer_workflow(
             constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME))
         create_new_destination = unwrap(client.getInput(
             constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE))
+        explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
     else:
         destination_name = unwrap(client.getInput(
             constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
         create_new_destination = unwrap(client.getInput(
             constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
+        explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
     
     logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
     destination_id = None
 
+    # If an explicit ID is provided, use it directly — skip name lookup entirely
+    if explicit_destination_id:
+        destination_id = int(explicit_destination_id)
+        create_new_destination = False
+        logger.info(
+            f"Using explicit {destination_type}_ID: {destination_id} (skipping name lookup)")
     # Check if destination exists or create new one
-    if not create_new_destination:
+    elif not create_new_destination:
         try:
             existing_objects_w_name = [d.id for d in conn.getObjects(
                 destination_type, attributes={"name": destination_name})]
@@ -3154,6 +3224,10 @@ def runScript() -> None:
                          grouping="05.2",
                          description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
+            scripts.Long(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID,
+                         optional=True,
+                         grouping="05.25",
+                         description="Pinpoint an exact Dataset by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
                          grouping="05.3",
@@ -3179,6 +3253,10 @@ def runScript() -> None:
                          grouping="06.2",
                          description="If there is already a screen with this name, still create new one? (True) or add to it? (False) ",
                          default=False),
+            scripts.Long(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID,
+                         optional=True,
+                         grouping="06.25",
+                         description="Pinpoint an exact Screen by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             scripts.Bool(constants.results.IMPORT_LABEL_ZARRS,
                          optional=True,
                          grouping="07",
@@ -3410,14 +3488,10 @@ def runScript() -> None:
             message += "\nSuccessfully copied logfile."
             logger.info(f"Logfile copied successfully: {log_file}")
 
-            logger.info("Uploading logfile to OMERO...")
-            message = upload_log_to_omero(
-                client, conn, message, slurm_job_id,
-                projects, log_file, wf_id=wf_id)
-
             logger.info("Extracting SLURM results...")
             slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename = (
                 None, None, None, None)
+            extraction_error = None
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_slurm_results_zip(
                     slurmClient, slurm_job_id, local_tmp_storage, group_name, wf_id, message)
@@ -3427,20 +3501,38 @@ def runScript() -> None:
             except Exception as e:
                 logger.error(f"Failed to extract SLURM results: {e}")
                 message += f"\nFailed to extract SLURM results: {e}"
-                raise e
+                extraction_error = e  # defer raise so log is still uploaded below
 
-            # Copy log file into permanent storage so it lives alongside the results
-            if log_file and permanent_storage_path and os.path.exists(log_file):
+            # Copy log to permanent storage (only possible when extraction succeeded),
+            # then upload from the best available path so the in-place symlink stays valid.
+            # If extraction failed we fall back to the /tmp path so the log is still
+            # attached to OMERO before we re-raise.
+            log_to_upload = log_file  # fallback: tmp path
+            if permanent_storage_path and log_file and os.path.exists(log_file):
                 try:
                     log_dest = os.path.join(
                         permanent_storage_path, os.path.basename(log_file))
                     shutil.copy2(log_file, log_dest)
+                    log_to_upload = log_dest  # prefer permanent path for in-place import
                     logger.info(
                         f"Copied log file to permanent storage: {log_dest}")
                     message += f"\nLog file copied to permanent storage."
                 except Exception as _log_copy_err:
                     logger.warning(
                         f"Failed to copy log file to permanent storage: {_log_copy_err}")
+
+            logger.info("Uploading logfile to OMERO...")
+            try:
+                message = upload_log_to_omero(
+                    client, conn, message, slurm_job_id,
+                    projects, log_to_upload, wf_id=wf_id)
+            except Exception as _log_upload_err:
+                # Log the failure but don't let it shadow a pending extraction error
+                logger.warning(f"Log upload failed: {_log_upload_err}")
+
+            # Always propagate extraction failure, even if log upload also failed
+            if extraction_error:
+                raise extraction_error
 
             # IMPORTER WORKFLOW - Dataset and screen image imports
             if use_importer_for_datasets or use_importer_for_screens:

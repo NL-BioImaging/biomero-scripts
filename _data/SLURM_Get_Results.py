@@ -1021,19 +1021,26 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadat
             # create a new dataset for new images
             dataset_name = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
 
-            create_new_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
-            if not create_new_dataset:  # check the named dataset first
-                try:
-                    existing_datasets_w_name = [d.id for d in conn.getObjects(
-                        'Dataset',
-                        attributes={"name": dataset_name})]
-                    #  if type(d) == omero.model.ProjectI
-                    if not existing_datasets_w_name:
+            # If an explicit Dataset_ID is provided, use it directly — skip name lookup entirely
+            explicit_dataset_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
+            if explicit_dataset_id:
+                dataset_id = int(explicit_dataset_id)
+                create_new_dataset = False
+                logger.info(f"Using explicit {constants.results.OUTPUT_ATTACH_NEW_DATASET_ID}: {dataset_id} (skipping name lookup)")
+            else:
+                create_new_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
+                if not create_new_dataset:  # check the named dataset first
+                    try:
+                        existing_datasets_w_name = [d.id for d in conn.getObjects(
+                            'Dataset',
+                            attributes={"name": dataset_name})]
+                        #  if type(d) == omero.model.ProjectI
+                        if not existing_datasets_w_name:
+                            create_new_dataset = True
+                        else:
+                            dataset_id = existing_datasets_w_name[0]
+                    except Exception:
                         create_new_dataset = True
-                    else:
-                        dataset_id = existing_datasets_w_name[0]
-                except Exception:
-                    create_new_dataset = True
 
             if create_new_dataset:  # just create a new dataset
                 dataset = omero.model.DatasetI()
@@ -1110,10 +1117,22 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
         # But you could add this as output if you wanted log instead
         # client.setOutput("File_Annotation", robject(annotation._obj))
 
-        # For now, we choose to add as a weblink button
+        # Build a fully-qualified URL so it works from any browser location.
+        # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
+        # the canonical absolute base; fall back to omero.web.prefix for a
+        # path-absolute URL, then bare path as last resort.
         obj_id = annotation.getFile().getId()
-        url = f"get_original_file/{obj_id}/"
+        try:
+            config = conn.getConfigService()
+            web_host = (config.getConfigValue("omero.client.web.host") or "").rstrip("/")
+            if not web_host:
+                web_prefix = (config.getConfigValue("omero.web.prefix") or "").rstrip("/")
+                web_host = web_prefix  # may still be empty → path-absolute
+        except Exception:
+            web_host = ""
+        url = f"{web_host}/webclient/get_original_file/{obj_id}/"
         client.setOutput("URL", wrap({"type": "URL", "href": url}))
+
 
         for project in projects:
             project.linkAnnotation(annotation)  # link it to project.
@@ -1247,13 +1266,30 @@ def resolve_workflow_id(
         except Exception as e:
             logger.warning(f"Job tracker lookup failed: {e}")
 
-    # Step 4: Consistency validation (fail immediately if inconsistent)
+    # Step 4: Consistency validation
+    # job_tracker can return stale data when SLURM recycles job IDs, so it is
+    # treated as a lower-priority source.  If the authoritative sources
+    # (script_parameter and/or slurm_log) agree with each other, trust them
+    # and only warn about a job_tracker mismatch instead of failing hard.
     if validated_sources:
         unique_ids = set(validated_sources.values())
         if len(unique_ids) > 1:
-            raise RuntimeError(f"Workflow ID inconsistency: {dict(validated_sources)}")
+            authoritative = {k: v for k, v in validated_sources.items()
+                             if k in ('script_parameter', 'slurm_log')}
+            authoritative_ids = set(authoritative.values())
+            if len(authoritative_ids) <= 1 and authoritative:
+                # Authoritative sources agree; job_tracker is likely stale
+                # (SLURM recycles job IDs across workflows)
+                logger.warning(
+                    f"Workflow ID mismatch in job_tracker (likely stale SLURM job ID reuse). "
+                    f"Trusting authoritative sources. All sources: {dict(validated_sources)}")
+                wf_id = list(authoritative.values())[0]
+            else:
+                raise RuntimeError(
+                    f"Workflow ID inconsistency: {dict(validated_sources)}")
+        else:
+            wf_id = list(validated_sources.values())[0]
 
-        wf_id = list(validated_sources.values())[0]
         sources = list(validated_sources.keys())
         logger.info(f"Workflow ID validated across {sources}: {wf_id}")
         return wf_id
@@ -1389,6 +1425,10 @@ def runScript():
                          grouping="06.2",
                          description="If there is already a dataset with this name, still create new one? (True) or add to it? (False) ",
                          default=True),
+            scripts.Long(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID,
+                         optional=True,
+                         grouping="06.25",
+                         description="Pinpoint an exact Dataset by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME,
                          optional=True,
                          grouping="06.3",

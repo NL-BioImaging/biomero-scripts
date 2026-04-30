@@ -343,6 +343,14 @@ def runScript():
                            grouping="02.6",
                            description="If a dataset already matches this name, still make a new one?",
                            default=False),
+            omscripts.Long(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID,
+                           optional=True,
+                           grouping="02.61",
+                           description="Pinpoint an exact Dataset by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
+            omscripts.Long(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID,
+                           optional=True,
+                           grouping="02.62",
+                           description="Pinpoint an exact Screen by OMERO ID. If provided, this ID wins over name lookup and Allow duplicate settings."),
             omscripts.Bool(constants.workflow.OUTPUT_CSV_TABLE,
                            optional=False,
                            grouping="02.8",
@@ -390,8 +398,6 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                logger.debug(f"{param_incr}, {k}, {param}")
-                logger.info(param)
                 # Convert the parameter from cy(tomine)type to om(ero)type
                 omtype_param = slurmClient.convert_cytype_to_omtype(
                     param["cytype"],
@@ -470,12 +476,20 @@ def runScript():
                 raise ValueError(version_errors)
             # Check if user actually selected the output option
             selected_output = {}
+            dataset_id_override = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
+            screen_id_override = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
             for output_option in OUTPUT_OPTIONS:
                 selected_op = unwrap(client.getInput(output_option))
                 if (not selected_op) or (
                     selected_op == constants.workflow.NO) or (
                         type(selected_op) == list and constants.workflow.NO in selected_op):
-                    selected_output[output_option] = False
+                    # Still treat as selected if an explicit ID override was given
+                    if output_option == constants.workflow.OUTPUT_NEW_DATASET and dataset_id_override:
+                        selected_output[output_option] = True
+                    elif output_option == constants.workflow.OUTPUT_NEW_SCREEN and screen_id_override:
+                        selected_output[output_option] = True
+                    else:
+                        selected_output[output_option] = False
                 else:
                     selected_output[output_option] = True
                     logger.debug(
@@ -1281,6 +1295,10 @@ def importResultsToOmero(client: omscripts.client,
         inputs[
             constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE
         ] = client.getInput(constants.workflow.OUTPUT_DUPLICATES)
+        # Forward explicit dataset ID if provided (wins over name lookup)
+        dataset_id_override = client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID)
+        if dataset_id_override is not None:
+            inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET_ID] = dataset_id_override
 
     else:
         inputs[constants.results.OUTPUT_ATTACH_NEW_DATASET] = rbool(
@@ -1296,6 +1314,10 @@ def importResultsToOmero(client: omscripts.client,
         inputs[
             constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE
         ] = client.getInput(constants.workflow.OUTPUT_DUPLICATES)
+        # Forward explicit screen ID if provided (wins over name lookup)
+        screen_id_override = client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID)
+        if screen_id_override is not None:
+            inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID] = screen_id_override
 
     else:
         inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN] = rbool(
