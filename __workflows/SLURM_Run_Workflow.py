@@ -1405,11 +1405,15 @@ def importResultsToOmero(client: omscripts.client,
     
     try:
         msg = unwrap(rv['Message'])
-        
-        if script_failed:
-            logger.error(f"Import script failed with status ID {job_status_id}: {msg}")
+
+        # When a sub-script raises an exception, OMERO's runner catches it and
+        # still completes the job (status != 6), but the script sets the Message
+        # to "FAILED: ...".  Check both the job status flag AND the message prefix.
+        message_failed = isinstance(msg, str) and msg.startswith("FAILED:")
+        if script_failed or message_failed:
+            logger.error(f"Import script failed (status={job_status_id}, msg_prefix={'FAILED' if message_failed else 'ok'}): {msg}")
             slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
-            wf_failed = True  # Mark workflow as failed
+            wf_failed = True
             raise RuntimeError(f"Import script failed: {msg}")
         else:
             logger.info(f"Import script succeeded: {msg}")
@@ -1418,7 +1422,7 @@ def importResultsToOmero(client: omscripts.client,
         error_msg = "No message returned from import script"
         logger.error(error_msg)
         slurmClient.workflowTracker.fail_task(task_id, error_msg)
-        wf_failed = True  # Mark workflow as failed
+        wf_failed = True
         raise RuntimeError(error_msg)
     return rv
 

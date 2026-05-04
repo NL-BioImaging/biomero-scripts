@@ -1683,8 +1683,11 @@ def runScript():
             try:
                 wf_uuid_input = unwrap(client.getInput("workflow_uuid"))
                 if wf_uuid_input and wf_uuid_input.strip():
-                    # Validate UUID format immediately
-                    script_wf_id = uuid.UUID(wf_uuid_input.strip())
+                    # Validate UUID format by parsing, but keep as string for downstream use.
+                    # uuid.UUID() expects a str; passing the object itself causes AttributeError.
+                    stripped = wf_uuid_input.strip()
+                    uuid.UUID(stripped)  # raises ValueError if invalid format
+                    script_wf_id = stripped
                     logger.info(f"Workflow UUID parameter validated: {script_wf_id}")
             except (ValueError, TypeError, AttributeError) as e:
                 logger.warning(f"Invalid workflow UUID format: {e}")
