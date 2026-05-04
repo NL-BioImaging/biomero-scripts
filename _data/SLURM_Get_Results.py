@@ -8,11 +8,13 @@
 # Use is subject to license terms supplied in LICENSE.txt
 
 """
-BIOMERO SLURM Results Import Script
+BIOMERO SLURM Results Import Script — Pixel Upload Path
 
 This script handles the import of completed workflow results from SLURM
-clusters back into OMERO with flexible organization options and metadata
-preservation.
+clusters back into OMERO via pixel data upload (ezomero.post_image) and
+file attachments.  Unlike SLURM_Import_Results.py it does NOT use the
+biomero-importer or in-place file registration; every image is re-encoded
+and uploaded through the standard OMERO pixel pipeline.
 
 Key Features:
 - Import results from completed SLURM jobs
@@ -24,16 +26,22 @@ Key Features:
 - Comprehensive error handling and logging
 
 Import Options:
-- Attach results to original images as attachments
-- Create new datasets with custom naming
+- Attach results to original images as file annotations
+- Create new datasets via pixel upload (ezomero.post_image)
 - Import into parent dataset/plate structure
 - Convert CSV files to OMERO tables
 - Rename imported images with custom patterns
 
 File Support:
-- Images: TIFF, OME-TIFF, PNG formats
+- Images: TIFF, OME-TIFF, PNG formats (pixel upload only)
 - Tables: CSV files converted to OMERO.tables
-- Metadata: Preserved through import process
+- Metadata: Preserved and attached as key-value map annotations
+
+Source-image matching (same logic as SLURM_Import_Results.py):
+- Single input  → trivially map every result to it
+- Prefix match  → input name is a proper prefix of result name (priority over similarity)
+- Similarity    → difflib ratio; handles renamed outputs (e.g. Nuclei→Cells)
+- Positional    → fallback for same-name inputs (OMERO exports as base / base_(1).tif)
 
 This script is typically called automatically by SLURM_Run_Workflow.py
 but can be used standalone for manual result importing.
@@ -43,9 +51,11 @@ Institution: Amsterdam UMC, University of Dundee
 License: GPL v2+ (see LICENSE.txt)
 """
 
+import difflib
 import shutil
 import sys
 import uuid
+from typing import Any, Dict, List, Optional, Tuple
 import omero
 import omero.gateway
 from omero import scripts
@@ -97,18 +107,24 @@ def load_image(conn, image_id):
     return conn.getObject('Image', image_id)
 
 
-def getOriginalFilename(name):
-    """Extract original filename from processed file path.
+def getOriginalFilename(name: str) -> str:
+    """Extract original filename from a workflow-processed filename.
 
-    Extracts the base filename from a processed file path.
-    Example: "/../../Cells Apoptotic.png_merged_z01_t01.tiff"
-    Returns: "Cells Apoptotic.png"
+    Parses the embedded original name from the workflow output filename suffix.
+    IMPORTANT: pass only the basename, not a full path — directory components
+    (e.g. ".analyzed") contain dots and will confuse the regex.
 
     Args:
-        name (str): Path/name of processed file.
+        name: Basename of processed file (not a full path).
 
     Returns:
-        str: Original filename if pattern matches, otherwise input name.
+        Original filename if suffix pattern matches, otherwise the input unchanged.
+
+    Examples:
+        >>> getOriginalFilename("Cells Apoptotic.png_merged_z01_t01.tiff")
+        "Cells Apoptotic.png"
+        >>> getOriginalFilename("Cell-Granules.tif_output.tiff")
+        "Cell-Granules.tif"
     """
     match = re.match(pattern=".+\/(.+\.[A-Za-z]+).+\.[tiff|png]", string=name)
     if match:
@@ -238,37 +254,185 @@ def saveCSVToOmeroAsTable(conn, folder, client,
     return message
 
 
-def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=None):
-    """Save image from a (unzipped) folder to OMERO as attachments
+def find_best_matching_image(
+    og_name: str,
+    input_images: List[Any],
+    threshold: float = 0.5
+) -> Optional[Any]:
+    """Find the best matching OMERO image for a result filename by name similarity.
+
+    Uses SequenceMatcher to compare the extracted original filename against
+    each input image's OMERO name. This is a best-effort approach that handles
+    workflows that rename output files (e.g. NucleiLabels -> CellsLabels).
 
     Args:
-        conn (_type_): Connection to OMERO
-        folder (String): Unzipped folder
-        client : OMERO client to attach output
-        metadata_files (List[str]): List of metadata CSV file paths
-        wf_id (str, optional): Workflow ID for metadata. Defaults to None.
-        
+        og_name: Extracted original filename from the result file.
+        input_images: List of OMERO Image objects (workflow input images).
+        threshold: Minimum similarity ratio to consider a match. Defaults to 0.5.
+
     Returns:
-        String: Message to add to script output
+        Best matching image if ratio >= threshold, else None.
+    """
+    if not input_images:
+        return None
+    best_image = None
+    best_ratio = 0.0
+    og_lower = og_name.lower()
+    for image in input_images:
+        img_name = image.getName()
+        ratio = difflib.SequenceMatcher(None, og_lower, img_name.lower()).ratio()
+        logger.debug(f"Similarity '{og_name}' vs '{img_name}': {ratio:.2f}")
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_image = image
+    if best_ratio >= threshold:
+        logger.info(
+            f"Best match for '{og_name}': '{best_image.getName()}' (ratio={best_ratio:.2f})")
+        return best_image
+    logger.info(
+        f"No good match for '{og_name}' among input images (best={best_ratio:.2f}), "
+        f"falling back to name lookup")
+    return None
+
+
+def match_results_to_inputs(
+    result_keys: List[str],
+    input_images: List[Any],
+) -> Dict[str, Optional[Any]]:
+    """Map each result file path to its source input OMERO image.
+
+    Single source of truth for parent-matching used by ALL output paths
+    (file attachments and pixel-upload dataset imports).
+
+    Matching priority per result, in order:
+
+    1. Single input  — trivially attach everything to it.
+    2. Prefix match  — input name is a proper prefix of the result name.
+                       E.g. input "base" produced result "base.0.tif"; the
+                       workflow appended ".0.tif".  Longest prefix wins when
+                       multiple inputs share a common prefix ("base" vs "base.0.tif"
+                       both being inputs → "base.0.tif" grabs "base.0.tif.0.tif").
+    3. Similarity    — difflib ratio against remaining inputs (threshold 0.5).
+                       Handles workflows that rename outputs (e.g. Nuclei→Cells).
+    4. Positional    — similarity failed, all remaining inputs share the same
+                       name (OMERO exports them as base.tif / base_(1).tif …).
+                       Results are sorted by extracted original name so their order
+                       matches the original submission order of input_images.
+
+    Unlike SLURM_Import_Results.py there is no og_name_map here: files are
+    not renamed on disk in this path, so getOriginalFilename(basename) is
+    always the authoritative match key.
+
+    Args:
+        result_keys: File paths — one entry per result.
+        input_images: Workflow input images in original submission order. NOT sorted.
+
+    Returns:
+        Dict mapping each result_key to its matched source Image (or None).
+    """
+    if not input_images:
+        return {k: None for k in result_keys}
+
+    def resolve_match_name(key: str) -> str:
+        """Extracted original name for this result path, used for sorting and matching."""
+        return getOriginalFilename(os.path.basename(key))
+
+    # Scenario 4 / positional: sort results by extracted name so order matches submission order.
+    sorted_keys = sorted(result_keys, key=resolve_match_name) if len(input_images) > 1 else list(result_keys)
+    logger.debug(f"Results sorted for source matching: {[os.path.basename(k) for k in sorted_keys]}")
+
+    remaining = list(input_images)  # consumed — each input claimed at most once
+    mapping: Dict[str, Optional[Any]] = {}
+
+    for key in sorted_keys:
+        if not remaining:
+            mapping[key] = None
+            continue
+
+        match_name = resolve_match_name(key)
+
+        if len(remaining) == 1:  # scenario 1
+            mapping[key] = remaining.pop(0)
+        else:
+            # Scenario 2a — prefix match (higher priority than similarity).
+            # Finds the input whose name is the longest proper prefix of match_name.
+            # Needed when inputs are "base" and "base.0.tif": similarity would
+            # incorrectly score result "base.0.tif" as 1.0 against input "base.0.tif",
+            # but "base" is the true parent (the workflow appended ".0.tif").
+            mn_lower = match_name.lower()
+            prefix_match = None
+            prefix_len = -1
+            for img in remaining:
+                img_lower = img.getName().lower()
+                if mn_lower.startswith(img_lower) and len(img_lower) < len(mn_lower):
+                    if len(img_lower) > prefix_len:  # longest prefix wins
+                        prefix_len = len(img_lower)
+                        prefix_match = img
+
+            if prefix_match:
+                remaining.remove(prefix_match)
+                matched = prefix_match
+                logger.info(
+                    f"Prefix match for '{match_name}': '{matched.getName()}' (id={matched.getId()})")
+            else:
+                # Scenario 2b — similarity match for uniquely-named inputs.
+                matched = find_best_matching_image(match_name, remaining)
+                if matched:
+                    remaining.remove(matched)
+                else:
+                    # Scenario 3 — same-name inputs: positional fallback.
+                    # Results were sorted by extracted name above, so pop order
+                    # mirrors the original submission order of input_images.
+                    matched = remaining.pop(0)
+                    logger.info(
+                        f"No name match for '{match_name}'; positional fallback → id={matched.getId()}")
+            mapping[key] = matched
+
+    return mapping
+
+
+def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=None,
+                                   input_images=None):
+    """Save image from a (unzipped) folder to OMERO as file attachments.
+
+    Args:
+        conn: Connection to OMERO.
+        folder: Unzipped folder path.
+        client: OMERO client to attach output.
+        metadata_files: List of metadata CSV file paths to attach.
+        wf_id: Workflow ID for metadata. Defaults to None.
+        input_images: Known workflow input images for attachment matching. Defaults to None.
+
+    Returns:
+        Message to add to script output.
     """
     all_files = glob.iglob(folder+'**/**', recursive=True)
     files = [f for f in all_files if os.path.isfile(f)
              and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
-    # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
-    #               and f.endswith('.tiff')]  # out folder
-    # files += more_files
     logger.info(f"Found the following files in {folder}: {files}")
     namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     job_id = unwrap(client.getInput(
         constants.results.OUTPUT_SLURM_JOB_ID)).strip()
     msg = ""
-    message = ""  # Initialize message variable to fix scoping issue
+    message = ""
+
+    # Build result → source mapping once; used for both attachment and legacy paths.
+    # match_results_to_inputs owns all scenario logic (prefix, similarity, positional).
+    source_map = match_results_to_inputs(files, input_images) if input_images else {}
+
     for name in files:
-        logger.debug(name)
-        og_name = getOriginalFilename(name)
-        logger.debug(og_name)
-        images = conn.getObjects("Image", attributes={
-                                 "name": f"{og_name}"})  # Can we get in 1 go?
+        # og_name only needed for the legacy (no input_images) OMERO name-search path.
+        og_name = getOriginalFilename(os.path.basename(name))
+
+        if input_images is not None:
+            matched = source_map.get(name)
+            if matched is None:  # no remaining inputs or genuinely unmatched
+                logger.info(f"No source mapped for '{og_name}'; skipping attachment")
+                continue
+            images = [matched]
+        else:
+            # Legacy path (no workflow tracking): search OMERO by extracted name.
+            images = list(conn.getObjects("Image", attributes={"name": og_name}))
         logger.debug(images)
 
         if images:
@@ -293,10 +457,11 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=N
                                 f"Could not rename file {name}: {e}")
 
                 # Create annotation with renamed file
+                source_img = images[0] if images else None
                 ext = os.path.splitext(name)[1][1:]
                 file_ann = conn.createFileAnnfromLocalFile(
                     name, mimetype=f"image/{ext}",
-                    ns=namespace, desc=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
+                    ns=namespace, desc=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}" + (f" | source: {source_img.getName()} (id: {source_img.getId()})" if source_img else ""))
 
                 # Restore original filename after annotation is created
                 if name != original_name:
@@ -309,7 +474,6 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=N
                             f"Could not restore original filename {original_name}: {e}")
 
                 logger.info(f"Attaching {name} to image {og_name}")
-                # image = load_image(conn, image_id)
                 for image in images:
                     image.linkAnnotation(file_ann)
                     if metadata_files:
@@ -514,48 +678,56 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
         )
 
 
-def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, new_dataset=True, wf_id=None):
-    """Save image from a (unzipped) folder to OMERO as dataset
+def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, new_dataset=True, wf_id=None, input_images=None):
+    """Save images from a (unzipped) folder to OMERO as a dataset via pixel upload.
+
+    Reads each image with tifffile, reshapes to 5D XYZCT, and posts via
+    ezomero.post_image. Source image is matched using the same prefix/similarity/
+    positional logic as the attachment path.
 
     Args:
-        conn (_type_): Connection to OMERO
-        slurmClient (SlurmClient): Connection to BIOMERO
-        folder (String): Unzipped folder
-        client : OMERO client to attach output
+        conn: OMERO BlitzGateway connection.
+        slurmClient: BIOMERO SlurmClient instance.
+        folder: Path to unzipped folder containing result images.
+        client: OMERO script client for job ID and rename settings.
+        dataset_id: ID of the destination OMERO Dataset.
+        new_dataset: Whether to link the new dataset to the source project. Defaults to True.
+        wf_id: Workflow ID for metadata annotations. Defaults to None.
+        input_images: Known workflow input images for source matching. Defaults to None.
 
     Returns:
-        String: Message to add to script output
+        Message to add to script output.
     """
     all_files = glob.iglob(folder+'**/**', recursive=True)
     files = [f for f in all_files if os.path.isfile(f)
              and any(f.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)]
-
-    # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
-    #               and f.endswith('.tiff')]  # out folder
-    # files += more_files
     logger.info(f"Found the following files in {folder}: {files}")
-    # namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     msg = ""
     job_id = unwrap(client.getInput(
         constants.results.OUTPUT_SLURM_JOB_ID)).strip()
     images = None
     if files:
+        # Build result → source mapping once; shared by all files in this folder.
+        # match_results_to_inputs owns all scenario logic (prefix, similarity, positional).
+        source_map = match_results_to_inputs(files, input_images) if input_images else {}
+
         for name in files:
-            logger.debug(name)
-            og_name = getOriginalFilename(name)
-            logger.debug(og_name)
-            images = list(conn.getObjects("Image", attributes={
-                "name": f"{og_name}"}))  # Can we get in 1 go?
+            # og_name only needed for the legacy (no input_images) OMERO name-search path.
+            og_name = getOriginalFilename(os.path.basename(name))
+            if input_images is not None:
+                source_img = source_map.get(name)
+                images = [source_img] if source_img else []
+            else:
+                images = list(conn.getObjects("Image", attributes={
+                    "name": f"{og_name}"}))
+                source_img = images[0] if images else None
             logger.debug(images)
             try:
                 # import the masked image for now
                 with TiffFile(name) as tif:
                     img_data = tif.asarray()
                     axes = tif.series[0].axes
-                try:
-                    source_image_id = images[0].getId()
-                except IndexError:
-                    source_image_id = None
+                source_image_id = source_img.getId() if source_img else None
                 logger.debug(
                     f"{img_data.shape}, {dataset_id}, {source_image_id}, {img_data.dtype}")
                 logger.debug(
@@ -581,7 +753,7 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                                             dataset_id=dataset_id,
                                             dim_order="xyzct",
                                             # source_image_id=source_image_id,
-                                            description=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
+                                            description=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}" + (f" | source: {source_img.getName()} (id: {source_img.getId()})" if source_img else ""))
 
                 # Add metadata
                 add_image_annotations(conn, slurmClient, img_id, job_id, wf_id)
@@ -971,7 +1143,8 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
     return created_files
 
 
-def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadata_files, wf_id=None):
+def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadata_files, wf_id=None,
+                             input_images=None):
     """Upload contents of folder to OMERO
 
     Args:
@@ -982,14 +1155,16 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadat
         folder (String): Path to folder with content
         metadata_files (List[str]): List of metadata CSV file paths
         wf_id (str, optional): Workflow ID if available. Defaults to None.
+        input_images (list, optional): Known workflow input images for attachment matching.
     """
     try:
         if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)):
             # upload and link individual images
             msg = saveImagesToOmeroAsAttachments(conn=conn, folder=folder,
-                                                 client=client, 
-                                                 metadata_files=metadata_files, 
-                                                 wf_id=wf_id)
+                                                 client=client,
+                                                 metadata_files=metadata_files,
+                                                 wf_id=wf_id,
+                                                 input_images=input_images)
             message += msg
         if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_TABLE)):
             if unwrap(client.getInput(
@@ -1061,7 +1236,8 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadat
                                              client=client,
                                              dataset_id=dataset_id,
                                              new_dataset=create_new_dataset,
-                                             wf_id=wf_id)
+                                             wf_id=wf_id,
+                                             input_images=input_images)
             message += msg
 
     except Exception as e:
@@ -1611,8 +1787,62 @@ def runScript():
                                     message = upload_metadata_csv_to_omero(
                                         client, conn, message, slurm_job_id, projects, metadata_files, wf_id)
 
+                            # Load input images for best-effort attachment matching
+                            # (handles workflows that rename outputs, e.g. NucleiLabels -> CellsLabels)
+                            input_images = []
+                            _lookup_task_id = task_id
+                            if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
+                                try:
+                                    _lookup_task_id = slurmClient.jobAccounting.get_task_id(slurm_job_id)
+                                    logger.info(f"Resolved task ID from job accounting: {_lookup_task_id}")
+                                except Exception as _te:
+                                    logger.debug(f"Could not resolve task ID from job accounting: {_te}")
+                            if slurmClient.track_workflows and _lookup_task_id:
+                                try:
+                                    _task = slurmClient.workflowTracker.repository.get(_lookup_task_id)
+                                    _input_data = _task.input_data if _task else None
+                                    if isinstance(_input_data, dict):
+                                        _image_ids = _input_data.get('IDs', [])
+                                    elif isinstance(_input_data, list):
+                                        _image_ids = _input_data
+                                    else:
+                                        _image_ids = []
+                                    # If direct task has no image IDs, walk all workflow tasks
+                                    if not _image_ids and wf_id and slurmClient.track_workflows:
+                                        try:
+                                            _wf = slurmClient.workflowTracker.repository.get(wf_id)
+                                            for _tid in _wf.tasks:
+                                                _t = slurmClient.workflowTracker.repository.get(_tid)
+                                                _td = _t.input_data if _t else None
+                                                if isinstance(_td, dict):
+                                                    _ids = _td.get('IDs', [])
+                                                elif isinstance(_td, list) and all(isinstance(x, int) for x in _td):
+                                                    _ids = _td
+                                                else:
+                                                    _ids = []
+                                                if _ids:
+                                                    _image_ids = _ids
+                                                    logger.info(
+                                                        f"Found image IDs in task '{_t.task_name}' ({_tid}): {_image_ids}")
+                                                    break
+                                        except Exception as _we:
+                                            logger.debug(f"Could not walk workflow tasks for image IDs: {_we}")
+                                    if _image_ids:
+                                        input_images = [
+                                            img for img in conn.getObjects(
+                                                "Image", ids=[int(i) for i in _image_ids])
+                                            if img
+                                        ]
+                                        logger.info(
+                                            f"Loaded {len(input_images)} input images for attachment "
+                                            f"matching: {[img.getId() for img in input_images]}")
+                                except Exception as _ie:
+                                    logger.warning(
+                                        f"Could not load input images from task for matching: {_ie}")
+
                             message = upload_contents_to_omero(
-                                client, conn, slurmClient, message, folder, metadata_files, wf_id=wf_id)
+                                client, conn, slurmClient, message, folder, metadata_files,
+                                wf_id=wf_id, input_images=input_images)
 
                             # Only cleanup if Cleanup? is True
                             if unwrap(client.getInput("Cleanup?")):

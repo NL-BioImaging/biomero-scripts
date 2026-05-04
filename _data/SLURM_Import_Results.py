@@ -68,6 +68,7 @@ License: GPL v2+ (see LICENSE.txt)
 """
 
 import csv
+import difflib
 import glob
 import json
 import logging
@@ -457,12 +458,167 @@ def saveCSVToOmeroAsTable(
     return message
 
 
+def find_best_matching_image(
+    og_name: str,
+    input_images: List[Any],
+    threshold: float = 0.5
+) -> Optional[Any]:
+    """Find the best matching OMERO image for a result filename by name similarity.
+
+    Uses SequenceMatcher to compare the extracted original filename against
+    each input image's OMERO name. This is a best-effort approach that handles
+    workflows that rename output files (e.g. NucleiLabels -> CellsLabels).
+
+    Args:
+        og_name: Extracted original filename from the result file.
+        input_images: List of OMERO Image objects (workflow input images).
+        threshold: Minimum similarity ratio to consider a match. Defaults to 0.5.
+
+    Returns:
+        Best matching image if ratio >= threshold, else None.
+    """
+    if not input_images:
+        return None
+    best_image = None
+    best_ratio = 0.0
+    og_lower = og_name.lower()
+    for image in input_images:
+        img_name = image.getName()
+        ratio = difflib.SequenceMatcher(None, og_lower, img_name.lower()).ratio()
+        logger.debug(f"Similarity '{og_name}' vs '{img_name}': {ratio:.2f}")
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_image = image
+    if best_ratio >= threshold:
+        logger.info(
+            f"Best match for '{og_name}': '{best_image.getName()}' (ratio={best_ratio:.2f})")
+        return best_image
+    logger.info(
+        f"No good match for '{og_name}' among input images (best={best_ratio:.2f}), "
+        f"falling back to name lookup")
+    return None
+
+
+def match_results_to_inputs(
+    result_keys: List[str],
+    input_images: List[Any],
+    og_name_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, Optional[Any]]:
+    """Map each result file (or imported image name) to its source input OMERO image.
+
+    Single source of truth for parent-matching used by ALL output paths
+    (file attachments and biomero-importer dataset imports).
+
+    Matching priority per result, in order:
+
+    1. Single input  — trivially attach everything to it.
+    2. Prefix match  — input name is a proper prefix of the result name.
+                       E.g. input "base" produced result "base.0.tif"; the
+                       workflow appended ".0.tif".  Longest prefix wins when
+                       multiple inputs share a common prefix ("base" vs "base.0.tif"
+                       both being inputs → "base.0.tif" grabs "base.0.tif.0.tif").
+    3. Similarity    — difflib ratio against remaining inputs (threshold 0.5).
+                       Handles workflows that rename outputs (e.g. Nuclei→Cells).
+    4. Positional    — similarity failed, all remaining inputs share the same
+                       name (OMERO exports them as base.tif / base_(1).tif …).
+                       Results are sorted by pre-rename basename so their order
+                       matches the original submission order of input_images.
+
+    Scenario 4 (renamed files): og_name_map[file_path] = pre-rename basename.
+    resolve_match_name() does a reverse-lookup so imported image names (stored
+    by OMERO as the post-rename filename) still resolve to the original stem
+    before any matching is attempted.
+
+    Args:
+        result_keys: File paths or OMERO image names — one entry per result.
+        input_images: Workflow input images in original submission order. NOT sorted.
+        og_name_map: {current_file_path: pre_rename_basename} from
+            rename_files_in_importer_storage. Pass None when no rename ran.
+
+    Returns:
+        Dict mapping each result_key to its matched source Image (or None).
+    """
+    if not input_images:
+        return {k: None for k in result_keys}
+
+    # Scenario 4 prep: reverse-lookup so post-rename basenames resolve to pre-rename names.
+    # og_name_map keys are full paths; basename(key) → pre_rename covers imported image names.
+    reverse_og: Dict[str, str] = {}
+    if og_name_map:
+        for path, pre_rename in og_name_map.items():
+            reverse_og[os.path.basename(path)] = pre_rename
+
+    def resolve_match_name(key: str) -> str:
+        """Pre-rename name for this key, used for sorting and similarity matching."""
+        if og_name_map and key in og_name_map:   # full file path hit
+            return og_name_map[key]
+        bn = os.path.basename(key)
+        if bn in reverse_og:                     # imported image name (post-rename basename)
+            return reverse_og[bn]
+        return getOriginalFilename(bn)            # no rename: extract stem from workflow suffix
+
+    # Scenario 4 / positional: sort results by pre-rename name so order matches submission order.
+    sorted_keys = sorted(result_keys, key=resolve_match_name) if len(input_images) > 1 else list(result_keys)
+    logger.debug(f"Results sorted for source matching: {[os.path.basename(k) for k in sorted_keys]}")
+
+    remaining = list(input_images)  # consumed — each input claimed at most once
+    mapping: Dict[str, Optional[Any]] = {}
+
+    for key in sorted_keys:
+        if not remaining:
+            mapping[key] = None
+            continue
+
+        match_name = resolve_match_name(key)
+
+        if len(remaining) == 1:  # scenario 1
+            mapping[key] = remaining.pop(0)
+        else:
+            # Scenario 2a — prefix match (higher priority than similarity).
+            # Finds the input whose name is the longest proper prefix of match_name.
+            # Needed when inputs are "base" and "base.0.tif": similarity would
+            # incorrectly score result "base.0.tif" as 1.0 against input "base.0.tif",
+            # but "base" is the true parent (the workflow appended ".0.tif").
+            mn_lower = match_name.lower()
+            prefix_match = None
+            prefix_len = -1
+            for img in remaining:
+                img_lower = img.getName().lower()
+                if mn_lower.startswith(img_lower) and len(img_lower) < len(mn_lower):
+                    if len(img_lower) > prefix_len:  # longest prefix wins
+                        prefix_len = len(img_lower)
+                        prefix_match = img
+
+            if prefix_match:
+                remaining.remove(prefix_match)
+                matched = prefix_match
+                logger.info(
+                    f"Prefix match for '{match_name}': '{matched.getName()}' (id={matched.getId()})")
+            else:
+                # Scenario 2b — similarity match for uniquely-named inputs.
+                matched = find_best_matching_image(match_name, remaining)
+                if matched:
+                    remaining.remove(matched)
+                else:
+                    # Scenario 3 — same-name inputs: positional fallback.
+                    # Results were sorted by pre-rename name above, so pop order
+                    # mirrors the original submission order of input_images.
+                    matched = remaining.pop(0)
+                    logger.info(
+                        f"No name match for '{match_name}'; positional fallback → id={matched.getId()}")
+            mapping[key] = matched
+
+    return mapping
+
+
 def saveImagesToOmeroAsAttachments(
     conn: BlitzGateway,
     folder: str,
     client: Any,
     metadata_files: Optional[List[str]] = None,
-    wf_id: Optional[str] = None
+    wf_id: Optional[str] = None,
+    input_images: Optional[List[Any]] = None,
+    og_name_map: Optional[Dict[str, str]] = None
 ) -> str:
     """Save image from a (unzipped) folder to OMERO as attachments.
 
@@ -472,25 +628,41 @@ def saveImagesToOmeroAsAttachments(
         client: OMERO client to attach output.
         metadata_files: List of metadata CSV file paths to attach. Defaults to None.
         wf_id: Workflow ID for metadata. Defaults to None.
+        input_images: Known workflow input images for attachment matching. Defaults to None.
+        og_name_map: Pre-rename filename map from rename_files_in_importer_storage.
+            Keys are current file paths, values are the original filenames before
+            any rename pattern was applied. Used so similarity matching still works
+            when files have been renamed to an arbitrary pattern. Defaults to None.
 
     Returns:
         Message to add to script output.
     """
     # Handle both regular image files and ZARR directories
     files = find_supported_image_paths(folder)
-    # more_files = [f for f in os.listdir(f"{folder}/out") if os.path.isfile(f)
-    #               and f.endswith('.tiff')]  # out folder
-    # files += more_files
     logger.info(f"Found the following files in {folder}: {files}")
     namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     job_id = unwrap(client.getInput(
         constants.results.OUTPUT_SLURM_JOB_ID)).strip()
     msg = ""
-    message = ""  # Initialize message variable to fix scoping issue
+    message = ""
+
+    # Build result → source mapping once; used for both attachment and legacy paths.
+    # match_results_to_inputs owns all scenario logic (prefix, similarity, positional).
+    source_map = match_results_to_inputs(files, input_images, og_name_map) if input_images else {}
+
     for name in files:
-        og_name = getOriginalFilename(name)
-        images = conn.getObjects("Image", attributes={
-                                 "name": f"{og_name}"})  # Can we get in 1 go?
+        # og_name only needed for the legacy (no input_images) OMERO name-search path.
+        og_name = (og_name_map.get(name) if og_name_map else None) or getOriginalFilename(os.path.basename(name))
+
+        if input_images is not None:
+            matched = source_map.get(name)
+            if matched is None:  # no remaining inputs or genuinely unmatched
+                logger.info(f"No source mapped for '{og_name}'; skipping attachment")
+                continue
+            images = [matched]
+        else:
+            # Legacy path (no workflow tracking): search OMERO by extracted name.
+            images = list(conn.getObjects("Image", attributes={"name": og_name}))
 
         if images:
             try:
@@ -514,9 +686,11 @@ def saveImagesToOmeroAsAttachments(
 
                 # Create annotation with renamed file
                 ext = os.path.splitext(name)[1][1:]
-                file_ann = conn.createFileAnnfromLocalFile(
-                    name, mimetype=f"image/{ext}",
-                    ns=namespace, desc=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}")
+                source_img = images[0] if images else None
+                file_ann = create_file_annotation_inplace(
+                    conn, name, mimetype=f"image/{ext}",
+                    namespace=namespace,
+                    description=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}" + (f" | source: {source_img.getName()} (id: {source_img.getId()})" if source_img else ""))
 
                 # Restore original filename after annotation is created
                 if name != original_name:
@@ -1884,7 +2058,7 @@ def create_upload_orders_for_results(
     return orders
 
 
-def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
+def rename_files_in_importer_storage(client: Any, results_path: str) -> Tuple[str, Dict[str, str]]:
     """Rename files and directories in importer storage according to rename pattern.
 
     Handles both regular image files and zarr directories. Zarr directories
@@ -1895,14 +2069,17 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
         results_path: Path to results in importer storage.
 
     Returns:
-        Status message about rename operations.
+        Tuple of (status message, og_name_map) where og_name_map maps each
+        new file path to its pre-rename original filename. Callers should pass
+        this to saveImagesToOmeroAsAttachments so attachment matching still
+        works even when files have been renamed to an arbitrary pattern.
     """
 
     # Check if renaming is enabled
     rename_enabled = unwrap(client.getInput(
         constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
     if not rename_enabled:
-        return "\\nFile renaming skipped (disabled)"
+        return "\\nFile renaming skipped (disabled)", {}
 
     # Find all image files and zarr directories in results path
     all_files = []
@@ -1933,11 +2110,23 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
 
     renamed_count = 0
     message = ""
+    og_name_map: Dict[str, str] = {}  # new_path -> pre-rename basename
 
     for file_path in all_files:
         try:
-            # Extract original filename from the processed filename
-            original_filename = getOriginalFilename(file_path)
+            # The pre-rename basename is the actual result filename before the user
+            # pattern is applied — e.g. "fractal_cellpose_sam_segmentation_merged_z01_t01.tiff".
+            # This is stored in og_name_map so similarity matching in
+            # saveImagesToOmeroAsAttachments still works after files are renamed.
+            # Do NOT use getOriginalFilename(file_path) here: its regex requires a dot
+            # in the stem and produces garbage (e.g. "coreKrawczyk/.analyzed") for
+            # common result filenames that lack an embedded extension in the stem.
+            pre_rename_basename = os.path.basename(file_path)
+
+            # Extract original filename for rename pattern substitution.
+            # Pass only the basename — getOriginalFilename's regex can match
+            # directory components (e.g. ".analyzed") if given a full path.
+            original_filename = getOriginalFilename(pre_rename_basename)
 
             # Generate new filename using rename pattern
             new_filename = rename_import_file(
@@ -1952,11 +2141,18 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
                 logger.info(
                     f"Renaming: {os.path.basename(file_path)} -> {new_filename}")
 
-                # Ensure target doesn't already exist
+                # Ensure target is unique — add a counter suffix if names collide
+                # (e.g. a static rename pattern applied to multiple result files)
                 if os.path.exists(new_file_path):
-                    logger.warning(
-                        f"Target file already exists, skipping: {new_file_path}")
-                    continue
+                    first_dot = new_filename.find('.')
+                    name_base = new_filename[:first_dot] if first_dot != -1 else new_filename
+                    name_rest = new_filename[first_dot:] if first_dot != -1 else ''
+                    counter = 2
+                    while os.path.exists(os.path.join(file_dir, f"{name_base}_{counter}{name_rest}")):
+                        counter += 1
+                    new_filename = f"{name_base}_{counter}{name_rest}"
+                    new_file_path = os.path.join(file_dir, new_filename)
+                    logger.info(f"Name collision; using unique name: {new_filename}")
 
                 # For zarr directories, add small delay and permission check
                 if file_path.endswith('.zarr'):
@@ -1981,10 +2177,12 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
                 renamed_count += 1
                 file_type = "directory" if os.path.isdir(new_file_path) else "file"
                 logger.info(f"Successfully renamed {file_type}: {new_file_path}")
+                og_name_map[new_file_path] = pre_rename_basename
 
             else:
                 logger.debug(
                     f"No rename needed for: {os.path.basename(file_path)}")
+                og_name_map[file_path] = pre_rename_basename
 
         except PermissionError as pe:
             logger.error(f"Permission denied renaming {file_path}: {pe}")
@@ -2005,7 +2203,7 @@ def rename_files_in_importer_storage(client: Any, results_path: str) -> str:
         message += "\\nNo files/directories needed renaming"
         logger.info("No files/directories required renaming")
 
-    return message
+    return message, og_name_map
 
 
 def add_metadata_to_imported_images(
@@ -2015,7 +2213,9 @@ def add_metadata_to_imported_images(
     order_uuids: List[str],
     wf_id: str,
     job_id: str,
-    destination_type: str = "Dataset"
+    destination_type: str = "Dataset",
+    input_images: Optional[List[Any]] = None,
+    og_name_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """Add metadata to images/plates imported by biomero-importer using UUID search.
 
@@ -2102,6 +2302,15 @@ def add_metadata_to_imported_images(
 
         logger.info(f"Adding metadata to {len(imported_images)} imported images")
 
+        # Build result → source mapping using the same helper as the attachment path.
+        # Imported image names are post-rename; og_name_map reverse-lookup resolves them
+        # back to pre-rename basenames so similarity matching works correctly.
+        source_map = match_results_to_inputs(
+            [img.getName() for img in imported_images],
+            input_images or [],
+            og_name_map
+        ) if input_images else {}
+
         # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
         metadata_added = 0
         for img in imported_images:
@@ -2113,6 +2322,23 @@ def add_metadata_to_imported_images(
                 logger.debug(f"Added metadata to image {img.getId()}: {img.getName()}")
             except Exception as img_error:
                 logger.warning(f"Failed to add metadata to image {img.getId()}: {img_error}")
+
+            if input_images:
+                try:
+                    source_img = source_map.get(img.getName())
+                    if source_img:
+                        source_tag = f"source: {source_img.getName()} (id: {source_img.getId()})"
+                        existing_desc = img.getDescription() or ""
+                        if source_tag not in existing_desc:
+                            new_desc = (existing_desc + " | " + source_tag).strip(" |")
+                            img._obj.setDescription(rstring(new_desc))
+                            conn.getUpdateService().saveAndReturnObject(img._obj)
+                            logger.debug(
+                                f"Updated description of image {img.getId()} with source: "
+                                f"{source_img.getName()} (id={source_img.getId()})")
+                except Exception as desc_error:
+                    logger.warning(
+                        f"Could not update description for image {img.getId()}: {desc_error}")
 
         message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
         logger.info(message)
@@ -2510,9 +2736,10 @@ def process_importer_workflow(
     username: str,
     permanent_storage_path: str,
     wf_id: Optional[str],
-    task_id: Optional[UUID] = None
+    task_id: Optional[UUID] = None,
+    input_images: Optional[List[Any]] = None,
 
-) -> str:
+) -> Tuple[str, Dict[str, str]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
 
     This function processes image imports using the biomero-importer while ALL workflow
@@ -2534,6 +2761,7 @@ def process_importer_workflow(
         Status message describing processing results.
     """
     message = ""
+    og_name_map: Dict[str, str] = {}
     logger.info("Processing importer workflow...")
 
     # Determine destination type (dataset or screen)
@@ -2557,13 +2785,15 @@ def process_importer_workflow(
 
         if rename_enabled:
             logger.info("Renaming files in importer storage...")
-            rename_message = rename_files_in_importer_storage(client,
-                                                              permanent_storage_path)
+            rename_message, og_name_map = rename_files_in_importer_storage(client,
+                                                                            permanent_storage_path)
             message += rename_message
             logger.info("File renaming completed")
         else:
+            og_name_map = {}
             logger.info("Skipping file renaming (not enabled)")
     else:
+        og_name_map = {}
         logger.info("Skipping file renaming for screen destination")
 
     # Get destination info from parameters
@@ -2659,7 +2889,8 @@ def process_importer_workflow(
             order_uuids = [order.get('UUID')
                            for order in orders if order.get('UUID')]
             post_processing_message = add_metadata_to_imported_images(
-                conn, slurmClient, destination_id, order_uuids, wf_id, slurm_job_id, destination_type)
+                conn, slurmClient, destination_id, order_uuids, wf_id, slurm_job_id, destination_type,
+                input_images=input_images, og_name_map=og_name_map)
             if post_processing_message:
                 message += f"\n{post_processing_message}"
 
@@ -2678,7 +2909,7 @@ def process_importer_workflow(
         logger.error(f"Supported extensions: {SUPPORTED_IMAGE_EXTENSIONS}")
         sys.exit(1)  # Exit with failure code - this should trigger workflow failure
 
-    return message
+    return message, og_name_map
 
 
 def process_slurm_tables(
@@ -2749,7 +2980,9 @@ def process_zip_attachments(
     projects: List[Any],
     slurm_job_id: str,
     metadata_files: List[str],
-    wf_id: Optional[str]
+    wf_id: Optional[str],
+    input_images: Optional[List[Any]] = None,
+    og_name_map: Optional[Dict[str, str]] = None
 ) -> str:
     """Process project/plate zip file attachments.
 
@@ -2762,6 +2995,9 @@ def process_zip_attachments(
         slurm_job_id: SLURM job ID for metadata.
         metadata_files: List of metadata CSV file paths to attach.
         wf_id: Workflow ID for metadata.
+        input_images: Known workflow input images for attachment matching. Defaults to None.
+        og_name_map: Mapping of renamed file paths to their pre-rename original filenames.
+            Produced by rename_files_in_importer_storage. Defaults to None.
 
     Returns:
         Status message describing attachment results.
@@ -2774,7 +3010,9 @@ def process_zip_attachments(
                                              folder=permanent_storage_path,
                                              client=client,
                                              metadata_files=metadata_files,
-                                             wf_id=wf_id)
+                                             wf_id=wf_id,
+                                             input_images=input_images,
+                                             og_name_map=og_name_map)
         message += msg
 
     # Process project and plate zip attachments - EXACTLY like Get_Results
@@ -3534,12 +3772,65 @@ def runScript() -> None:
             if extraction_error:
                 raise extraction_error
 
+            # Load input images once — used for both importer description tagging
+            # and attachment matching (scenarios 1-3 + 4 with rename).
+            input_images = []
+            _lookup_task_id = task_id
+            if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
+                try:
+                    _lookup_task_id = slurmClient.jobAccounting.get_task_id(slurm_job_id)
+                    logger.info(f"Resolved task ID from job accounting: {_lookup_task_id}")
+                except Exception as _te:
+                    logger.debug(f"Could not resolve task ID from job accounting: {_te}")
+            if slurmClient.track_workflows and _lookup_task_id:
+                try:
+                    _task = slurmClient.workflowTracker.repository.get(_lookup_task_id)
+                    _input_data = _task.input_data if _task else None
+                    if isinstance(_input_data, dict):
+                        _image_ids = _input_data.get('IDs', [])
+                    elif isinstance(_input_data, list):
+                        _image_ids = _input_data
+                    else:
+                        _image_ids = []
+                    if not _image_ids and wf_id and slurmClient.track_workflows:
+                        try:
+                            _wf = slurmClient.workflowTracker.repository.get(wf_id)
+                            for _tid in _wf.tasks:
+                                _t = slurmClient.workflowTracker.repository.get(_tid)
+                                _td = _t.input_data if _t else None
+                                if isinstance(_td, dict):
+                                    _ids = _td.get('IDs', [])
+                                elif isinstance(_td, list) and all(isinstance(x, int) for x in _td):
+                                    _ids = _td
+                                else:
+                                    _ids = []
+                                if _ids:
+                                    _image_ids = _ids
+                                    logger.info(
+                                        f"Found image IDs in task '{_t.task_name}' ({_tid}): {_image_ids}")
+                                    break
+                        except Exception as _we:
+                            logger.debug(f"Could not walk workflow tasks for image IDs: {_we}")
+                    if _image_ids:
+                        input_images = [
+                            img for img in conn.getObjects(
+                                "Image", ids=[int(i) for i in _image_ids])
+                            if img
+                        ]
+                        logger.info(
+                            f"Loaded {len(input_images)} input images for matching: "
+                            f"{[img.getId() for img in input_images]}")
+                except Exception as _ie:
+                    logger.warning(f"Could not load input images from task for matching: {_ie}")
+
             # IMPORTER WORKFLOW - Dataset and screen image imports
+            og_name_map = {}
             if use_importer_for_datasets or use_importer_for_screens:
-                importer_message = process_importer_workflow(
+                importer_message, og_name_map = process_importer_workflow(
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
-                    permanent_storage_path, wf_id, task_id)
+                    permanent_storage_path, wf_id, task_id,
+                    input_images=input_images)
                 message += importer_message
 
             # Create metadata CSV (after import, to avoid duplicate metadata in import dir)
@@ -3561,7 +3852,8 @@ def runScript() -> None:
                 attachment_message = process_zip_attachments(
                     client, conn, permanent_storage_path,
                     filename, projects, slurm_job_id,
-                    metadata_files, wf_id)
+                    metadata_files, wf_id, input_images=input_images,
+                    og_name_map=og_name_map)
                 message += attachment_message
 
             logger.info("Results imported successfully")
