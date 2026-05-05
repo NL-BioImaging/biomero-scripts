@@ -231,6 +231,13 @@ def runScript():
             # Main parameter to select this workflow for execution
             json_descriptor = slurmClient.pull_descriptor_from_github(wf)
             wf_descr = json_descriptor['description']
+            # Build value-choices lookup from the descriptor (scoped per wf,
+            # so param name collisions across workflows are not an issue)
+            value_choices_map = {
+                inp['id']: [rstring(v) for v in inp['value-choices']]
+                for inp in json_descriptor.get('inputs', [])
+                if inp.get('value-choices')
+            }
             wf_ = omscripts.Bool(wf, grouping=parameter_group, default=False,
                                  description=wf_descr)
             input_list.append(wf_)
@@ -252,7 +259,8 @@ def runScript():
                     description=param["description"],
                     default=param["default"],
                     grouping=f"{parameter_group}.{param_incr+1}",
-                    optional=param['optional']
+                    optional=param['optional'],
+                    **({"values": value_choices_map[k]} if k in value_choices_map else {})
                 )
                 # To allow 'duplicate' params, add the wf to uniqueify them
                 # we have to remove this prefix later again, before passing
