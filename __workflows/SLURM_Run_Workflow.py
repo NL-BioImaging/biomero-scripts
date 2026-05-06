@@ -1258,12 +1258,19 @@ def importResultsToOmero(client: omscripts.client,
                 parent_data_type == constants.transfer.DATA_TYPE_PROJECT):
             logger.debug(f"Adding to dataset {parent_id}")
             projects = get_project_name_ids(conn, parent_id)
-            inputs[constants.results.OUTPUT_ATTACH_PROJECT] = rbool(
-                True)
-            inputs[constants.results.OUTPUT_ATTACH_PROJECT_ID] = rlist(
-                projects)
-            inputs[constants.results.OUTPUT_ATTACH_PLATE] = rbool(
-                False)
+            if projects:
+                inputs[constants.results.OUTPUT_ATTACH_PROJECT] = rbool(True)
+                inputs[constants.results.OUTPUT_ATTACH_PROJECT_ID] = rlist(projects)
+                inputs[constants.results.OUTPUT_ATTACH_DATASET] = rbool(False)
+            else:
+                logger.warning(
+                    f"Dataset {parent_id} has no parent project; "
+                    "falling back to attaching directly to the dataset")
+                datasets = get_dataset_name_ids(conn, parent_id)
+                inputs[constants.results.OUTPUT_ATTACH_PROJECT] = rbool(False)
+                inputs[constants.results.OUTPUT_ATTACH_DATASET] = rbool(True)
+                inputs[constants.results.OUTPUT_ATTACH_DATASET_ID] = rlist(datasets)
+            inputs[constants.results.OUTPUT_ATTACH_PLATE] = rbool(False)
         elif parent_data_type == constants.transfer.DATA_TYPE_PLATE:
             logger.debug(f"Adding to plate {parent_id}")
             plates = get_plate_name_ids(conn, parent_id)

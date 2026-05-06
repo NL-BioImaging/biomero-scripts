@@ -1002,6 +1002,8 @@ def upload_metadata_csv_to_omero(client, conn, message, slurm_job_id, attachment
                 obj_class_name = obj._obj.__class__.__name__
                 if 'Project' in obj_class_name:
                     object_type = "Project"
+                elif 'Dataset' in obj_class_name:
+                    object_type = "Dataset"
                 elif 'Plate' in obj_class_name:
                     object_type = "Plate"
                 elif 'Image' in obj_class_name:
@@ -1572,20 +1574,29 @@ def runScript():
                          optional=True, grouping="03.1",
                          description="Project to attach workflow results to",
                          values=_projects),
-            scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
-                         optional=False,
-                         grouping="05",
-                         description="Attach all results to original images as attachments",
-                         default=True),
-            scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
+            scripts.Bool(constants.results.OUTPUT_ATTACH_DATASET,
                          optional=False,
                          grouping="04",
+                         description="Attach all results in zip to a dataset (used when dataset has no parent project)",
+                         default=False),
+            scripts.List(constants.results.OUTPUT_ATTACH_DATASET_ID,
+                         optional=True, grouping="04.1",
+                         description="Dataset to attach workflow results to",
+                         values=getUserDatasets()),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
+                         optional=False,
+                         grouping="05",
                          description="Attach all results in zip to a plate",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
-                         optional=True, grouping="04.1",
+                         optional=True, grouping="05.1",
                          description="Plate to attach workflow results to",
                          values=_plates),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_OG_IMAGES,
+                         optional=False,
+                         grouping="06",
+                         description="Attach all results to original images as attachments",
+                         default=True),
             scripts.Bool(constants.results.OUTPUT_ATTACH_NEW_DATASET,
                          optional=False,
                          grouping="06",
@@ -1702,13 +1713,18 @@ def runScript():
                 message += f"\n{result.stdout}"
 
             # Pull project from Omero
-            projects = []  # note, can also be plate now
+            projects = []  # note, can also be plate or dataset now
             if unwrap(client.getInput(
                     constants.results.OUTPUT_ATTACH_PROJECT)):
                 project_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PROJECT_ID))
                 logger.debug(project_ids)
                 projects = [conn.getObject(constants.results.OUTPUT_ATTACH_PROJECT_ID, p.split(":")[0])
                             for p in project_ids]
+            if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_DATASET)):
+                dataset_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_DATASET_ID))
+                logger.debug(dataset_ids)
+                projects = [conn.getObject("Dataset", p.split(":")[0])
+                            for p in dataset_ids]
             if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PLATE)):
                 plate_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PLATE_ID))
                 logger.debug(plate_ids)
@@ -1779,6 +1795,8 @@ def runScript():
 
                             if (unwrap(client.getInput(
                                 constants.results.OUTPUT_ATTACH_PROJECT)) or
+                                    unwrap(client.getInput(
+                                        constants.results.OUTPUT_ATTACH_DATASET)) or
                                     unwrap(client.getInput(
                                         constants.results.OUTPUT_ATTACH_PLATE))):
                                 message = upload_zip_to_omero(
