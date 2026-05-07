@@ -382,7 +382,7 @@ def runScript():
             # Get the workflow parameters (dynamically) from their repository
             _workflow_params[wf] = slurmClient.get_workflow_parameters(
                 wf)
-            json_descriptor = slurmClient.pull_descriptor_from_github(wf)
+            json_descriptor = slurmClient.generic_descriptor_from_github(wf)
             wf_descr = json_descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
