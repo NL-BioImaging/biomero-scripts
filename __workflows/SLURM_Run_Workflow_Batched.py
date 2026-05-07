@@ -229,13 +229,13 @@ def runScript():
             _workflow_params[wf] = slurmClient.get_workflow_parameters(
                 wf)
             # Main parameter to select this workflow for execution
-            json_descriptor = slurmClient.generic_descriptor_from_github(wf)
-            wf_descr = json_descriptor['description']
+            descriptor = slurmClient.generic_descriptor_from_github(wf)
+            wf_descr = descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
             value_choices_map = {
                 inp['id']: [rstring(v) for v in inp['value-choices']]
-                for inp in json_descriptor.get('inputs', [])
+                for inp in descriptor.get('inputs', [])
                 if inp.get('value-choices')
             }
             wf_ = omscripts.Bool(wf, grouping=parameter_group, default=False,
