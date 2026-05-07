@@ -406,16 +406,7 @@ def runScript():
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
                 # Convert the parameter from cy(tomine)type to om(ero)type
-                omtype_param = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
-                    param["default"],
-                    param["name"],
-                    description=param["description"],
-                    default=param["default"],
-                    grouping=f"{parameter_group}.{param_incr+1}",
-                    optional=param['optional'],
-                    **({"values": value_choices_map[k]} if k in value_choices_map else {})
-                )
+                omtype_param = param
                 # To allow 'duplicate' params, add the wf to uniqueify them
                 # we have to remove this prefix later again, before passing
                 # them to BIOMERO (as the wf will not understand these params)
