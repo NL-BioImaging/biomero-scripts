@@ -140,10 +140,10 @@ def runScript():
             for i, (k, param) in enumerate(wfparams.items()):
                 p = slurmClient.convert_param_type_to_omtype(
                     param["type"],
-                    param["default-value"],
+                    param["default"],
                     param["name"],
                     description=param["description"],
-                    default=param["default-value"],
+                    default=param["default"],
                     grouping=f"03.{i+1}",
                     optional=param['optional']
                 )

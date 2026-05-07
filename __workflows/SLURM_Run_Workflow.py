@@ -408,10 +408,10 @@ def runScript():
                 # Convert the parameter type to om(ero)type
                 omtype_param = slurmClient.convert_param_type_to_omtype(
                     param["type"],
-                    param["default-value"],
+                    param["default"],
                     param["name"],
                     description=param["description"],
-                    default=param["default-value"],
+                    default=param["default"],
                     grouping=f"{parameter_group}.{param_incr+1}",
                     optional=param['optional'],
                     **({"values": value_choices_map[k]} if k in value_choices_map else {})
