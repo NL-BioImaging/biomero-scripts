@@ -138,7 +138,15 @@ def runScript():
                                     values=versions)
             input_list.append(wf_v)
             for i, (k, param) in enumerate(wfparams.items()):
-                p = param
+                p = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
+                    param["default-value"],
+                    param["name"],
+                    description=param["description"],
+                    default=param["default-value"],
+                    grouping=f"03.{i+1}",
+                    optional=param['optional']
+                )
                 input_list.append(p)
         inputs = {
             p._name: p for p in input_list
