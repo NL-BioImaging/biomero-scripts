@@ -413,7 +413,7 @@ def runScript():
                     description=param["description"],
                     default=param["default"],
                     grouping=f"{parameter_group}.{param_incr+1}",
-                    optional=param['optional'],
+                    optional=True,  # always optional: params from other workflows must not block this one
                     **({"values": value_choices_map[k]} if k in value_choices_map else {})
                 )
                 # To allow 'duplicate' params, add the wf to uniqueify them
@@ -616,12 +616,12 @@ def runScript():
 
                 while slurm_job_id_list:
                     # Query all jobids we care about
+                    job_status_dict = {}
                     try:
                         job_status_dict, _ = slurmClient.check_job_status(
                             slurm_job_id_list)
                     except Exception as e:
-                        UI_messages += f" ERROR WITH JOB: {e}"
-                        wf_failed = True
+                        logger.warning(f"Transient error checking job status, will retry: {e}")
 
                     for slurm_job_id, job_state in job_status_dict.items():
                         logger.debug(f"Job {slurm_job_id} is {job_state}.")
@@ -791,6 +791,16 @@ def run_workflow(slurmClient: SlurmClient,
 
     logger.debug(f"Workflow parameters: {kwargs}")
     try:
+        # Pre-flight: verify the job script exists on Slurm before submitting
+        job_script = f"{slurmClient.slurm_script_path}/jobs/{name}.sh"
+        check_result = slurmClient.run(f'test -f "{job_script}"', warn=True)
+        if check_result.exited != 0:
+            raise FileNotFoundError(
+                f"Job script not found on Slurm: {job_script}. "
+                f"Please generate the job script for '{name}' first "
+                f"(use 'Validate Slurm Setup' or check your slurm-scripts repo)."
+            )
+
         cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,
