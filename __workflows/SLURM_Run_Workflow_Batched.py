@@ -229,13 +229,13 @@ def runScript():
             _workflow_params[wf] = slurmClient.get_workflow_parameters(
                 wf)
             # Main parameter to select this workflow for execution
-            json_descriptor = slurmClient.pull_descriptor_from_github(wf)
-            wf_descr = json_descriptor['description']
+            descriptor = slurmClient.generic_descriptor_from_github(wf)
+            wf_descr = descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
             value_choices_map = {
                 inp['id']: [rstring(v) for v in inp['value-choices']]
-                for inp in json_descriptor.get('inputs', [])
+                for inp in descriptor.get('inputs', [])
                 if inp.get('value-choices')
             }
             wf_ = omscripts.Bool(wf, grouping=parameter_group, default=False,
@@ -251,9 +251,9 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                # Convert the parameter from cy(tomine)type to om(ero)type
-                omtype_param = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
+                # Convert the parameter type to om(ero)type
+                omtype_param = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
                     param["default"],
                     param["name"],
                     description=param["description"],

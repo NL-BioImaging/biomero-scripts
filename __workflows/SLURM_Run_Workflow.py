@@ -382,13 +382,13 @@ def runScript():
             # Get the workflow parameters (dynamically) from their repository
             _workflow_params[wf] = slurmClient.get_workflow_parameters(
                 wf)
-            json_descriptor = slurmClient.pull_descriptor_from_github(wf)
-            wf_descr = json_descriptor['description']
+            descriptor = slurmClient.generic_descriptor_from_github(wf)
+            wf_descr = descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
             value_choices_map = {
                 inp['id']: [rstring(v) for v in inp['value-choices']]
-                for inp in json_descriptor.get('inputs', [])
+                for inp in descriptor.get('inputs', [])
                 if inp.get('value-choices')
             }
             # Main parameter to select this workflow for execution
@@ -405,15 +405,15 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                # Convert the parameter from cy(tomine)type to om(ero)type
-                omtype_param = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
+                # Convert the parameter type to om(ero)type
+                omtype_param = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
                     param["default"],
                     param["name"],
                     description=param["description"],
                     default=param["default"],
                     grouping=f"{parameter_group}.{param_incr+1}",
-                    optional=param['optional'],
+                    optional=True,  # always optional: params from other workflows must not block this one
                     **({"values": value_choices_map[k]} if k in value_choices_map else {})
                 )
                 # To allow 'duplicate' params, add the wf to uniqueify them
@@ -616,12 +616,12 @@ def runScript():
 
                 while slurm_job_id_list:
                     # Query all jobids we care about
+                    job_status_dict = {}
                     try:
                         job_status_dict, _ = slurmClient.check_job_status(
                             slurm_job_id_list)
                     except Exception as e:
-                        UI_messages += f" ERROR WITH JOB: {e}"
-                        wf_failed = True
+                        logger.warning(f"Transient error checking job status, will retry: {e}")
 
                     for slurm_job_id, job_state in job_status_dict.items():
                         logger.debug(f"Job {slurm_job_id} is {job_state}.")
@@ -791,6 +791,16 @@ def run_workflow(slurmClient: SlurmClient,
 
     logger.debug(f"Workflow parameters: {kwargs}")
     try:
+        # Pre-flight: verify the job script exists on Slurm before submitting
+        job_script = f"{slurmClient.slurm_script_path}/jobs/{name}.sh"
+        check_result = slurmClient.run(f'test -f "{job_script}"', warn=True)
+        if check_result.exited != 0:
+            raise FileNotFoundError(
+                f"Job script not found on Slurm: {job_script}. "
+                f"Please generate the job script for '{name}' first "
+                f"(use 'Validate Slurm Setup' or check your slurm-scripts repo)."
+            )
+
         cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,

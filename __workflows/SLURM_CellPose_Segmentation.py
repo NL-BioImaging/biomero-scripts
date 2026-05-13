@@ -138,8 +138,8 @@ def runScript():
                                     values=versions)
             input_list.append(wf_v)
             for i, (k, param) in enumerate(wfparams.items()):
-                p = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
+                p = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
                     param["default"],
                     param["name"],
                     description=param["description"],

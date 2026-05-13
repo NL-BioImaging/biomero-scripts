@@ -104,7 +104,7 @@ def compress(target, base):
         target (str): Name of the zip file to write (e.g., "folder.zip").
         base (str): Name of folder to zip up (e.g., "folder").
     """
-    base_name, ext = target.split(".")
+    base_name, ext = target.rsplit(".", 1)
     shutil.make_archive(base_name, ext, base)
 
 
