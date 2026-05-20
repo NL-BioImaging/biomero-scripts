@@ -792,7 +792,12 @@ def run_workflow(slurmClient: SlurmClient,
     logger.debug(f"Workflow parameters: {kwargs}")
     try:
         # Pre-flight: verify the job script exists on Slurm before submitting
-        job_script = f"{slurmClient.slurm_script_path}/jobs/{name}.sh"
+        configured_job = slurmClient.slurm_model_jobs.get(name.lower())
+        job_script = (
+            f"{slurmClient.slurm_script_path}/{configured_job}"
+            if configured_job
+            else f"{slurmClient.slurm_script_path}/jobs/{name}.sh"
+        )
         check_result = slurmClient.run(f'test -f "{job_script}"', warn=True)
         if check_result.exited != 0:
             raise FileNotFoundError(
