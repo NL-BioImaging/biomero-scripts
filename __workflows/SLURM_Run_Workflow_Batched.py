@@ -71,7 +71,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE]
 
 # Version constant for easy version management
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 
 def runScript():
@@ -213,6 +213,7 @@ def runScript():
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()
         na = ["Not Available!"]
         _workflow_params = {}
+        _workflow_file_params = {}
         _workflow_available_versions = {}
         # All currently configured workflows
         workflows = wf_versions.keys()
@@ -226,8 +227,9 @@ def runScript():
             _workflow_available_versions[wf] = wf_versions.get(
                 wf, na)
             # Get the workflow parameters (dynamically) from their repository
-            _workflow_params[wf] = slurmClient.get_workflow_parameters(
-                wf)
+            _all_wf_params = slurmClient.get_workflow_parameters(wf)
+            _workflow_params[wf] = {k: v for k, v in _all_wf_params.items() if not v['file_attachment']}
+            _workflow_file_params[wf] = {k: v for k, v in _all_wf_params.items() if v['file_attachment']}
             # Main parameter to select this workflow for execution
             descriptor = slurmClient.generic_descriptor_from_github(wf)
             wf_descr = descriptor['description']
@@ -267,6 +269,22 @@ def runScript():
                 # them to BIOMERO (as the wf will not understand these params)
                 omtype_param._name = f"{wf}_|_{omtype_param._name}"
                 input_list.append(omtype_param)
+            # File-attachment params: exposed as Long (OMERO FileAnnotation ID)
+            # They live under a FILE_ prefix so SLURM_Run_Workflow can tell them apart.
+            num_reg = len(_workflow_params[wf])
+            for fp_incr, (k, fp) in enumerate(_workflow_file_params[wf].items()):
+                fmt_str = ", ".join(fp['format']) if fp['format'] else "any"
+                fp_param = omscripts.Long(
+                    f"{wf}_|_FILE_{k}",
+                    optional=fp['optional'],
+                    grouping=f"{parameter_group}.{num_reg + fp_incr + 1}",
+                    description=(
+                        f"[{fp['type'].capitalize()} attachment] {fp['description']}"
+                        f" Accepted formats: {fmt_str}."
+                        f" Provide the OMERO FileAnnotation ID."
+                    ),
+                )
+                input_list.append(fp_param)
         # Finish setting up the Omero script UI
         inputs = {
             p._name: p for p in input_list
