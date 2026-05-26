@@ -276,7 +276,7 @@ def runScript():
                 fmt_str = ", ".join(fp['format']) if fp['format'] else "any"
                 fp_param = omscripts.Long(
                     f"{wf}_|_FILE_{k}",
-                    optional=fp['optional'],
+                    optional=True,  # always optional: required-ness is enforced per chosen workflow at runtime
                     grouping=f"{parameter_group}.{num_reg + fp_incr + 1}",
                     description=(
                         f"[{fp['type'].capitalize()} attachment] {fp['description']}"

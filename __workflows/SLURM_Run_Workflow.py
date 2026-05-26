@@ -430,7 +430,7 @@ def runScript():
                 fmt_str = ", ".join(fp['format']) if fp['format'] else "any"
                 fp_param = omscripts.Long(
                     f"{wf}_|_FILE_{k}",
-                    optional=fp['optional'],
+                    optional=True,  # always optional: required-ness is enforced per chosen workflow at runtime
                     grouping=f"{parameter_group}.{num_reg + fp_incr + 1}",
                     description=(
                         f"[{fp['type'].capitalize()} attachment] {fp['description']}"
@@ -834,43 +834,62 @@ def run_workflow(slurmClient: SlurmClient,
         else:
             ft_script_id, ft_script_name = ft_matches[0]
             for param_id, fp in file_params.items():
-                ann_id = unwrap(client.getInput(f"{name}_|_FILE_{param_id}"))
-                if ann_id is None:
+                raw = unwrap(client.getInput(f"{name}_|_FILE_{param_id}"))
+                # Normalise: single int or list of ints → always a list
+                if raw is None:
+                    ann_ids = []
+                elif isinstance(raw, (list, tuple)):
+                    ann_ids = [int(v) for v in raw if v is not None]
+                else:
+                    ann_ids = [int(raw)]
+
+                if not ann_ids:
                     if not fp['optional']:
                         err = f"Required file attachment '{param_id}' has no annotation ID — cannot run workflow."
                         logger.error(err)
                         raise ValueError(err)
                     logger.debug(f"No annotation ID supplied for optional param '{param_id}', skipping.")
                     continue
-                logger.info(f"Transferring file attachment {ann_id} for param '{param_id}'")
-                ft_inputs = {
-                    constants.file_transfer.FILE_ANNOTATION_ID: rlong(ann_id),
-                    constants.file_transfer.FOLDER: rstring(zipfile),
-                    constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
-                }
-                try:
-                    ft_task_id = slurmClient.workflowTracker.add_task_to_workflow(
-                        wf_id, ft_script_name, VERSION,
-                        ann_id, {k: unwrap(v) for k, v in ft_inputs.items()}
-                    )
-                    slurmClient.workflowTracker.start_task(ft_task_id)
-                except Exception as db_e:
-                    logger.error(f"DB error adding file-transfer task: {db_e}")
-                    raise
-                ft_rv, _ = runOMEROScript(client, svc, ft_script_id, ft_inputs,
-                                           slurmClient=slurmClient)
-                slurm_path = unwrap(ft_rv.get('Slurm_Path')) if ft_rv else None
-                ft_msg = unwrap(ft_rv.get('Message', None)) if ft_rv else ''
-                if slurm_path:
-                    kwargs[param_id] = slurm_path
-                    UI_messages += f"Transferred {fp['type']} '{param_id}' to {slurm_path}. "
-                    slurmClient.workflowTracker.complete_task(ft_task_id, ft_msg or slurm_path)
-                else:
-                    err = f"File transfer for '{param_id}' (ann {ann_id}) returned no path: {ft_msg}"
-                    logger.warning(err)
-                    slurmClient.workflowTracker.fail_task(ft_task_id, err)
-                    if not fp.get('optional', True):
-                        raise ValueError(err)
+
+                collected_paths = []
+                for ann_id in ann_ids:
+                    logger.info(f"Transferring file attachment {ann_id} for param '{param_id}'")
+                    ft_inputs = {
+                        constants.file_transfer.FILE_ANNOTATION_ID: rlong(ann_id),
+                        constants.file_transfer.FOLDER: rstring(zipfile),
+                        constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
+                    }
+                    if fp.get('format'):
+                        ft_inputs[constants.file_transfer.FORMAT] = rstring(
+                            ",".join(fp['format'])
+                        )
+                    try:
+                        ft_task_id = slurmClient.workflowTracker.add_task_to_workflow(
+                            wf_id, ft_script_name, VERSION,
+                            ann_id, {k: unwrap(v) for k, v in ft_inputs.items()}
+                        )
+                        slurmClient.workflowTracker.start_task(ft_task_id)
+                    except Exception as db_e:
+                        logger.error(f"DB error adding file-transfer task: {db_e}")
+                        raise
+                    ft_rv, _ = runOMEROScript(client, svc, ft_script_id, ft_inputs,
+                                               slurmClient=slurmClient)
+                    slurm_path = unwrap(ft_rv.get('Slurm_Path')) if ft_rv else None
+                    ft_msg = unwrap(ft_rv.get('Message', None)) if ft_rv else ''
+                    if slurm_path:
+                        collected_paths.append(slurm_path)
+                        UI_messages += f"Transferred {fp['type']} '{param_id}' to {slurm_path}. "
+                        slurmClient.workflowTracker.complete_task(ft_task_id, ft_msg or slurm_path)
+                    else:
+                        err = f"File transfer for '{param_id}' (ann {ann_id}) returned no path: {ft_msg}"
+                        logger.warning(err)
+                        slurmClient.workflowTracker.fail_task(ft_task_id, err)
+                        if not fp.get('optional', True):
+                            raise ValueError(err)
+
+                if collected_paths:
+                    # Space-separated when multiple files; single value otherwise
+                    kwargs[param_id] = " ".join(collected_paths)
 
     logger.debug(f"Workflow parameters (incl. file paths): {kwargs}")
     try:

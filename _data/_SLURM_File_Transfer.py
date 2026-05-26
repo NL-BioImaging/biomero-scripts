@@ -72,6 +72,7 @@ def transfer_file_to_slurm(
     folder_name: str,
     slurmClient: SlurmClient,
     cleanup: bool = True,
+    allowed_formats: list = None,
 ) -> tuple[str, str]:
     """Download an OMERO FileAnnotation and upload it to the SLURM cluster.
 
@@ -83,13 +84,18 @@ def transfer_file_to_slurm(
             same data/in/ directory. Created automatically if absent.
         slurmClient: Authenticated SlurmClient instance.
         cleanup: If True, delete the local temp file after transfer.
+        allowed_formats: Optional list of accepted file extensions (without
+            leading dot, e.g. ["csv", "unix"]). If provided and the file's
+            extension is not in the list, a ValueError is raised before any
+            data transfer takes place.
 
     Returns:
         (slurm_path, message): Absolute path of the file on SLURM and a
         human-readable status message.
 
     Raises:
-        ValueError: If the annotation or its underlying file cannot be found.
+        ValueError: If the annotation or its underlying file cannot be found,
+            or if the file extension does not match ``allowed_formats``.
         Exception: On SSH / SCP failure.
     """
     # ------------------------------------------------------------------
@@ -107,6 +113,20 @@ def transfer_file_to_slurm(
         )
     filename = orig_file.getName()
     file_size = orig_file.getSize()
+
+    # ------------------------------------------------------------------
+    # Validate file extension against allowed formats (if specified)
+    # ------------------------------------------------------------------
+    if allowed_formats:
+        ext = os.path.splitext(filename)[1].lstrip('.').lower()
+        normalised = [f.lstrip('.').lower() for f in allowed_formats if f]
+        if normalised and ext not in normalised:
+            raise ValueError(
+                f"File '{filename}' has extension '.{ext}' but this parameter "
+                f"expects one of: {normalised}. "
+                f"Please select a file with a supported format."
+            )
+
     logger.info(
         f"Downloading FileAnnotation {annotation_id} "
         f"('{filename}', {file_size} bytes) …"
@@ -207,6 +227,18 @@ Connection ready? {slurmClient.validate()}""",
                 default=True,
             ),
 
+            scripts.String(
+                constants.file_transfer.FORMAT,
+                optional=True,
+                grouping="4",
+                description=(
+                    "Comma-separated list of accepted file extensions "
+                    "(without leading dot, e.g. 'csv,parquet'). "
+                    "When provided, the transfer is rejected if the selected "
+                    "file does not match. Leave empty to skip validation."
+                ),
+            ),
+
             version=VERSION,
             authors=["Torec Luik"],
             institutions=["Amsterdam UMC"],
@@ -222,6 +254,11 @@ Connection ready? {slurmClient.validate()}""",
             annotation_id = script_params[constants.file_transfer.FILE_ANNOTATION_ID]
             folder_name = script_params[constants.file_transfer.FOLDER]
             cleanup = script_params.get(constants.CLEANUP, True)
+            formats_raw = script_params.get(constants.file_transfer.FORMAT, "")
+            allowed_formats = (
+                [f.strip() for f in formats_raw.split(",") if f.strip()]
+                if formats_raw else None
+            )
 
             slurm_path, message = transfer_file_to_slurm(
                 conn=conn,
@@ -229,6 +266,7 @@ Connection ready? {slurmClient.validate()}""",
                 folder_name=folder_name,
                 slurmClient=slurmClient,
                 cleanup=cleanup,
+                allowed_formats=allowed_formats,
             )
 
             client.setOutput("Message", rstring(message))
