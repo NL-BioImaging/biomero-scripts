@@ -269,21 +269,21 @@ def runScript():
                 # them to BIOMERO (as the wf will not understand these params)
                 omtype_param._name = f"{wf}_|_{omtype_param._name}"
                 input_list.append(omtype_param)
-            # File-attachment params: exposed as Long (OMERO FileAnnotation ID)
+            # File-attachment params: exposed as List(Long) of OMERO FileAnnotation IDs
             # They live under a FILE_ prefix so SLURM_Run_Workflow can tell them apart.
             num_reg = len(_workflow_params[wf])
             for fp_incr, (k, fp) in enumerate(_workflow_file_params[wf].items()):
                 fmt_str = ", ".join(fp['format']) if fp['format'] else "any"
-                fp_param = omscripts.Long(
+                fp_param = omscripts.List(
                     f"{wf}_|_FILE_{k}",
-                    optional=True,  # always optional: required-ness is enforced per chosen workflow at runtime
+                    optional=True,
                     grouping=f"{parameter_group}.{num_reg + fp_incr + 1}",
                     description=(
                         f"[{fp['type'].capitalize()} attachment] {fp['description']}"
                         f" Accepted formats: {fmt_str}."
-                        f" Provide the OMERO FileAnnotation ID."
+                        f" Provide one or more OMERO FileAnnotation IDs."
                     ),
-                )
+                ).ofType(rlong(0))
                 input_list.append(fp_param)
         # Finish setting up the Omero script UI
         inputs = {
