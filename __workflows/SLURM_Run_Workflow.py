@@ -1648,8 +1648,7 @@ def createFileName(client: omscripts.client, conn: BlitzGateway,
                    wf_id: UUID) -> str:
     """Generate a unique filename for workflow data transfer.
 
-    Creates a descriptive filename based on selected OMERO objects (images,
-    datasets, or plates) combined with the workflow UUID for uniqueness.
+    Creates a compact folder name with a BIOMERO prefix and workflow UUID.
 
     Args:
         client: OMERO script client for parameter access.
@@ -1657,37 +1656,10 @@ def createFileName(client: omscripts.client, conn: BlitzGateway,
         wf_id: Workflow UUID for filename uniqueness.
 
     Returns:
-        str: Generated filename incorporating object names and workflow ID.
+        str: Generated filename in the form ``biomero_<uuid>``.
 
-    Raises:
-        ValueError: If unsupported data type is provided.
     """
-    opts = {}
-    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
-    if data_type == constants.transfer.DATA_TYPE_IMAGE:
-        # get parent dataset
-        opts['image'] = unwrap(client.getInput(constants.transfer.IDS))[0]
-        objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects(
-                         constants.transfer.DATA_TYPE_DATASET, opts=opts)]
-    elif data_type == constants.transfer.DATA_TYPE_DATASET:
-        objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects(
-                         constants.transfer.DATA_TYPE_DATASET,
-                         unwrap(client.getInput(constants.transfer.IDS)))]
-    elif data_type == constants.transfer.DATA_TYPE_PLATE:
-        objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects(
-                         constants.transfer.DATA_TYPE_PLATE,
-                         unwrap(client.getInput(constants.transfer.IDS)))]
-    else:
-        raise ValueError(f"Can't handle {data_type}")
-
-    # timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    filename = "_".join(objparams)
-    # Replace spaces with underscores in the filename
-    filename = filename.replace(" ", "_")
-    full_filename = f"{filename}_{wf_id}"
+    full_filename = f"biomero_{wf_id}"
     logger.debug("Filename: " + full_filename)
     return full_filename
 
