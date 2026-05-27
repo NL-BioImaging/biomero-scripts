@@ -53,7 +53,7 @@ import tempfile
 import omero.scripts as scripts
 import omero
 from omero.gateway import BlitzGateway
-from omero.rtypes import rstring, rlong
+from omero.rtypes import rstring
 
 from biomero import SlurmClient, constants
 
@@ -71,6 +71,7 @@ def transfer_file_to_slurm(
     annotation_id: int,
     folder_name: str,
     slurmClient: SlurmClient,
+    param_slot: str = None,
     cleanup: bool = True,
     allowed_formats: list = None,
 ) -> tuple[str, str]:
@@ -83,6 +84,9 @@ def transfer_file_to_slurm(
             folder name used for the image transfer so both end up in the
             same data/in/ directory. Created automatically if absent.
         slurmClient: Authenticated SlurmClient instance.
+        param_slot: Optional opaque routing slot. When provided, files are
+            placed in a dedicated subdirectory:
+            ``{Folder_Name}/data/in/{param_slot}/``.
         cleanup: If True, delete the local temp file after transfer.
         allowed_formats: Optional list of accepted file extensions (without
             leading dot, e.g. ["csv", "unix"]). If provided and the file's
@@ -146,7 +150,14 @@ def transfer_file_to_slurm(
         # ------------------------------------------------------------------
         # 3. Create destination directory on SLURM
         # ------------------------------------------------------------------
-        dest_dir = f"{slurmClient.slurm_data_path}/{folder_name}/data/in"
+        dest_root = f"{slurmClient.slurm_data_path}/{folder_name}/data/in"
+        if param_slot:
+            safe_param = str(param_slot).strip().replace(
+                "/", "_"
+            ).replace("\\", "_")
+            dest_dir = f"{dest_root}/{safe_param}"
+        else:
+            dest_dir = dest_root
         mkdir_result = slurmClient.run_commands(
             [f'mkdir -p "{dest_dir}"']
         )
@@ -212,8 +223,20 @@ Connection ready? {slurmClient.validate()}""",
                 description=(
                     "SLURM job data folder name (e.g. SLURM_IMAGES_1234567890). "
                     "Must match the folder name used for the image transfer so "
-                    "images and file attachments share the same data/in/ directory. "
-                    "The directory is created automatically if it does not yet exist."
+                    "images and file attachments share the same data/in/ "
+                    "directory. The directory is created automatically if it "
+                    "does not yet exist."
+                ),
+            ),
+
+            scripts.String(
+                constants.file_transfer.PARAM_SLOT,
+                optional=True,
+                grouping="2.1",
+                description=(
+                    "Optional opaque routing slot for subdirectory routing. "
+                    "When provided, file is transferred into "
+                    "{Folder_Name}/data/in/{Param_Slot}/."
                 ),
             ),
 
@@ -251,8 +274,11 @@ Connection ready? {slurmClient.validate()}""",
             conn = BlitzGateway(client_obj=client)
             script_params = client.getInputs(unwrap=True)
 
-            annotation_id = script_params[constants.file_transfer.FILE_ANNOTATION_ID]
+            annotation_id = script_params[
+                constants.file_transfer.FILE_ANNOTATION_ID
+            ]
             folder_name = script_params[constants.file_transfer.FOLDER]
+            param_slot = script_params.get(constants.file_transfer.PARAM_SLOT)
             cleanup = script_params.get(constants.CLEANUP, True)
             formats_raw = script_params.get(constants.file_transfer.FORMAT, "")
             allowed_formats = (
@@ -265,6 +291,7 @@ Connection ready? {slurmClient.validate()}""",
                 annotation_id=annotation_id,
                 folder_name=folder_name,
                 slurmClient=slurmClient,
+                param_slot=param_slot,
                 cleanup=cleanup,
                 allowed_formats=allowed_formats,
             )

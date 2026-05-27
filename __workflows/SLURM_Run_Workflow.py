@@ -833,7 +833,8 @@ def run_workflow(slurmClient: SlurmClient,
             )
         else:
             ft_script_id, ft_script_name = ft_matches[0]
-            for param_id, fp in file_params.items():
+            for slot_index, (param_id, fp) in enumerate(file_params.items(), start=1):
+                param_slot = f"p{slot_index}"
                 raw = unwrap(client.getInput(f"{name}_|_FILE_{param_id}"))
                 # Normalise: single int or list of ints → always a list
                 if raw is None:
@@ -853,10 +854,14 @@ def run_workflow(slurmClient: SlurmClient,
 
                 collected_paths = []
                 for ann_id in ann_ids:
-                    logger.info(f"Transferring file attachment {ann_id} for param '{param_id}'")
+                    logger.info(
+                        f"Transferring file attachment {ann_id} for "
+                        f"param slot '{param_slot}'"
+                    )
                     ft_inputs = {
                         constants.file_transfer.FILE_ANNOTATION_ID: rlong(ann_id),
                         constants.file_transfer.FOLDER: rstring(zipfile),
+                        constants.file_transfer.PARAM_SLOT: rstring(param_slot),
                         constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
                     }
                     if fp.get('format'):
@@ -878,18 +883,27 @@ def run_workflow(slurmClient: SlurmClient,
                     ft_msg = unwrap(ft_rv.get('Message', None)) if ft_rv else ''
                     if slurm_path:
                         collected_paths.append(slurm_path)
-                        UI_messages += f"Transferred {fp['type']} '{param_id}' to {slurm_path}. "
+                        UI_messages += (
+                            f"Transferred {fp['type']} '{param_id}' "
+                            f"as {param_slot} to {slurm_path}. "
+                        )
                         slurmClient.workflowTracker.complete_task(ft_task_id, ft_msg or slurm_path)
                     else:
-                        err = f"File transfer for '{param_id}' (ann {ann_id}) returned no path: {ft_msg}"
+                        err = (
+                            f"File transfer for '{param_id}' "
+                            f"({param_slot}, ann {ann_id}) returned no path: {ft_msg}"
+                        )
                         logger.warning(err)
                         slurmClient.workflowTracker.fail_task(ft_task_id, err)
                         if not fp.get('optional', True):
                             raise ValueError(err)
 
                 if collected_paths:
-                    # Space-separated when multiple files; single value otherwise
-                    kwargs[param_id] = " ".join(collected_paths)
+                    # Attachments are routed into param-specific dirs on SLURM
+                    # (e.g. .../data/in/<param_id>/). Pass that directory to
+                    # the workflow CLI flag for consistent handling across
+                    # single and multiple file-count params.
+                    kwargs[param_id] = os.path.dirname(collected_paths[0])
 
     logger.debug(f"Workflow parameters (incl. file paths): {kwargs}")
     try:
