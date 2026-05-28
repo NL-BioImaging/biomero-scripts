@@ -3081,11 +3081,17 @@ def process_non_image_file_outputs(
     )
 
     namespace = NSCREATED + "/SLURM/SLURM_FILE_OUTPUTS"
+    import mimetypes
     message = ""
     attached_count = 0
     skipped_count = 0
 
-    for dirpath, _dirnames, filenames in os.walk(permanent_storage_path):
+    for dirpath, dirnames, filenames in os.walk(permanent_storage_path):
+        # Prune zarr store directories — chunk files inside have no extension and
+        # would otherwise be picked up as file annotations. Zarr outputs are
+        # image-type outputs handled by the importer, not this function.
+        dirnames[:] = [d for d in dirnames
+                       if not d.lower().endswith(('.zarr', '.ome.zarr'))]
         for fname in filenames:
             file_path = os.path.join(dirpath, fname)
 
@@ -3105,8 +3111,6 @@ def process_non_image_file_outputs(
                 skipped_count += 1
                 continue
 
-            # Guess mimetype; fall back to application/octet-stream
-            import mimetypes
             mimetype, _ = mimetypes.guess_type(file_path)
             if mimetype is None:
                 mimetype = "application/octet-stream"

@@ -1412,7 +1412,12 @@ def process_non_image_file_outputs(
     attached_count = 0
     skipped_count = 0
 
-    for dirpath, _dirnames, filenames in os.walk(folder):
+    for dirpath, dirnames, filenames in os.walk(folder):
+        # Prune zarr store directories — chunk files inside have no extension and
+        # would otherwise be picked up as file annotations. Zarr outputs are
+        # image-type outputs handled by the importer, not this function.
+        dirnames[:] = [d for d in dirnames
+                       if not d.lower().endswith(('.zarr', '.ome.zarr'))]
         for fname in filenames:
             file_path = os.path.join(dirpath, fname)
 
