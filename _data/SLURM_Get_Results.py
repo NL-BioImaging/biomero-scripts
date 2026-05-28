@@ -1690,7 +1690,7 @@ def runScript():
             scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
                          optional=False,
                          grouping="05",
-                         description="Attach a bulk zip archive of all results to a plate. Use the individual file annotations option to access specific output files without downloading the full archive.",,
+                         description="Attach a bulk zip archive of all results to a plate. Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
                          optional=True, grouping="05.1",
