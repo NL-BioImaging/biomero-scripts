@@ -68,7 +68,8 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
-                  constants.workflow.OUTPUT_CSV_TABLE]
+                  constants.workflow.OUTPUT_CSV_TABLE,
+                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
 
 # Version constant for easy version management
 VERSION = "2.7.0"
@@ -207,7 +208,12 @@ def runScript():
                            optional=False,
                            grouping="02.8",
                            description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
-                           default=True)
+                           default=True),
+            omscripts.Bool(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
+                           optional=True,
+                           grouping="02.85",
+                           description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
+                           default=False)
         ]
         # Generate script parameters for all our workflows
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()

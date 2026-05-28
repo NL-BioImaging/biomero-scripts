@@ -3033,6 +3033,114 @@ def process_zip_attachments(
     return message
 
 
+def process_non_image_file_outputs(
+    conn: BlitzGateway,
+    permanent_storage_path: str,
+    projects: List[Any],
+    slurm_job_id: str,
+    metadata_files: Optional[List[str]] = None,
+    wf_id: Optional[str] = None,
+) -> str:
+    """Attach individual non-image, non-CSV output files as OMERO file annotations.
+
+    Scans *permanent_storage_path* for files that are neither images (handled
+    by the importer), nor CSV tables (handled by process_slurm_tables), nor the
+    bulk zip archive, nor SLURM job logs.  Every remaining file — e.g. NumPy
+    arrays (.npy/.npz), model weights (.pt/.h5/.pkl), JSON/YAML configs — is
+    registered as a :class:`omero.model.FileAnnotation` (in-place when the
+    importer is available) and linked to every object in *projects*.
+
+    This enables bilayers-style workflows that declare ``array``, ``file``, or
+    ``executable`` output types to surface those artefacts directly in OMERO
+    without relying solely on the bulk zip.
+
+    Args:
+        conn: Open OMERO BlitzGateway connection.
+        permanent_storage_path: Path to the permanent workflow storage directory
+            (the ``.analyzed/{uuid}/{timestamp}`` directory).
+        projects: List of OMERO projects/plates/datasets to link annotations to.
+        slurm_job_id: SLURM job ID used in annotation descriptions.
+        metadata_files: File paths that were already attached as metadata CSVs
+            (skipped to avoid duplication). Defaults to None.
+        wf_id: Workflow UUID used in annotation descriptions. Defaults to None.
+
+    Returns:
+        Status message describing what was attached.
+    """
+    if not projects:
+        logger.warning("process_non_image_file_outputs: no OMERO objects provided; skipping")
+        return "\nNo OMERO objects available for file annotation."
+
+    # Build set of paths to skip (already handled by other processors)
+    skip_paths: set = set(metadata_files or [])
+
+    # Extensions that are handled by other processors
+    skip_extensions = (
+        tuple(SUPPORTED_IMAGE_EXTENSIONS)
+        + ('.csv', '.zip', '.log')
+    )
+
+    namespace = NSCREATED + "/SLURM/SLURM_FILE_OUTPUTS"
+    message = ""
+    attached_count = 0
+    skipped_count = 0
+
+    for dirpath, _dirnames, filenames in os.walk(permanent_storage_path):
+        for fname in filenames:
+            file_path = os.path.join(dirpath, fname)
+
+            # Skip already-handled paths
+            if file_path in skip_paths:
+                skipped_count += 1
+                continue
+
+            # Skip by extension
+            lower = fname.lower()
+            if any(lower.endswith(ext) for ext in skip_extensions):
+                skipped_count += 1
+                continue
+
+            # Skip hidden/system files
+            if fname.startswith('.'):
+                skipped_count += 1
+                continue
+
+            # Guess mimetype; fall back to application/octet-stream
+            import mimetypes
+            mimetype, _ = mimetypes.guess_type(file_path)
+            if mimetype is None:
+                mimetype = "application/octet-stream"
+
+            description = (
+                f"Non-image output from SLURM job {slurm_job_id}"
+                + (f" (Workflow {wf_id})" if wf_id else "")
+            )
+
+            try:
+                file_ann = create_file_annotation_inplace(
+                    conn, file_path, mimetype, namespace, description)
+                logger.info(f"Created file annotation for {file_path} (id={file_ann.getId()})")
+            except Exception as e:
+                logger.error(f"Failed to create file annotation for {file_path}: {e}")
+                message += f"\nFailed to annotate {fname}: {e}"
+                continue
+
+            # Link annotation to all target OMERO objects
+            for obj in projects:
+                try:
+                    obj.linkAnnotation(file_ann)
+                    logger.debug(f"Linked {fname} annotation to {type(obj).__name__} {obj.getId()}")
+                except Exception as e:
+                    logger.error(f"Failed to link annotation for {file_path} to {obj}: {e}")
+                    message += f"\nFailed to link {fname} to {type(obj).__name__} {obj.getId()}: {e}"
+
+            attached_count += 1
+
+    summary = f"\nAttached {attached_count} non-image output file(s) as annotations (skipped {skipped_count} already-handled files)."
+    logger.info(summary)
+    return message + summary
+
+
 def cleanup_resources(
     client: Any,
     slurmClient: SlurmClient,
@@ -3430,7 +3538,7 @@ def runScript() -> None:
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="02",
-                         description="Attach all results in zip to a project",
+                         description="Attach a bulk zip archive of all results to a project (backup/download-all). Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PROJECT_ID,
                          optional=True, grouping="02.1",
@@ -3439,7 +3547,7 @@ def runScript() -> None:
             scripts.Bool(constants.results.OUTPUT_ATTACH_DATASET,
                          optional=False,
                          grouping="03",
-                         description="Attach all results in zip to a dataset (used when dataset has no parent project)",
+                         description="Attach a bulk zip archive of all results to a dataset (used when dataset has no parent project). Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_DATASET_ID,
                          optional=True, grouping="03.1",
@@ -3448,7 +3556,7 @@ def runScript() -> None:
             scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
                          optional=False,
                          grouping="04",
-                         description="Attach all results in zip to a plate",
+                         description="Attach a bulk zip archive of all results to a plate. Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
                          optional=True, grouping="04.1",
@@ -3542,14 +3650,19 @@ def runScript() -> None:
                          grouping="08.4",
                          description="Plate to attach workflow results to",
                          values=_plates),
-            scripts.Bool(constants.CLEANUP,
+            scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS,
                          optional=True,
                          grouping="09",
+                         description="Attach individual non-image output files (e.g. NumPy arrays, model weights, JSON/YAML configs) as OMERO file annotations. Bilayers workflows with 'array', 'file', or 'executable' output types benefit most from this option. Images and CSVs are handled separately.",
+                         default=False),
+            scripts.Bool(constants.CLEANUP,
+                         optional=True,
+                         grouping="10",
                          description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
                          default=True),
             scripts.Bool(constants.results.TEST_WRITE_PERMISSIONS_ONLY,
                          optional=True,
-                         grouping="09.1",
+                         grouping="10.1",
                          description="DRY-RUN ONLY: Test write permissions to importer storage and exit (no actual import). " + \
                                     "Use this to validate storage configuration before running expensive workflows.",
                          default=False),
@@ -3643,6 +3756,8 @@ def runScript() -> None:
                 constants.results.OUTPUT_ATTACH_NEW_SCREEN))
             process_csv_tables = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_TABLE))
+            process_file_outputs = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_FILE_OUTPUTS)) or False
             process_attachments = (unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)) or
                                    unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PROJECT)) or
                                    unwrap(client.getInput(constants.results.OUTPUT_ATTACH_DATASET)) or
@@ -3650,7 +3765,7 @@ def runScript() -> None:
 
             # Debug the workflow decisions
             logger.info(
-                f"Workflow decisions: use_importer_for_datasets={use_importer_for_datasets}, use_importer_for_screens={use_importer_for_screens}, process_csv_tables={process_csv_tables}, process_attachments={process_attachments}")
+                f"Workflow decisions: use_importer_for_datasets={use_importer_for_datasets}, use_importer_for_screens={use_importer_for_screens}, process_csv_tables={process_csv_tables}, process_attachments={process_attachments}, process_file_outputs={process_file_outputs}")
 
             # Initialize importer only if needed for dataset or screen imports
             importer_initialized = False
@@ -3872,6 +3987,13 @@ def runScript() -> None:
                     metadata_files, wf_id, input_images=input_images,
                     og_name_map=og_name_map)
                 message += attachment_message
+
+            # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
+            if process_file_outputs:
+                file_outputs_message = process_non_image_file_outputs(
+                    conn, permanent_storage_path, projects,
+                    slurm_job_id, metadata_files=metadata_files, wf_id=wf_id)
+                message += file_outputs_message
 
             logger.info("Results imported successfully")
             message += "\nWorkflow execution completed successfully."

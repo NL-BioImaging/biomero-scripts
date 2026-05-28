@@ -92,7 +92,8 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
-                  constants.workflow.OUTPUT_CSV_TABLE]
+                  constants.workflow.OUTPUT_CSV_TABLE,
+                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
 VERSION = "2.7.0"
 
 
@@ -356,6 +357,11 @@ def runScript():
                            grouping="02.8",
                            description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
                            default=True),
+            omscripts.Bool(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
+                           optional=True,
+                           grouping="02.85",
+                           description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
+                           default=False),
             omscripts.Bool(constants.CLEANUP,
                            optional=True,
                            grouping="02.9", 
@@ -1516,6 +1522,10 @@ def importResultsToOmero(client: omscripts.client,
     inputs[constants.results.IMPORT_LABEL_ZARRS] = rbool(True)
     inputs[constants.results.IMPORT_ONLY_LABELS] = rbool(True)
     inputs[constants.results.TEST_WRITE_PERMISSIONS_ONLY] = rbool(False)
+
+    # Forward file-output annotation flag
+    inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(
+        selected_output.get(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS, False))
 
     # Wait for Slurm Accounting to update
     wait_for_job_completion(slurmClient, slurm_job_id)
