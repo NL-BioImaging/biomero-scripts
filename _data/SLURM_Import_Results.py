@@ -3655,6 +3655,26 @@ def runScript() -> None:
                          grouping="09",
                          description="Attach individual non-image output files (e.g. NumPy arrays, model weights, JSON/YAML configs) as OMERO file annotations. Bilayers workflows with 'array', 'file', or 'executable' output types benefit most from this option. Images and CSVs are handled separately.",
                          default=False),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET,
+                         optional=True,
+                         grouping="09.1",
+                         description="Attach to the dataset chosen below",
+                         default=True),
+            scripts.List(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID,
+                         optional=True,
+                         grouping="09.2",
+                         description="Dataset to attach non-image file outputs to",
+                         values=_datasets),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE,
+                         optional=True,
+                         grouping="09.3",
+                         description="Attach to the plate chosen below",
+                         default=False),
+            scripts.List(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID,
+                         optional=True,
+                         grouping="09.4",
+                         description="Plate to attach non-image file outputs to",
+                         values=_plates),
             scripts.Bool(constants.CLEANUP,
                          optional=True,
                          grouping="10",
@@ -3990,8 +4010,18 @@ def runScript() -> None:
 
             # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
             if process_file_outputs:
+                file_output_targets = []
+                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET)):
+                    dataset_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID))
+                    if dataset_ids:
+                        file_output_targets += [conn.getObject("Dataset", d.split(":")[0]) for d in dataset_ids]
+                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE)):
+                    plate_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID))
+                    if plate_ids:
+                        file_output_targets += [conn.getObject("Plate", p.split(":")[0]) for p in plate_ids]
+                file_output_targets = [t for t in file_output_targets if t is not None]
                 file_outputs_message = process_non_image_file_outputs(
-                    conn, permanent_storage_path, projects,
+                    conn, permanent_storage_path, file_output_targets,
                     slurm_job_id, metadata_files=metadata_files, wf_id=wf_id)
                 message += file_outputs_message
 

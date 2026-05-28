@@ -1523,9 +1523,21 @@ def importResultsToOmero(client: omscripts.client,
     inputs[constants.results.IMPORT_ONLY_LABELS] = rbool(True)
     inputs[constants.results.TEST_WRITE_PERMISSIONS_ONLY] = rbool(False)
 
-    # Forward file-output annotation flag
-    inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(
-        selected_output.get(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS, False))
+    # Forward file-output annotation flag + destinations (mirrors CSV table wiring exactly)
+    if selected_output.get(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS, False):
+        inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(True)
+        if parent_data_type == constants.transfer.DATA_TYPE_DATASET:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET] = rbool(True)
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID] = rlist(get_dataset_name_ids(conn, parent_id))
+        else:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET] = rbool(False)
+        if parent_data_type == constants.transfer.DATA_TYPE_PLATE:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(True)
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID] = rlist(get_plate_name_ids(conn, parent_id))
+        else:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(False)
+    else:
+        inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(False)
 
     # Wait for Slurm Accounting to update
     wait_for_job_completion(slurmClient, slurm_job_id)
