@@ -3081,10 +3081,10 @@ def process_non_image_file_outputs(
     # call site, since upload_log_to_omero already handled it.
     skip_extensions = (
         tuple(SUPPORTED_IMAGE_EXTENSIONS)
-        + ('.csv', '.zip')
+        + ('.csv',)
     )
 
-    namespace = NSCREATED + "/SLURM/SLURM_FILE_OUTPUTS"
+    namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     import mimetypes
     message = ""
     attached_count = 0
@@ -3120,7 +3120,7 @@ def process_non_image_file_outputs(
                 mimetype = "application/octet-stream"
 
             description = (
-                f"Non-image output from SLURM job {slurm_job_id}"
+                f"File output from SLURM job {slurm_job_id}"
                 + (f" (Workflow {wf_id})" if wf_id else "")
             )
 
@@ -4031,9 +4031,15 @@ def runScript() -> None:
                 # Exclude the SLURM job log from file-annotation attachment —
                 # upload_log_to_omero already attached it. All other .log files
                 # (e.g. workflow run.log) are processed normally.
+                # Also exclude the bulk results zip ({job_id}_out.zip) — it is the
+                # full archive of all results and is handled by process_zip_attachments;
+                # workflow-produced zips inside subdirectories attach normally.
                 _file_skip = list(metadata_files or [])
                 if log_to_upload:
                     _file_skip.append(log_to_upload)
+                _bulk_zip = os.path.join(permanent_storage_path, f"{slurm_job_id}_out.zip")
+                if os.path.exists(_bulk_zip):
+                    _file_skip.append(_bulk_zip)
                 file_outputs_message = process_non_image_file_outputs(
                     conn, permanent_storage_path, file_output_targets,
                     slurm_job_id, metadata_files=_file_skip, wf_id=wf_id)

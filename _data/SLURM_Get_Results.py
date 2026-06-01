@@ -1404,14 +1404,14 @@ def process_non_image_file_outputs(
         '.mvd2', '.afi', '.exp', '.ipw', '.raw',
         '.nrrd', '.nhdr', '.am', '.amiramesh',
         '.avi', '.mov', '.flv', '.swf',
-        '.csv', '.zip',
+        '.csv',
         # NOTE: .log is intentionally omitted — workflow-generated log files
         # (e.g. run.log) are attached as individual file annotations. The SLURM
         # job log lives in local_tmp_storage, not in the scanned folder, so
         # there is no risk of double-attachment in Get_Results.
     )
 
-    namespace = NSCREATED + "/SLURM/SLURM_FILE_OUTPUTS"
+    namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     message = ""
     attached_count = 0
     skipped_count = 0
@@ -1443,7 +1443,7 @@ def process_non_image_file_outputs(
                 mimetype = "application/octet-stream"
 
             description = (
-                f"Non-image output from SLURM job {slurm_job_id}"
+                f"File output from SLURM job {slurm_job_id}"
                 + (f" (Workflow {wf_id})" if wf_id else "")
             )
 
