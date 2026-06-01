@@ -3074,10 +3074,14 @@ def process_non_image_file_outputs(
     # Build set of paths to skip (already handled by other processors)
     skip_paths: set = set(metadata_files or [])
 
-    # Extensions that are handled by other processors
+    # Extensions that are handled by other processors.
+    # NOTE: .log is intentionally NOT in this list — workflow-generated log files
+    # (e.g. run.log) are attached as file annotations just like any other output.
+    # The SLURM job log (omero-{job_id}.log) is excluded via skip_paths at the
+    # call site, since upload_log_to_omero already handled it.
     skip_extensions = (
         tuple(SUPPORTED_IMAGE_EXTENSIONS)
-        + ('.csv', '.zip', '.log')
+        + ('.csv', '.zip')
     )
 
     namespace = NSCREATED + "/SLURM/SLURM_FILE_OUTPUTS"
@@ -4024,9 +4028,15 @@ def runScript() -> None:
                     if plate_ids:
                         file_output_targets += [conn.getObject("Plate", p.split(":")[0]) for p in plate_ids]
                 file_output_targets = [t for t in file_output_targets if t is not None]
+                # Exclude the SLURM job log from file-annotation attachment —
+                # upload_log_to_omero already attached it. All other .log files
+                # (e.g. workflow run.log) are processed normally.
+                _file_skip = list(metadata_files or [])
+                if log_to_upload:
+                    _file_skip.append(log_to_upload)
                 file_outputs_message = process_non_image_file_outputs(
                     conn, permanent_storage_path, file_output_targets,
-                    slurm_job_id, metadata_files=metadata_files, wf_id=wf_id)
+                    slurm_job_id, metadata_files=_file_skip, wf_id=wf_id)
                 message += file_outputs_message
 
             logger.info("Results imported successfully")
