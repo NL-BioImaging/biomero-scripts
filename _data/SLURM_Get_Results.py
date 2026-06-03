@@ -220,9 +220,9 @@ def saveCSVToOmeroAsTable(conn, folder, client,
             try:
                 mimetype = "text/csv"
                 namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
-                description = f"CSV file {csv_name} from SLURM job {job_id}"
+                description = f"File output from SLURM job {job_id}"
                 if wf_id:
-                    description += f" from Workflow {wf_id}"
+                    description += f" (Workflow {wf_id})"
                 logger.debug(
                     f"Creating FileAnnotation for CSV file: {csv_path}")
                 origFName = os.path.join(folder, table_name)
@@ -1369,9 +1369,9 @@ def process_non_image_file_outputs(
 ) -> str:
     """Attach individual non-image, non-CSV output files as OMERO file annotations.
 
-    Scans *folder* for files that are neither images nor CSV tables nor the bulk
-    zip archive nor SLURM job logs.  Each remaining file (e.g. NumPy arrays,
-    model weights, JSON/YAML configs) is uploaded as a
+    Scans *folder* for files that are neither images nor CSV tables nor SLURM
+    job logs.  Each remaining file (e.g. NumPy arrays, model weights,
+    JSON/YAML configs) is uploaded as a
     :class:`omero.model.FileAnnotation` and linked to every object in *projects*.
 
     Args:
@@ -1460,7 +1460,8 @@ def process_non_image_file_outputs(
             for obj in projects:
                 try:
                     obj.linkAnnotation(file_ann)
-                    logger.debug(f"Linked {fname} annotation to {type(obj).__name__} {obj.getId()}")
+                    logger.debug(f"Linked annotation {file_ann.getId()} ({fname}) to {obj.getId()} ({type(obj).__name__}) ")
+                    message += f"\nAttached {fname} (id={file_ann.getId()}) as annotation to {type(obj).__name__} (id={obj.getId()})"
                 except Exception as e:
                     logger.error(f"Failed to link annotation for {file_path} to {obj}: {e}")
                     message += f"\nFailed to link {fname} to {type(obj).__name__} {obj.getId()}: {e}"

@@ -52,9 +52,12 @@ CLEANUP BEHAVIOR:
 When cleanup is enabled, this script removes:
 - SLURM server: Original job results directory, temporary zip files, job logs
 - Local: Temporary files from zip operations (if any were created)
+- Permanent storage: The bulk ``{job_id}_out.zip`` is deleted from the ``.analyzed``
+  directory once import completes **unless** it was attached to OMERO (in which case
+  OMERO may reference the file directly via an in-place symlink and it must remain).
 
-PERMANENT STORAGE (NEVER CLEANED):
-- Permanent storage: .analyzed/uuid/timestamp/ directories and ALL contents
+PERMANENT STORAGE (otherwise preserved):
+- Permanent storage: .analyzed/uuid/timestamp/ directories and extracted contents
 - Complete workflow preservation: images, CSVs, metadata, logs, analysis results
 - Enables both data preservation and biomero-importer access to image files
 - This is completely separate from temporary SLURM files
@@ -432,9 +435,9 @@ def saveCSVToOmeroAsTable(
             try:
                 mimetype = "text/csv"
                 namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
-                description = f"CSV file {csv_name} from SLURM job {job_id}"
+                description = f"File output from SLURM job {job_id}"
                 if wf_id:
-                    description += f" from Workflow {wf_id}"
+                    description += f" (Workflow {wf_id})"
                 origFName = os.path.join(folder, table_name)
                 csv_file_attachment = create_file_annotation_inplace(
                     conn, csv_path, mimetype, namespace, description)
@@ -1025,14 +1028,19 @@ def upload_log_to_omero(
 ) -> str:
     """Upload a log/text file to OMERO.
 
-    Creates file annotation and attaches to specified projects.
+    Creates a file annotation and links it to the specified OMERO objects.
+    When ``projects`` is empty (e.g. screen-only workflow with no direct
+    project/plate attachment) the function skips linking silently — callers
+    should pass ``file_output_targets`` as a fallback so the log is never
+    left as an orphan.
 
     Args:
         client: OMERO client.
         conn: Open connection to OMERO.
         message: Current script output message.
         slurm_job_id: ID of the SLURM job the file came from.
-        projects: OMERO projects to attach file to.
+        projects: OMERO objects (projects/plates/datasets) to attach file to.
+            May be empty, in which case the annotation is created but not linked.
         file: Path to file to upload.
         wf_id: Workflow ID for metadata. Defaults to None.
 
@@ -2985,14 +2993,14 @@ def process_zip_attachments(
     wf_id: Optional[str],
     input_images: Optional[List[Any]] = None,
     og_name_map: Optional[Dict[str, str]] = None
-) -> str:
+) -> Tuple[str, Optional[str]]:
     """Process project/plate zip file attachments.
 
     Args:
         client: OMERO script client.
         conn: OMERO BlitzGateway connection.
         permanent_storage_path: Path to permanent storage location.
-        filename: Name of the zip file to be attached.
+        filename: Base name of the bulk results zip (without ``.zip`` extension).
         projects: List of OMERO projects/plates for attachments.
         slurm_job_id: SLURM job ID for metadata.
         metadata_files: List of metadata CSV file paths to attach.
@@ -3002,9 +3010,15 @@ def process_zip_attachments(
             Produced by rename_files_in_importer_storage. Defaults to None.
 
     Returns:
-        Status message describing attachment results.
+        Tuple of (status message, attached_zip_path).
+        ``attached_zip_path`` is the full on-disk path of the bulk results zip if it was
+        successfully attached to OMERO, or ``None`` if it was not attached (option not
+        selected, or upload failed).  Callers use this to decide whether to clean up the
+        zip from permanent storage: ``None`` → not attached → safe to remove;
+        non-``None`` → OMERO references the file (possibly in-place) → must not be deleted.
     """
     message = ""
+    attached_zip_path: Optional[str] = None  # set below if bulk zip is actually attached to OMERO
 
     if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)):
         # upload and link individual images
@@ -3024,13 +3038,16 @@ def process_zip_attachments(
         zip_path = os.path.join(permanent_storage_path, filename)
         message = upload_zip_to_omero(
             client, conn, message, slurm_job_id, projects, zip_path, wf_id)
+        # Record the exact path that was attached so the caller can skip cleanup.
+        # upload_zip_to_omero appends .zip internally, so match that here.
+        attached_zip_path = f"{zip_path}.zip"
 
         # Create and attach metadata CSV for ZIP attachments
         if projects and metadata_files:
             message = upload_metadata_csv_to_omero(
                 client, conn, message, slurm_job_id, projects, metadata_files, wf_id)
 
-    return message
+    return message, attached_zip_path
 
 
 def process_non_image_file_outputs(
@@ -3137,7 +3154,8 @@ def process_non_image_file_outputs(
             for obj in projects:
                 try:
                     obj.linkAnnotation(file_ann)
-                    logger.debug(f"Linked {fname} annotation to {type(obj).__name__} {obj.getId()}")
+                    logger.debug(f"Linked annotation {file_ann.getId()} ({fname}) to {obj.getId()} ({type(obj).__name__}) ")
+                    message += f"\nAttached {fname} (id={file_ann.getId()}) as annotation to {type(obj).__name__} (id={obj.getId()})"
                 except Exception as e:
                     logger.error(f"Failed to link annotation for {file_path} to {obj}: {e}")
                     message += f"\nFailed to link {fname} to {type(obj).__name__} {obj.getId()}: {e}"
@@ -3889,6 +3907,7 @@ def runScript() -> None:
             logger.info("Extracting SLURM results...")
             slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename = (
                 None, None, None, None)
+            _bulk_zip_perm: Optional[str] = None  # set once after extraction; used for skip-list and cleanup
             extraction_error = None
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_slurm_results_zip(
@@ -3896,6 +3915,9 @@ def runScript() -> None:
                 message += f"\nSuccessfully extracted SLURM results: {permanent_storage_path}"
                 logger.info(
                     f"SLURM results extracted and available: {permanent_storage_path}")
+                # Compute the bulk zip path once from what extraction actually returned.
+                # Every later reference uses this variable — no guessing from job ID.
+                _bulk_zip_perm = os.path.join(permanent_storage_path, f"{filename}.zip")
             except Exception as e:
                 logger.error(f"Failed to extract SLURM results: {e}")
                 message += f"\nFailed to extract SLURM results: {e}"
@@ -3919,11 +3941,27 @@ def runScript() -> None:
                     logger.warning(
                         f"Failed to copy log file to permanent storage: {_log_copy_err}")
 
+            # Pre-build file output targets so the log can be linked there as a fallback
+            # when no direct project/plate attachment is configured (e.g. screen-only workflow).
+            # The log belongs alongside the metadata CSV — same targets, never an orphan.
+            _file_output_targets_for_log = []
+            if process_file_outputs:
+                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET)):
+                    _fot_dataset_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID))
+                    if _fot_dataset_ids:
+                        _file_output_targets_for_log += [conn.getObject("Dataset", d.split(":")[0]) for d in _fot_dataset_ids]
+                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE)):
+                    _fot_plate_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID))
+                    if _fot_plate_ids:
+                        _file_output_targets_for_log += [conn.getObject("Plate", p.split(":")[0]) for p in _fot_plate_ids]
+                _file_output_targets_for_log = [t for t in _file_output_targets_for_log if t is not None]
+
+            _log_targets = projects if projects else _file_output_targets_for_log
             logger.info("Uploading logfile to OMERO...")
             try:
                 message = upload_log_to_omero(
                     client, conn, message, slurm_job_id,
-                    projects, log_to_upload, wf_id=wf_id)
+                    _log_targets, log_to_upload, wf_id=wf_id)
             except Exception as _log_upload_err:
                 # Log the failure but don't let it shadow a pending extraction error
                 logger.warning(f"Log upload failed: {_log_upload_err}")
@@ -4008,8 +4046,12 @@ def runScript() -> None:
                 message += zip_message
 
             # ZIP ATTACHMENT OPERATIONS
+            # attached_zip_path: the exact on-disk path of the bulk results zip if it was
+            # successfully attached to OMERO; None otherwise.  Used below to decide
+            # whether the zip can be removed from permanent storage.
+            attached_zip_path: Optional[str] = None
             if process_attachments:
-                attachment_message = process_zip_attachments(
+                attachment_message, attached_zip_path = process_zip_attachments(
                     client, conn, permanent_storage_path,
                     filename, projects, slurm_job_id,
                     metadata_files, wf_id, input_images=input_images,
@@ -4018,16 +4060,7 @@ def runScript() -> None:
 
             # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
             if process_file_outputs:
-                file_output_targets = []
-                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET)):
-                    dataset_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID))
-                    if dataset_ids:
-                        file_output_targets += [conn.getObject("Dataset", d.split(":")[0]) for d in dataset_ids]
-                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE)):
-                    plate_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID))
-                    if plate_ids:
-                        file_output_targets += [conn.getObject("Plate", p.split(":")[0]) for p in plate_ids]
-                file_output_targets = [t for t in file_output_targets if t is not None]
+                file_output_targets = _file_output_targets_for_log  # already built above (reuse, avoids double OMERO query)
                 # Exclude the SLURM job log from file-annotation attachment —
                 # upload_log_to_omero already attached it. All other .log files
                 # (e.g. workflow run.log) are processed normally.
@@ -4037,13 +4070,27 @@ def runScript() -> None:
                 _file_skip = list(metadata_files or [])
                 if log_to_upload:
                     _file_skip.append(log_to_upload)
-                _bulk_zip = os.path.join(permanent_storage_path, f"{slurm_job_id}_out.zip")
-                if os.path.exists(_bulk_zip):
-                    _file_skip.append(_bulk_zip)
+                # Exclude the bulk results zip — handled by process_zip_attachments.
+                # Workflow-produced zips inside subdirectories are not affected.
+                if _bulk_zip_perm and os.path.exists(_bulk_zip_perm):
+                    _file_skip.append(_bulk_zip_perm)
                 file_outputs_message = process_non_image_file_outputs(
                     conn, permanent_storage_path, file_output_targets,
                     slurm_job_id, metadata_files=_file_skip, wf_id=wf_id)
                 message += file_outputs_message
+
+            # Remove the bulk results zip from permanent storage if it was not attached to OMERO.
+            # _bulk_zip_perm was set right after extraction — it is the definitive path, not
+            # reconstructed here.  attached_zip_path is non-None only when upload_zip_to_omero
+            # succeeded; if the zip is referenced by OMERO (in-place) we must not delete it.
+            if _bulk_zip_perm and os.path.exists(_bulk_zip_perm) and not attached_zip_path:
+                try:
+                    os.remove(_bulk_zip_perm)
+                    message += f"\nRemoved bulk zip from permanent storage (not attached, content already imported)"
+                    logger.info(f"Removed bulk zip from permanent storage: {_bulk_zip_perm}")
+                except Exception as _zip_del_e:
+                    logger.warning(f"Could not remove bulk zip from permanent storage: {_zip_del_e}")
+                    message += f"\nCould not remove bulk zip: {_zip_del_e}"
 
             logger.info("Results imported successfully")
             message += "\nWorkflow execution completed successfully."
