@@ -92,8 +92,9 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
-                  constants.workflow.OUTPUT_CSV_TABLE]
-VERSION = "2.6.0"
+                  constants.workflow.OUTPUT_CSV_TABLE,
+                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
+VERSION = "2.7.0"
 
 
 def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway, client: omscripts.client) -> None:
@@ -356,6 +357,11 @@ def runScript():
                            grouping="02.8",
                            description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
                            default=True),
+            omscripts.Bool(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
+                           optional=True,
+                           grouping="02.85",
+                           description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
+                           default=False),
             omscripts.Bool(constants.CLEANUP,
                            optional=True,
                            grouping="02.9", 
@@ -367,6 +373,7 @@ def runScript():
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()
         na = ["Not Available!"]
         _workflow_params = {}
+        _workflow_file_params = {}  # file-attachment params keyed by param_id
         _workflow_available_versions = {}
         # All currently configured workflows
         workflows = wf_versions.keys()
@@ -380,15 +387,16 @@ def runScript():
             _workflow_available_versions[wf] = wf_versions.get(
                 wf, na)
             # Get the workflow parameters (dynamically) from their repository
-            _workflow_params[wf] = slurmClient.get_workflow_parameters(
-                wf)
-            json_descriptor = slurmClient.pull_descriptor_from_github(wf)
-            wf_descr = json_descriptor['description']
+            _all_wf_params = slurmClient.get_workflow_parameters(wf)
+            _workflow_params[wf] = {k: v for k, v in _all_wf_params.items() if not v['file_attachment']}
+            _workflow_file_params[wf] = {k: v for k, v in _all_wf_params.items() if v['file_attachment']}
+            descriptor = slurmClient.generic_descriptor_from_github(wf)
+            wf_descr = descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
             value_choices_map = {
                 inp['id']: [rstring(v) for v in inp['value-choices']]
-                for inp in json_descriptor.get('inputs', [])
+                for inp in descriptor.get('inputs', [])
                 if inp.get('value-choices')
             }
             # Main parameter to select this workflow for execution
@@ -405,15 +413,15 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                # Convert the parameter from cy(tomine)type to om(ero)type
-                omtype_param = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
+                # Convert the parameter type to om(ero)type
+                omtype_param = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
                     param["default"],
                     param["name"],
                     description=param["description"],
                     default=param["default"],
                     grouping=f"{parameter_group}.{param_incr+1}",
-                    optional=param['optional'],
+                    optional=True,  # always optional: params from other workflows must not block this one
                     **({"values": value_choices_map[k]} if k in value_choices_map else {})
                 )
                 # To allow 'duplicate' params, add the wf to uniqueify them
@@ -421,6 +429,22 @@ def runScript():
                 # them to BIOMERO (as the wf will not understand these params)
                 omtype_param._name = f"{wf}_|_{omtype_param._name}"
                 input_list.append(omtype_param)
+            # File-attachment params: exposed as List(Long) of OMERO FileAnnotation IDs
+            # They live under a FILE_ prefix so run_workflow can tell them apart.
+            num_reg = len(_workflow_params[wf])
+            for fp_incr, (k, fp) in enumerate(_workflow_file_params[wf].items()):
+                fmt_str = ", ".join(fp['format']) if fp['format'] else "any"
+                fp_param = omscripts.List(
+                    f"{wf}_|_FILE_{k}",
+                    optional=True,  # required-ness is enforced per selected workflow at runtime
+                    grouping=f"{parameter_group}.{num_reg + fp_incr + 1}",
+                    description=(
+                        f"[{fp['type'].capitalize()} attachment] {fp['description']}"
+                        f" Accepted formats: {fmt_str}."
+                        f" Provide one or more OMERO FileAnnotation IDs."
+                    ),
+                ).ofType(rlong(0))
+                input_list.append(fp_param)
         # Finish setting up the Omero script UI
         inputs = {
             f"{p._name}": p for p in input_list
@@ -601,7 +625,9 @@ def runScript():
                         UI_messages, slurm_job_id, wf_id, task_id = run_workflow(
                             slurmClient,
                             _workflow_params[wf_name],
+                            _workflow_file_params[wf_name],
                             client,
+                            conn,
                             UI_messages,
                             zipfile,
                             email,
@@ -616,12 +642,12 @@ def runScript():
 
                 while slurm_job_id_list:
                     # Query all jobids we care about
+                    job_status_dict = {}
                     try:
                         job_status_dict, _ = slurmClient.check_job_status(
                             slurm_job_id_list)
                     except Exception as e:
-                        UI_messages += f" ERROR WITH JOB: {e}"
-                        wf_failed = True
+                        logger.warning(f"Transient error checking job status, will retry: {e}")
 
                     for slurm_job_id, job_state in job_status_dict.items():
                         logger.debug(f"Job {slurm_job_id} is {job_state}.")
@@ -751,7 +777,9 @@ def runScript():
 
 def run_workflow(slurmClient: SlurmClient,
                  workflow_params,
+                 file_params,
                  client,
+                 conn,
                  UI_messages: str,
                  zipfile,
                  email,
@@ -761,14 +789,17 @@ def run_workflow(slurmClient: SlurmClient,
 
     Submits a named workflow to SLURM with user-specified parameters and
     monitors initial job submission status. Handles parameter extraction
-    from OMERO UI inputs and manages workflow tracking state.
+    from OMERO UI inputs, file-attachment transfers to HPC, and workflow
+    tracking state.
 
     Args:
         slurmClient (SlurmClient): Active SLURM client connection.
-        workflow_params: Dictionary of workflow-specific parameters.
+        workflow_params: Dictionary of regular workflow parameters.
+        file_params: Dictionary of file-attachment params (annotation IDs).
         client: OMERO script client for parameter access.
+        conn: OMERO BlitzGateway connection (needed for file transfers).
         UI_messages (str): Accumulated user interface messages.
-        zipfile: Name of input data file on SLURM.
+        zipfile: Name of input data file on SLURM (determines data_path).
         email: User email for job notifications.
         name: Workflow name to execute.
         wf_id: Workflow UUID for tracking.
@@ -784,13 +815,119 @@ def run_workflow(slurmClient: SlurmClient,
     logger.info(f"Submitting workflow: {name}")
     workflow_version = unwrap(client.getInput(f"{name}_Version"))
 
-    # Extract workflow parameters
+    # Extract regular workflow parameters
     kwargs = {}
     for k in workflow_params:
         kwargs[k] = unwrap(client.getInput(f"{name}_|_{k}"))
 
-    logger.debug(f"Workflow parameters: {kwargs}")
+    # Transfer file-attachment inputs to HPC and resolve their Slurm paths
+    if file_params:
+        logger.info('''
+        # ------------------------------------------------
+        # :: 1b. Transfer file attachments to Slurm ::
+        # ------------------------------------------------
+        ''')
+        svc = conn.getScriptService()
+        scripts = svc.getScripts()
+        file_transfer_scripts = [constants.FILE_TRANSFER_SCRIPT]
+        ft_matches = [(unwrap(s.id), unwrap(s.getName()))
+                      for s in scripts if unwrap(s.getName()) in file_transfer_scripts]
+        if not ft_matches:
+            logger.warning(
+                f"File transfer script {file_transfer_scripts} not found — "
+                f"skipping file-attachment transfer for {name}."
+            )
+        else:
+            ft_script_id, ft_script_name = ft_matches[0]
+            for slot_index, (param_id, fp) in enumerate(file_params.items(), start=1):
+                param_slot = f"p{slot_index}"
+                raw = unwrap(client.getInput(f"{name}_|_FILE_{param_id}"))
+                # Normalise: single int or list of ints → always a list
+                if raw is None:
+                    ann_ids = []
+                elif isinstance(raw, (list, tuple)):
+                    ann_ids = [int(v) for v in raw if v is not None]
+                else:
+                    ann_ids = [int(raw)]
+
+                if not ann_ids:
+                    if not fp['optional']:
+                        err = f"Required file attachment '{param_id}' has no annotation ID — cannot run workflow."
+                        logger.error(err)
+                        raise ValueError(err)
+                    logger.debug(f"No annotation ID supplied for optional param '{param_id}', skipping.")
+                    continue
+
+                collected_paths = []
+                for ann_id in ann_ids:
+                    logger.info(
+                        f"Transferring file attachment {ann_id} for "
+                        f"param slot '{param_slot}'"
+                    )
+                    ft_inputs = {
+                        constants.file_transfer.FILE_ANNOTATION_ID: rlong(ann_id),
+                        constants.file_transfer.FOLDER: rstring(zipfile),
+                        constants.file_transfer.PARAM_SLOT: rstring(param_slot),
+                        constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
+                    }
+                    if fp.get('format'):
+                        ft_inputs[constants.file_transfer.FORMAT] = rstring(
+                            ",".join(fp['format'])
+                        )
+                    try:
+                        ft_task_id = slurmClient.workflowTracker.add_task_to_workflow(
+                            wf_id, ft_script_name, VERSION,
+                            ann_id, {k: unwrap(v) for k, v in ft_inputs.items()}
+                        )
+                        slurmClient.workflowTracker.start_task(ft_task_id)
+                    except Exception as db_e:
+                        logger.error(f"DB error adding file-transfer task: {db_e}")
+                        raise
+                    ft_rv, _ = runOMEROScript(client, svc, ft_script_id, ft_inputs,
+                                               slurmClient=slurmClient)
+                    slurm_path = unwrap(ft_rv.get('Slurm_Path')) if ft_rv else None
+                    ft_msg = unwrap(ft_rv.get('Message', None)) if ft_rv else ''
+                    if slurm_path:
+                        collected_paths.append(slurm_path)
+                        UI_messages += (
+                            f"Transferred {fp['type']} '{param_id}' "
+                            f"as {param_slot} to {slurm_path}. "
+                        )
+                        slurmClient.workflowTracker.complete_task(ft_task_id, ft_msg or slurm_path)
+                    else:
+                        err = (
+                            f"File transfer for '{param_id}' "
+                            f"({param_slot}, ann {ann_id}) returned no path: {ft_msg}"
+                        )
+                        logger.warning(err)
+                        slurmClient.workflowTracker.fail_task(ft_task_id, err)
+                        if not fp.get('optional', True):
+                            raise ValueError(err)
+
+                if collected_paths:
+                    # Attachments are routed into param-specific dirs on SLURM
+                    # (e.g. .../data/in/<param_id>/). Pass that directory to
+                    # the workflow CLI flag for consistent handling across
+                    # single and multiple file-count params.
+                    kwargs[param_id] = os.path.dirname(collected_paths[0])
+
+    logger.debug(f"Workflow parameters (incl. file paths): {kwargs}")
     try:
+        # Pre-flight: verify the job script exists on Slurm before submitting
+        configured_job = slurmClient.slurm_model_jobs.get(name.lower())
+        job_script = (
+            f"{slurmClient.slurm_script_path}/{configured_job}"
+            if configured_job
+            else f"{slurmClient.slurm_script_path}/jobs/{name}.sh"
+        )
+        check_result = slurmClient.run(f'test -f "{job_script}"', warn=True)
+        if check_result.exited != 0:
+            raise FileNotFoundError(
+                f"Job script not found on Slurm: {job_script}. "
+                f"Please generate the job script for '{name}' first "
+                f"(use 'Validate Slurm Setup' or check your slurm-scripts repo)."
+            )
+
         cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,
@@ -1386,6 +1523,22 @@ def importResultsToOmero(client: omscripts.client,
     inputs[constants.results.IMPORT_ONLY_LABELS] = rbool(True)
     inputs[constants.results.TEST_WRITE_PERMISSIONS_ONLY] = rbool(False)
 
+    # Forward file-output annotation flag + destinations (mirrors CSV table wiring exactly)
+    if selected_output.get(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS, False):
+        inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(True)
+        if parent_data_type == constants.transfer.DATA_TYPE_DATASET:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET] = rbool(True)
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID] = rlist(get_dataset_name_ids(conn, parent_id))
+        else:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET] = rbool(False)
+        if parent_data_type == constants.transfer.DATA_TYPE_PLATE:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(True)
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID] = rlist(get_plate_name_ids(conn, parent_id))
+        else:
+            inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(False)
+    else:
+        inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(False)
+
     # Wait for Slurm Accounting to update
     wait_for_job_completion(slurmClient, slurm_job_id)
 
@@ -1531,8 +1684,7 @@ def createFileName(client: omscripts.client, conn: BlitzGateway,
                    wf_id: UUID) -> str:
     """Generate a unique filename for workflow data transfer.
 
-    Creates a descriptive filename based on selected OMERO objects (images,
-    datasets, or plates) combined with the workflow UUID for uniqueness.
+    Creates a compact folder name with a BIOMERO prefix and workflow UUID.
 
     Args:
         client: OMERO script client for parameter access.
@@ -1540,37 +1692,10 @@ def createFileName(client: omscripts.client, conn: BlitzGateway,
         wf_id: Workflow UUID for filename uniqueness.
 
     Returns:
-        str: Generated filename incorporating object names and workflow ID.
+        str: Generated filename in the form ``biomero_<uuid>``.
 
-    Raises:
-        ValueError: If unsupported data type is provided.
     """
-    opts = {}
-    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
-    if data_type == constants.transfer.DATA_TYPE_IMAGE:
-        # get parent dataset
-        opts['image'] = unwrap(client.getInput(constants.transfer.IDS))[0]
-        objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects(
-                         constants.transfer.DATA_TYPE_DATASET, opts=opts)]
-    elif data_type == constants.transfer.DATA_TYPE_DATASET:
-        objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects(
-                         constants.transfer.DATA_TYPE_DATASET,
-                         unwrap(client.getInput(constants.transfer.IDS)))]
-    elif data_type == constants.transfer.DATA_TYPE_PLATE:
-        objparams = ['%d_%s' % (d.id, d.getName())
-                     for d in conn.getObjects(
-                         constants.transfer.DATA_TYPE_PLATE,
-                         unwrap(client.getInput(constants.transfer.IDS)))]
-    else:
-        raise ValueError(f"Can't handle {data_type}")
-
-    # timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    filename = "_".join(objparams)
-    # Replace spaces with underscores in the filename
-    filename = filename.replace(" ", "_")
-    full_filename = f"{filename}_{wf_id}"
+    full_filename = f"biomero_{wf_id}"
     logger.debug("Filename: " + full_filename)
     return full_filename
 

@@ -75,7 +75,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 OBJECT_TYPES = (
     'Plate',
@@ -1359,6 +1359,119 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, w
     return message
 
 
+def process_non_image_file_outputs(
+    conn,
+    folder: str,
+    projects: list,
+    slurm_job_id: str,
+    metadata_files=None,
+    wf_id=None,
+) -> str:
+    """Attach individual non-image, non-CSV output files as OMERO file annotations.
+
+    Scans *folder* for files that are neither images nor CSV tables nor the bulk
+    zip archive nor SLURM job logs.  Each remaining file (e.g. NumPy arrays,
+    model weights, JSON/YAML configs) is uploaded as a
+    :class:`omero.model.FileAnnotation` and linked to every object in *projects*.
+
+    Args:
+        conn: Open OMERO BlitzGateway connection.
+        folder: Path to the extracted workflow output directory.
+        projects: List of OMERO projects/plates/datasets to link annotations to.
+        slurm_job_id: SLURM job ID used in annotation descriptions.
+        metadata_files: File paths already attached as metadata CSVs (skipped).
+        wf_id: Workflow UUID used in annotation descriptions.
+
+    Returns:
+        Status message describing what was attached.
+    """
+    import mimetypes
+
+    if not projects:
+        logger.warning("process_non_image_file_outputs: no OMERO objects provided; skipping")
+        return "\nNo OMERO objects available for file annotation."
+
+    skip_paths = set(metadata_files or [])
+    skip_extensions = (
+        '.tif', '.tiff', '.ome.tif', '.ome.tiff',
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp',
+        '.lsm', '.czi', '.nd2', '.oib', '.oif', '.vsi', '.scn',
+        '.svs', '.ims', '.lif', '.pic', '.flex', '.zvi',
+        '.zarr', '.ome.zarr',
+        '.dm3', '.dm4', '.ser', '.img', '.hdr', '.sdt',
+        '.psd', '.fits', '.dcm', '.dicom',
+        '.stk', '.lei', '.mrc', '.rec', '.st',
+        '.mvd2', '.afi', '.exp', '.ipw', '.raw',
+        '.nrrd', '.nhdr', '.am', '.amiramesh',
+        '.avi', '.mov', '.flv', '.swf',
+        '.csv',
+        # NOTE: .log is intentionally omitted — workflow-generated log files
+        # (e.g. run.log) are attached as individual file annotations. The SLURM
+        # job log lives in local_tmp_storage, not in the scanned folder, so
+        # there is no risk of double-attachment in Get_Results.
+    )
+
+    namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
+    message = ""
+    attached_count = 0
+    skipped_count = 0
+
+    for dirpath, dirnames, filenames in os.walk(folder):
+        # Prune zarr store directories — chunk files inside have no extension and
+        # would otherwise be picked up as file annotations. Zarr outputs are
+        # image-type outputs handled by the importer, not this function.
+        dirnames[:] = [d for d in dirnames
+                       if not d.lower().endswith(('.zarr', '.ome.zarr'))]
+        for fname in filenames:
+            file_path = os.path.join(dirpath, fname)
+
+            if file_path in skip_paths:
+                skipped_count += 1
+                continue
+
+            lower = fname.lower()
+            if any(lower.endswith(ext) for ext in skip_extensions):
+                skipped_count += 1
+                continue
+
+            if fname.startswith('.'):
+                skipped_count += 1
+                continue
+
+            mimetype, _ = mimetypes.guess_type(file_path)
+            if mimetype is None:
+                mimetype = "application/octet-stream"
+
+            description = (
+                f"File output from SLURM job {slurm_job_id}"
+                + (f" (Workflow {wf_id})" if wf_id else "")
+            )
+
+            try:
+                file_ann = conn.createFileAnnfromLocalFile(
+                    file_path, mimetype=mimetype,
+                    ns=namespace, desc=description)
+                logger.info(f"Created file annotation for {file_path} (id={file_ann.getId()})")
+            except Exception as e:
+                logger.error(f"Failed to create file annotation for {file_path}: {e}")
+                message += f"\nFailed to annotate {fname}: {e}"
+                continue
+
+            for obj in projects:
+                try:
+                    obj.linkAnnotation(file_ann)
+                    logger.debug(f"Linked {fname} annotation to {type(obj).__name__} {obj.getId()}")
+                except Exception as e:
+                    logger.error(f"Failed to link annotation for {file_path} to {obj}: {e}")
+                    message += f"\nFailed to link {fname} to {type(obj).__name__} {obj.getId()}: {e}"
+
+            attached_count += 1
+
+    summary = f"\nAttached {attached_count} non-image output file(s) as annotations (skipped {skipped_count} already-handled files)."
+    logger.info(summary)
+    return message + summary
+
+
 def extract_data_location_from_log(export_file):
     """Read SLURM job logfile to find location of the data
 
@@ -1568,7 +1681,7 @@ def runScript():
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="03",
-                         description="Attach all results in zip to a project",
+                         description="Attach a bulk zip archive of all results to a project (backup/download-all). Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=True),
             scripts.List(constants.results.OUTPUT_ATTACH_PROJECT_ID,
                          optional=True, grouping="03.1",
@@ -1577,7 +1690,7 @@ def runScript():
             scripts.Bool(constants.results.OUTPUT_ATTACH_DATASET,
                          optional=False,
                          grouping="04",
-                         description="Attach all results in zip to a dataset (used when dataset has no parent project)",
+                         description="Attach a bulk zip archive of all results to a dataset (used when dataset has no parent project). Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_DATASET_ID,
                          optional=True, grouping="04.1",
@@ -1586,7 +1699,7 @@ def runScript():
             scripts.Bool(constants.results.OUTPUT_ATTACH_PLATE,
                          optional=False,
                          grouping="05",
-                         description="Attach all results in zip to a plate",
+                         description="Attach a bulk zip archive of all results to a plate. Use the individual file annotations option to access specific output files without downloading the full archive.",
                          default=False),
             scripts.List(constants.results.OUTPUT_ATTACH_PLATE_ID,
                          optional=True, grouping="05.1",
@@ -1651,9 +1764,34 @@ def runScript():
                          grouping="07.4",
                          description="Plate to attach workflow results to",
                          values=_plates),
-            scripts.Bool("Cleanup?",
+            scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS,
                          optional=True,
                          grouping="08",
+                         description="Attach individual non-image output files (e.g. NumPy arrays, model weights, JSON/YAML configs) as OMERO file annotations. Bilayers workflows with 'array', 'file', or 'executable' output types benefit most from this option. Images and CSVs are handled separately.",
+                         default=False),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET,
+                         optional=True,
+                         grouping="08.1",
+                         description="Attach to the dataset chosen below",
+                         default=True),
+            scripts.List(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID,
+                         optional=True,
+                         grouping="08.2",
+                         description="Dataset to attach non-image file outputs to",
+                         values=_datasets),
+            scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE,
+                         optional=True,
+                         grouping="08.3",
+                         description="Attach to the plate chosen below",
+                         default=False),
+            scripts.List(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID,
+                         optional=True,
+                         grouping="08.4",
+                         description="Plate to attach non-image file outputs to",
+                         values=_plates),
+            scripts.Bool("Cleanup?",
+                         optional=True,
+                         grouping="09",
                          description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
                          default=True),
 
@@ -1864,6 +2002,23 @@ def runScript():
                             message = upload_contents_to_omero(
                                 client, conn, slurmClient, message, folder, metadata_files,
                                 wf_id=wf_id, input_images=input_images)
+
+                            # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
+                            if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS)):
+                                file_output_targets = []
+                                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET)):
+                                    dataset_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET_ID))
+                                    if dataset_ids:
+                                        file_output_targets += [conn.getObject("Dataset", d.split(":")[0]) for d in dataset_ids]
+                                if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE)):
+                                    plate_ids = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE_ID))
+                                    if plate_ids:
+                                        file_output_targets += [conn.getObject("Plate", p.split(":")[0]) for p in plate_ids]
+                                file_output_targets = [t for t in file_output_targets if t is not None]
+                                file_outputs_message = process_non_image_file_outputs(
+                                    conn, folder, file_output_targets, slurm_job_id,
+                                    metadata_files=metadata_files, wf_id=wf_id)
+                                message += file_outputs_message
 
                             # Only cleanup if Cleanup? is True
                             if unwrap(client.getInput("Cleanup?")):

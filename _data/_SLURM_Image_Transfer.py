@@ -76,7 +76,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 # Version constant for easy version management
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 # keep track of log strings.
 log_strings = []
@@ -104,7 +104,7 @@ def compress(target, base):
         target (str): Name of the zip file to write (e.g., "folder.zip").
         base (str): Name of folder to zip up (e.g., "folder").
     """
-    base_name, ext = target.split(".")
+    base_name, ext = target.rsplit(".", 1)
     shutil.make_archive(base_name, ext, base)
 
 

@@ -51,7 +51,7 @@ from biomero import SlurmClient, constants
 import logging
 
 # Version constant for easy version management
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,8 @@ def runScript():
 
         _versions, _datafiles = slurmClient.get_image_versions_and_data_files(
             'cellpose')
-        _workflow_params = slurmClient.get_workflow_parameters('cellpose')
+        _all_wf_params = slurmClient.get_workflow_parameters('cellpose')
+        _workflow_params = {k: v for k, v in _all_wf_params.items() if not v['file_attachment']}
         logger.debug(_workflow_params)
         name_descr = f"Name of folder where images are stored, as provided\
             with {constants.IMAGE_EXPORT_SCRIPT}"
@@ -138,8 +139,8 @@ def runScript():
                                     values=versions)
             input_list.append(wf_v)
             for i, (k, param) in enumerate(wfparams.items()):
-                p = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
+                p = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
                     param["default"],
                     param["name"],
                     description=param["description"],

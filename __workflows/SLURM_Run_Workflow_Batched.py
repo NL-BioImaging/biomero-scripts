@@ -68,10 +68,11 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_DATASET,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
-                  constants.workflow.OUTPUT_CSV_TABLE]
+                  constants.workflow.OUTPUT_CSV_TABLE,
+                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
 
 # Version constant for easy version management
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 
 def runScript():
@@ -207,12 +208,18 @@ def runScript():
                            optional=False,
                            grouping="02.8",
                            description="Any resulting csv files will be added as OMERO.table to parent dataset/plate",
-                           default=True)
+                           default=True),
+            omscripts.Bool(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
+                           optional=True,
+                           grouping="02.85",
+                           description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
+                           default=False)
         ]
         # Generate script parameters for all our workflows
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()
         na = ["Not Available!"]
         _workflow_params = {}
+        _workflow_file_params = {}
         _workflow_available_versions = {}
         # All currently configured workflows
         workflows = wf_versions.keys()
@@ -226,16 +233,17 @@ def runScript():
             _workflow_available_versions[wf] = wf_versions.get(
                 wf, na)
             # Get the workflow parameters (dynamically) from their repository
-            _workflow_params[wf] = slurmClient.get_workflow_parameters(
-                wf)
+            _all_wf_params = slurmClient.get_workflow_parameters(wf)
+            _workflow_params[wf] = {k: v for k, v in _all_wf_params.items() if not v['file_attachment']}
+            _workflow_file_params[wf] = {k: v for k, v in _all_wf_params.items() if v['file_attachment']}
             # Main parameter to select this workflow for execution
-            json_descriptor = slurmClient.pull_descriptor_from_github(wf)
-            wf_descr = json_descriptor['description']
+            descriptor = slurmClient.generic_descriptor_from_github(wf)
+            wf_descr = descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
             value_choices_map = {
                 inp['id']: [rstring(v) for v in inp['value-choices']]
-                for inp in json_descriptor.get('inputs', [])
+                for inp in descriptor.get('inputs', [])
                 if inp.get('value-choices')
             }
             wf_ = omscripts.Bool(wf, grouping=parameter_group, default=False,
@@ -251,9 +259,9 @@ def runScript():
             # Create a script parameter for all workflow parameters
             for param_incr, (k, param) in enumerate(_workflow_params[
                     wf].items()):
-                # Convert the parameter from cy(tomine)type to om(ero)type
-                omtype_param = slurmClient.convert_cytype_to_omtype(
-                    param["cytype"],
+                # Convert the parameter type to om(ero)type
+                omtype_param = slurmClient.convert_param_type_to_omtype(
+                    param["type"],
                     param["default"],
                     param["name"],
                     description=param["description"],
@@ -267,6 +275,22 @@ def runScript():
                 # them to BIOMERO (as the wf will not understand these params)
                 omtype_param._name = f"{wf}_|_{omtype_param._name}"
                 input_list.append(omtype_param)
+            # File-attachment params: exposed as List(Long) of OMERO FileAnnotation IDs
+            # They live under a FILE_ prefix so SLURM_Run_Workflow can tell them apart.
+            num_reg = len(_workflow_params[wf])
+            for fp_incr, (k, fp) in enumerate(_workflow_file_params[wf].items()):
+                fmt_str = ", ".join(fp['format']) if fp['format'] else "any"
+                fp_param = omscripts.List(
+                    f"{wf}_|_FILE_{k}",
+                    optional=True,
+                    grouping=f"{parameter_group}.{num_reg + fp_incr + 1}",
+                    description=(
+                        f"[{fp['type'].capitalize()} attachment] {fp['description']}"
+                        f" Accepted formats: {fmt_str}."
+                        f" Provide one or more OMERO FileAnnotation IDs."
+                    ),
+                ).ofType(rlong(0))
+                input_list.append(fp_param)
         # Finish setting up the Omero script UI
         inputs = {
             p._name: p for p in input_list
