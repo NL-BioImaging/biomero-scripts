@@ -1073,7 +1073,7 @@ def convertDataOnSLURM(client: omscripts.client,
                 job_status_id = unwrap(job_status.getId())
                 logger.debug(f"Conversion script job status ID: {job_status_id}")
                 # Success if job finished (status ID 8)
-                success = job_status_id == 8
+                success = job_status_id in (7, 8)
             except Exception as job_error:
                 logger.warning(f"Could not get job status: {job_error}")
                 success = False
@@ -1213,28 +1213,83 @@ def exportImageToSLURM(client: omscripts.client,
         logger.error(
             f"Database error adding export task to workflow {wf_id}: {db_e}")
         raise
-    rv, job = runOMEROScript(client, svc, script_id, inputs)
-    
-    # Check job status for success/failure
-    job_status_id = None
-    if job:
-        try:
-            job_status = job.getStatus()
-            job_status_id = unwrap(job_status.getId())
-            logger.debug(f"Export script job status ID: {job_status_id}")
-        except Exception as job_error:
-            logger.warning(f"Could not get job status: {job_error}")
-    
-    if 'Message' in rv:
-        msg = unwrap(rv['Message'])
-    else:
-        msg = "Finished export script."
     try:
-        slurmClient.workflowTracker.complete_task(task_id, msg)
-    except Exception as db_e:
-        logger.error(
-            f"Database error completing export task {task_id}: {db_e}")
-        raise
+        rv, job = runOMEROScript(client, svc, script_id, inputs)
+
+        success = False
+        msg = ""
+
+        # Check job status for success/failure.
+        # OMERO uses 8 for finished, 6 for error, 9 for cancelled.
+        job_status_id = None
+        if job:
+            try:
+                job_status = job.getStatus()
+                job_status_id = unwrap(job_status.getId())
+                logger.debug(f"Export script job status ID: {job_status_id}")
+                success = job_status_id in (7, 8)
+            except Exception as job_error:
+                logger.warning(f"Could not get job status: {job_error}")
+                success = False
+
+        if rv and isinstance(rv, dict):
+            if 'Message' in rv:
+                try:
+                    message_content = rv['Message'].getValue()
+                    error_indicators = [
+                        'ERROR:',
+                        'FAILED:',
+                        'Critical error:',
+                        'ZARR export failed',
+                        'Data transfer to SLURM failed',
+                        'Data unpacking on SLURM failed',
+                        'No files exported',
+                    ]
+                    if any(indicator in message_content for indicator in error_indicators):
+                        success = False
+                        msg = f"Export failed - error in message: {message_content}"
+                    else:
+                        msg = message_content
+                except Exception as msg_error:
+                    success = False
+                    msg = f"Failed to extract export message: {msg_error}"
+                    logger.error(msg)
+            else:
+                success = False
+                msg = f"Export script returned no Message output: {rv}"
+        else:
+            success = False
+            msg = f"Export script returned empty/invalid result: {rv}"
+
+        if not success:
+            raise RuntimeError(msg or f"Export script failed with status {job_status_id}")
+
+        # The export sub-script can report success before a later consumer proves
+        # the target folder is actually discoverable on SLURM. Validate that the
+        # expected folder is present now so the workflow fails at the transfer step.
+        _, available_data_files = slurmClient.get_image_versions_and_data_files('cellpose')
+        if zipfile not in available_data_files:
+            error_msg = (
+                f"Exported data folder '{zipfile}' is not available on SLURM after transfer. "
+                f"Export message: {msg}"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        try:
+            slurmClient.workflowTracker.complete_task(task_id, msg)
+        except Exception as db_e:
+            logger.error(
+                f"Database error completing export task {task_id}: {db_e}")
+            raise
+    except Exception as export_error:
+        error_msg = f"Export script execution failed: {export_error}"
+        try:
+            slurmClient.workflowTracker.fail_task(task_id, error_msg)
+        except Exception as db_e:
+            logger.error(
+                f"Database error failing export task {task_id}: {db_e}")
+        raise RuntimeError(error_msg)
     return rv, task_id
 
 

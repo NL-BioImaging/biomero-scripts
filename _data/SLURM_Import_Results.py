@@ -2749,7 +2749,7 @@ def process_importer_workflow(
     task_id: Optional[UUID] = None,
     input_images: Optional[List[Any]] = None,
 
-) -> Tuple[str, Dict[str, str]]:
+) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
 
     This function processes image imports using the biomero-importer while ALL workflow
@@ -2768,7 +2768,7 @@ def process_importer_workflow(
         task_id: Task ID for workflow tracking. Defaults to None.        
 
     Returns:
-        Status message describing processing results.
+        Tuple of status message, rename map, and importer destination object.
     """
     message = ""
     og_name_map: Dict[str, str] = {}
@@ -2783,7 +2783,7 @@ def process_importer_workflow(
         use_screen = False
     elif not use_dataset and not use_screen:
         logger.error("Neither dataset nor screen output selected")
-        return "Error: No valid destination type selected"
+        return "Error: No valid destination type selected", {}, None
     
     destination_type = "Screen" if use_screen else "Dataset"
     logger.info(f"Selected destination type: {destination_type}")
@@ -2822,6 +2822,7 @@ def process_importer_workflow(
     
     logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
     destination_id = None
+    destination_wrapper = None
 
     # If an explicit ID is provided, use it directly — skip name lookup entirely
     if explicit_destination_id:
@@ -2862,6 +2863,8 @@ def process_importer_workflow(
         destination_obj = update_service.saveAndReturnObject(destination_obj)
         destination_id = destination_obj.id.val
         logger.info(f"Created new {destination_type.lower()} ID: {destination_id}")
+
+    destination_wrapper = conn.getObject(destination_type, destination_id)
 
     # Create upload order for images only
     logger.info("Creating upload orders for biomero-importer...")
@@ -2919,7 +2922,7 @@ def process_importer_workflow(
         logger.error(f"Supported extensions: {SUPPORTED_IMAGE_EXTENSIONS}")
         sys.exit(1)  # Exit with failure code - this should trigger workflow failure
 
-    return message, og_name_map
+    return message, og_name_map, destination_wrapper
 
 
 def process_slurm_tables(
@@ -3956,15 +3959,19 @@ def runScript() -> None:
                         _file_output_targets_for_log += [conn.getObject("Plate", p.split(":")[0]) for p in _fot_plate_ids]
                 _file_output_targets_for_log = [t for t in _file_output_targets_for_log if t is not None]
 
+            importer_destination_target = None
             _log_targets = projects if projects else _file_output_targets_for_log
-            logger.info("Uploading logfile to OMERO...")
-            try:
-                message = upload_log_to_omero(
-                    client, conn, message, slurm_job_id,
-                    _log_targets, log_to_upload, wf_id=wf_id)
-            except Exception as _log_upload_err:
-                # Log the failure but don't let it shadow a pending extraction error
-                logger.warning(f"Log upload failed: {_log_upload_err}")
+
+            # If extraction failed we still upload the log immediately using the
+            # best targets we currently have, then re-raise.
+            if extraction_error:
+                logger.info("Uploading logfile to OMERO...")
+                try:
+                    message = upload_log_to_omero(
+                        client, conn, message, slurm_job_id,
+                        _log_targets, log_to_upload, wf_id=wf_id)
+                except Exception as _log_upload_err:
+                    logger.warning(f"Log upload failed: {_log_upload_err}")
 
             # Always propagate extraction failure, even if log upload also failed
             if extraction_error:
@@ -4024,12 +4031,23 @@ def runScript() -> None:
             # IMPORTER WORKFLOW - Dataset and screen image imports
             og_name_map = {}
             if use_importer_for_datasets or use_importer_for_screens:
-                importer_message, og_name_map = process_importer_workflow(
+                importer_message, og_name_map, importer_destination_target = process_importer_workflow(
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
                     permanent_storage_path, wf_id, task_id,
                     input_images=input_images)
                 message += importer_message
+
+            if not _log_targets and importer_destination_target:
+                _log_targets = [importer_destination_target]
+
+            logger.info("Uploading logfile to OMERO...")
+            try:
+                message = upload_log_to_omero(
+                    client, conn, message, slurm_job_id,
+                    _log_targets, log_to_upload, wf_id=wf_id)
+            except Exception as _log_upload_err:
+                logger.warning(f"Log upload failed: {_log_upload_err}")
 
             # Create metadata CSV (after import, to avoid duplicate metadata in import dir)
             logger.info("Creating metadata CSV...")
