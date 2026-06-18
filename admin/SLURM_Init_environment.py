@@ -63,6 +63,22 @@ def runScript():
         scripts.Bool("Init Slurm", grouping="01", default=True),
         scripts.String(extra_config_name, optional=True, grouping="01.1",
                        description="The path to your configuration file on the server. Optional."),
+        scripts.Bool("Reset View Tables", grouping="01.2", default=True,
+                     description="Drop and rebuild analytics view tables from scratch. "
+                                 "Required after BIOMERO upgrades or schema changes. "
+                                 "Only safe to uncheck when solely adding new workflow containers "
+                                 "to an existing installation with no BIOMERO version change."),
+        scripts.Int("Rebuild From Days Ago", optional=True, grouping="01.3",
+                    description="Advanced opt-in: limit analytics view rebuild to the last N days of events. "
+                                "Only use this if your event history is very large and full rebuilds are too slow. "
+                                "Warning: jobs older than this cutoff will not appear in analytics views. "
+                                "Leave empty to use whatever is configured in slurm-config.ini or env vars (or full rebuild if nothing is set)."),
+        scripts.String("Rebuild From Date", optional=True, grouping="01.4",
+                       description="Advanced opt-in: limit analytics view rebuild to events from this date onward (YYYY-MM-DD). "
+                                   "Only use this if your event history is very large and full rebuilds are too slow. "
+                                   "Warning: jobs before this date will not appear in analytics views. "
+                                   "Ignored when 'Rebuild From Days Ago' is also set. "
+                                   "Leave empty to use whatever is configured in slurm-config.ini or env vars (or full rebuild if nothing is set)."),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
         version=VERSION,
         authors=["Torec Luik"],
@@ -92,11 +108,21 @@ def runScript():
         logger.info("Admin access confirmed, proceeding with initialization")
         message = ""
         init_slurm = unwrap(client.getInput("Init Slurm"))
+        reset_view_tables = unwrap(client.getInput("Reset View Tables"))
+        if reset_view_tables is None:
+            reset_view_tables = True  # default: full reset
+        rebuild_days_ago = unwrap(client.getInput("Rebuild From Days Ago"))
+        rebuild_from_date = unwrap(client.getInput("Rebuild From Date"))
         if init_slurm:
             configfile = unwrap(client.getInput(extra_config_name))
             if not configfile:
                 configfile = ''
             with SlurmClient.from_config(configfile=configfile) as slurmClient:
+                # Override analytics rebuild window if provided via UI
+                if rebuild_days_ago is not None:
+                    slurmClient.analytics_rebuild_days_ago = int(rebuild_days_ago)
+                elif rebuild_from_date:
+                    slurmClient.analytics_rebuild_start_time = rebuild_from_date
                 conn.keepAlive()
                 # We are kind of duplicating code here, so we can keep the conn alive.
                 if slurmClient.validate():
@@ -117,7 +143,7 @@ def runScript():
                     conn.keepAlive()
                     
                     # 5. Reset db views
-                    slurmClient.initialize_analytics_system(reset_tables=True)
+                    slurmClient.initialize_analytics_system(reset_tables=reset_view_tables)
                     conn.keepAlive()
                 message = "Slurm is almost set up. " + \
                     "It will now download and build " + \
