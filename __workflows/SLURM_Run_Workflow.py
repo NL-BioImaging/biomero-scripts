@@ -901,8 +901,7 @@ def run_workflow(slurmClient: SlurmClient,
                         )
                         logger.warning(err)
                         slurmClient.workflowTracker.fail_task(ft_task_id, err)
-                        if not fp.get('optional', True):
-                            raise ValueError(err)
+                        raise ValueError(err)
 
                 if collected_paths:
                     # Attachments are routed into param-specific dirs on SLURM
