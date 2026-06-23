@@ -697,6 +697,18 @@ def runScript():
                                         log_msg = f"{rv_imp['Message'].getValue()}"
                                 except KeyError:
                                     log_msg += "Data import status unknown."
+                                # Guard: importResultsToOmero may have
+                                # returned without raising (e.g. due to an
+                                # isinstance type mismatch on the FAILED:
+                                # check).  Catch that here so the workflow
+                                # is never marked DONE when import failed.
+                                if log_msg.startswith("FAILED:"):
+                                    wf_failed = True
+                                    logger.error(
+                                        f"Import returned failure message "
+                                        f"(workflow will be marked failed): "
+                                        f"{log_msg}"
+                                    )
                                 try:
                                     if rv_imp['URL']:
                                         client.setOutput(
@@ -1631,15 +1643,19 @@ def importResultsToOmero(client: omscripts.client,
         # When a sub-script raises an exception, OMERO's runner catches it and
         # still completes the job (status != 6), but the script sets the Message
         # to "FAILED: ...".  Check both the job status flag AND the message prefix.
-        message_failed = isinstance(msg, str) and msg.startswith("FAILED:")
+        # Use str() conversion to guard against unwrap() returning an OMERO
+        # RStringI object instead of a plain Python str (which would make
+        # isinstance(msg, str) silently return False).
+        msg_str = str(msg) if msg is not None else ""
+        message_failed = msg_str.startswith("FAILED:")
         if script_failed or message_failed:
-            logger.error(f"Import script failed (status={job_status_id}, msg_prefix={'FAILED' if message_failed else 'ok'}): {msg}")
-            slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
+            logger.error(f"Import script failed (status={job_status_id}, msg_prefix={'FAILED' if message_failed else 'ok'}): {msg_str}")
+            slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg_str}")
             wf_failed = True
-            raise RuntimeError(f"Import script failed: {msg}")
+            raise RuntimeError(f"Import script failed: {msg_str}")
         else:
-            logger.info(f"Import script succeeded: {msg}")
-            slurmClient.workflowTracker.complete_task(task_id, msg)
+            logger.info(f"Import script succeeded: {msg_str}")
+            slurmClient.workflowTracker.complete_task(task_id, msg_str)
     except KeyError as e:
         error_msg = "No message returned from import script"
         logger.error(error_msg)
