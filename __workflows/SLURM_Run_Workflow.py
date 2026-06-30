@@ -58,7 +58,8 @@ import os
 from uuid import UUID
 import omero
 from omero.grid import JobParams
-from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
+from omero.rtypes import rstring, unwrap, rlong, rbool, rlist, robject, wrap
+from omero.constants.namespaces import NSCREATED
 from omero.sys import Parameters
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
@@ -679,6 +680,10 @@ def runScript():
                             slurmClient.workflowTracker.fail_task(task_id,
                                                                   f"Slurm job state {job_state}")
                             wf_failed = True
+                            # Upload the job log so the user can see why it
+                            # timed out (import step is skipped on failure).
+                            UI_messages += upload_job_log_to_omero(
+                                client, conn, slurmClient, slurm_job_id, wf_id)
                             # slurm_job_id_list.append(new_job_id)
                         elif job_state == "COMPLETED":
                             # 5. Retrieve SLURM images
@@ -739,6 +744,10 @@ def runScript():
                             slurmClient.workflowTracker.fail_task(task_id,
                                                                   f"Slurm job state {job_state}")
                             wf_failed = True
+                            # Upload the job log so the failure is visible in
+                            # OMERO even though the import step is skipped.
+                            UI_messages += upload_job_log_to_omero(
+                                client, conn, slurmClient, slurm_job_id, wf_id)
                         elif (job_state == "PENDING"
                                 or job_state == "RUNNING"):
                             # expected
@@ -754,8 +763,10 @@ def runScript():
                             slurmClient.workflowTracker.fail_task(task_id,
                                                                   f"Slurm job state {job_state}")
                             wf_failed = True
-
-                    # wait for 10 seconds before checking again
+                            # Upload the job log for visibility on unknown
+                            # terminal states too.
+                            UI_messages += upload_job_log_to_omero(
+                                client, conn, slurmClient, slurm_job_id, wf_id)
                     conn.keepAlive()  # keep the connection alive
                     timesleep.sleep(10)
 
@@ -785,6 +796,59 @@ def runScript():
 
         finally:
             client.closeSession()
+
+
+def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
+    """Fetch a workflow job's Slurm log and attach it to OMERO (best-effort).
+
+    Normally the workflow log is uploaded by the result-import step, but that
+    only runs when the job COMPLETED. When a job FAILED / CANCELLED / TIMEOUT
+    the import step is skipped, yet the log is exactly what the user needs to
+    diagnose the failure. This pulls ``omero-<jobid>.log`` from Slurm and
+    attaches it as a file annotation with a download URL.
+
+    Best-effort: never raises, so it cannot mask the original failure.
+
+    Args:
+        client: OMERO script client (for setOutput).
+        conn: OMERO BlitzGateway connection.
+        slurmClient: Active SLURM client.
+        slurm_job_id: The Slurm job ID whose log should be uploaded.
+        wf_id: Workflow UUID for the description.
+
+    Returns:
+        str: A short status string to append to the UI messages.
+    """
+    try:
+        if slurm_job_id is None or int(slurm_job_id) < 0:
+            return ""
+        _, local_path, _ = slurmClient.get_logfile_from_slurm(
+            str(slurm_job_id))
+        mimetype = "text/plain"
+        namespace = NSCREATED + "/SLURM/SLURM_RUN_WORKFLOW"
+        description = f"Log from SLURM job {slurm_job_id}"
+        if wf_id:
+            description += f" (Workflow {wf_id})"
+        annotation = conn.createFileAnnfromLocalFile(
+            local_path, mimetype=mimetype, ns=namespace, desc=description)
+        obj_id = annotation.getFile().getId()
+        try:
+            config = conn.getConfigService()
+            web_host = (config.getConfigValue(
+                "omero.client.web.host") or "").rstrip("/")
+        except Exception:
+            web_host = ""
+        url = f"{web_host}/webclient/get_original_file/{obj_id}/"
+        client.setOutput("Job_Log", robject(annotation._obj))
+        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        logger.info(
+            f"Uploaded log for failed job {slurm_job_id} to OMERO "
+            f"(file {obj_id})")
+        return f" Uploaded log for SLURM job {slurm_job_id}."
+    except Exception as e:
+        logger.warning(
+            f"Failed to upload job log {slurm_job_id} to OMERO: {e}")
+        return f" (failed to upload log for job {slurm_job_id}: {e})"
 
 
 def run_workflow(slurmClient: SlurmClient,
@@ -1453,6 +1517,18 @@ def importResultsToOmero(client: omscripts.client,
             parent_data_type = constants.transfer.DATA_TYPE_DATASET
 
     logger.debug(f"Determined parent to be {parent_data_type}:{parent_id}")
+
+    # Always forward the input's parent container as a guaranteed fallback target
+    # for the job log, independent of the chosen output option. The import scripts
+    # force-link the log here when no richer target resolves, so it is never left
+    # as an unlinked (invisible) annotation. parent_data_type is already the input
+    # container itself for Plate/Screen/Dataset inputs, or the resolved parent for
+    # Image inputs.
+    # parent_id may be a plain int (direct container input) or an RLong returned
+    # by the projection query above; unwrap so the forwarded string is numeric.
+    _fallback_parent_id = unwrap(parent_id)
+    inputs[constants.results.LOG_FALLBACK_TARGET] = rstring(
+        f"{parent_data_type}:{_fallback_parent_id}")
 
     if selected_output[constants.workflow.OUTPUT_PARENT]:
         # For now, there is no attaching to Dataset or Screen...
