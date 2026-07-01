@@ -1112,12 +1112,41 @@ def convertDataOnSLURM(client: omscripts.client,
     if not script_id:
         raise Exception(f"Conversion script not found: {CONVERSION_SCRIPTS}")
 
+    # Compute the parent container for the conversion log — same logic as
+    # importResultsToOmero so the log is always linked to a findable container.
+    first_id = unwrap(client.getInput(constants.transfer.IDS))[0]
+    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
+    parent_id = first_id
+    parent_data_type = data_type
+    if data_type == constants.transfer.DATA_TYPE_IMAGE:
+        q = conn.getQueryService()
+        _img_params = Parameters()
+        _img_params.map = {"image_id": rlong(first_id)}
+        _resultPlates = q.projection(
+            "SELECT DISTINCT p.id FROM Plate p"
+            " JOIN p.wells w JOIN w.wellSamples ws JOIN ws.image i"
+            " WHERE i.id = :image_id",
+            _img_params, conn.SERVICE_OPTS)
+        _resultDatasets = q.projection(
+            "SELECT DISTINCT d.id FROM Dataset d"
+            " JOIN d.imageLinks dil JOIN dil.child i"
+            " WHERE i.id = :image_id",
+            _img_params, conn.SERVICE_OPTS)
+        if len(_resultPlates) > len(_resultDatasets):
+            parent_id = _resultPlates[0][0]
+            parent_data_type = constants.transfer.DATA_TYPE_PLATE
+        elif _resultDatasets:
+            parent_id = _resultDatasets[0][0]
+            parent_data_type = constants.transfer.DATA_TYPE_DATASET
+    _conv_fallback_id = unwrap(parent_id)
     inputs = {
         constants.conversion.INPUT_DATA: rstring(zipfile),
         constants.conversion.SOURCE_FORMAT: rstring(source_format),
         constants.conversion.TARGET_FORMAT: rstring(target_format),
         constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
-        constants.conversion.PARENT_WORKFLOW_ID: rstring(str(wf_id))
+        constants.conversion.PARENT_WORKFLOW_ID: rstring(str(wf_id)),
+        constants.results.LOG_FALLBACK_TARGET: rstring(
+            f"{parent_data_type}:{_conv_fallback_id}"),
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
