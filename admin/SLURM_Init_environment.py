@@ -49,6 +49,10 @@ def runScript():
     """
 
     extra_config_name = "Extra Config file (optional!)"
+    init_slurm_name = "Init Slurm"
+    rebuild_analytics_name = "Rebuild Analytics Views (skip if only adding new workflows!)"
+    rebuild_days_ago_name = "Rebuild From Days Ago"
+    rebuild_from_date_name = "Rebuild From Date"
     client = scripts.client(
         'Slurm Init (Admin Only)',
         '''Will initiate the Slurm environment for workflow execution.
@@ -60,20 +64,20 @@ def runScript():
         /etc/slurm-config.ini
         ~/slurm-config.ini
         ''',
-        scripts.Bool("Init Slurm", grouping="01", default=True),
+        scripts.Bool(init_slurm_name, grouping="01", default=True),
         scripts.String(extra_config_name, optional=True, grouping="01.1",
                        description="The path to your configuration file on the server. Optional."),
-        scripts.Bool("Reset View Tables", grouping="01.2", default=True,
+        scripts.Bool(rebuild_analytics_name, grouping="01.2", default=True,
                      description="Drop and rebuild analytics view tables from scratch. "
                                  "Required after BIOMERO upgrades or schema changes. "
                                  "Only safe to uncheck when solely adding new workflow containers "
                                  "to an existing installation with no BIOMERO version change."),
-        scripts.Int("Rebuild From Days Ago", optional=True, grouping="01.3",
+        scripts.Int(rebuild_days_ago_name, optional=True, grouping="01.3",
                     description="Advanced opt-in: limit analytics view rebuild to the last N days of events. "
                                 "Only use this if your event history is very large and full rebuilds are too slow. "
                                 "Warning: jobs older than this cutoff will not appear in analytics views. "
                                 "Leave empty to use whatever is configured in slurm-config.ini or env vars (or full rebuild if nothing is set)."),
-        scripts.String("Rebuild From Date", optional=True, grouping="01.4",
+        scripts.String(rebuild_from_date_name, optional=True, grouping="01.4",
                        description="Advanced opt-in: limit analytics view rebuild to events from this date onward (YYYY-MM-DD). "
                                    "Only use this if your event history is very large and full rebuilds are too slow. "
                                    "Warning: jobs before this date will not appear in analytics views. "
@@ -107,12 +111,12 @@ def runScript():
         
         logger.info("Admin access confirmed, proceeding with initialization")
         message = ""
-        init_slurm = unwrap(client.getInput("Init Slurm"))
-        reset_view_tables = unwrap(client.getInput("Reset View Tables"))
+        init_slurm = unwrap(client.getInput(init_slurm_name))
+        reset_view_tables = unwrap(client.getInput(rebuild_analytics_name))
         if reset_view_tables is None:
             reset_view_tables = True  # default: full reset
-        rebuild_days_ago = unwrap(client.getInput("Rebuild From Days Ago"))
-        rebuild_from_date = unwrap(client.getInput("Rebuild From Date"))
+        rebuild_days_ago = unwrap(client.getInput(rebuild_days_ago_name))
+        rebuild_from_date = unwrap(client.getInput(rebuild_from_date_name))
         if init_slurm:
             configfile = unwrap(client.getInput(extra_config_name))
             if not configfile:
