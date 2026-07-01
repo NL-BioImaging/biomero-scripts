@@ -301,10 +301,16 @@ def runScript():
                         message += upload_conversion_log_to_omero(
                             client, conn, slurmClient, slurmJob, wf_id,
                             targets=log_targets)
+                        slurmClient.workflowTracker.fail_task(
+                            slurmJob.task_id,
+                            "Conversion job submission failed")
                         # Only fail workflow if running standalone
                         if not is_subtask:
                             slurmClient.workflowTracker.fail_workflow(
                                 wf_id, "Conversion job submission failed")
+                        raise Exception(
+                            f"Conversion job submission failed: "
+                            f"{slurmJob.get_error()}")
                     else:
                         slurmJob.wait_for_completion(slurmClient, conn)
                         # Always pull the conversion log into OMERO BEFORE any
