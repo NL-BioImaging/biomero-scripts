@@ -58,7 +58,8 @@ import os
 from uuid import UUID
 import omero
 from omero.grid import JobParams
-from omero.rtypes import rstring, unwrap, rlong, rbool, rlist
+from omero.rtypes import rstring, unwrap, rlong, rbool, rlist, robject, wrap
+from omero.constants.namespaces import NSCREATED
 from omero.sys import Parameters
 from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
@@ -679,6 +680,10 @@ def runScript():
                             slurmClient.workflowTracker.fail_task(task_id,
                                                                   f"Slurm job state {job_state}")
                             wf_failed = True
+                            # Upload the job log so the user can see why it
+                            # timed out (import step is skipped on failure).
+                            UI_messages += upload_job_log_to_omero(
+                                client, conn, slurmClient, slurm_job_id, wf_id)
                             # slurm_job_id_list.append(new_job_id)
                         elif job_state == "COMPLETED":
                             # 5. Retrieve SLURM images
@@ -697,6 +702,18 @@ def runScript():
                                         log_msg = f"{rv_imp['Message'].getValue()}"
                                 except KeyError:
                                     log_msg += "Data import status unknown."
+                                # Guard: importResultsToOmero may have
+                                # returned without raising (e.g. due to an
+                                # isinstance type mismatch on the FAILED:
+                                # check).  Catch that here so the workflow
+                                # is never marked DONE when import failed.
+                                if log_msg.startswith("FAILED:"):
+                                    wf_failed = True
+                                    logger.error(
+                                        f"Import returned failure message "
+                                        f"(workflow will be marked failed): "
+                                        f"{log_msg}"
+                                    )
                                 try:
                                     if rv_imp['URL']:
                                         client.setOutput(
@@ -727,6 +744,10 @@ def runScript():
                             slurmClient.workflowTracker.fail_task(task_id,
                                                                   f"Slurm job state {job_state}")
                             wf_failed = True
+                            # Upload the job log so the failure is visible in
+                            # OMERO even though the import step is skipped.
+                            UI_messages += upload_job_log_to_omero(
+                                client, conn, slurmClient, slurm_job_id, wf_id)
                         elif (job_state == "PENDING"
                                 or job_state == "RUNNING"):
                             # expected
@@ -742,8 +763,10 @@ def runScript():
                             slurmClient.workflowTracker.fail_task(task_id,
                                                                   f"Slurm job state {job_state}")
                             wf_failed = True
-
-                    # wait for 10 seconds before checking again
+                            # Upload the job log for visibility on unknown
+                            # terminal states too.
+                            UI_messages += upload_job_log_to_omero(
+                                client, conn, slurmClient, slurm_job_id, wf_id)
                     conn.keepAlive()  # keep the connection alive
                     timesleep.sleep(10)
 
@@ -773,6 +796,59 @@ def runScript():
 
         finally:
             client.closeSession()
+
+
+def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
+    """Fetch a workflow job's Slurm log and attach it to OMERO (best-effort).
+
+    Normally the workflow log is uploaded by the result-import step, but that
+    only runs when the job COMPLETED. When a job FAILED / CANCELLED / TIMEOUT
+    the import step is skipped, yet the log is exactly what the user needs to
+    diagnose the failure. This pulls ``omero-<jobid>.log`` from Slurm and
+    attaches it as a file annotation with a download URL.
+
+    Best-effort: never raises, so it cannot mask the original failure.
+
+    Args:
+        client: OMERO script client (for setOutput).
+        conn: OMERO BlitzGateway connection.
+        slurmClient: Active SLURM client.
+        slurm_job_id: The Slurm job ID whose log should be uploaded.
+        wf_id: Workflow UUID for the description.
+
+    Returns:
+        str: A short status string to append to the UI messages.
+    """
+    try:
+        if slurm_job_id is None or int(slurm_job_id) < 0:
+            return ""
+        _, local_path, _ = slurmClient.get_logfile_from_slurm(
+            str(slurm_job_id))
+        mimetype = "text/plain"
+        namespace = NSCREATED + "/SLURM/SLURM_RUN_WORKFLOW"
+        description = f"Log from SLURM job {slurm_job_id}"
+        if wf_id:
+            description += f" (Workflow {wf_id})"
+        annotation = conn.createFileAnnfromLocalFile(
+            local_path, mimetype=mimetype, ns=namespace, desc=description)
+        obj_id = annotation.getFile().getId()
+        try:
+            config = conn.getConfigService()
+            web_host = (config.getConfigValue(
+                "omero.client.web.host") or "").rstrip("/")
+        except Exception:
+            web_host = ""
+        url = f"{web_host}/webclient/get_original_file/{obj_id}/"
+        client.setOutput("Job_Log", robject(annotation._obj))
+        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        logger.info(
+            f"Uploaded log for failed job {slurm_job_id} to OMERO "
+            f"(file {obj_id})")
+        return f" Uploaded log for SLURM job {slurm_job_id}."
+    except Exception as e:
+        logger.warning(
+            f"Failed to upload job log {slurm_job_id} to OMERO: {e}")
+        return f" (failed to upload log for job {slurm_job_id}: {e})"
 
 
 def run_workflow(slurmClient: SlurmClient,
@@ -901,8 +977,7 @@ def run_workflow(slurmClient: SlurmClient,
                         )
                         logger.warning(err)
                         slurmClient.workflowTracker.fail_task(ft_task_id, err)
-                        if not fp.get('optional', True):
-                            raise ValueError(err)
+                        raise ValueError(err)
 
                 if collected_paths:
                     # Attachments are routed into param-specific dirs on SLURM
@@ -1037,12 +1112,41 @@ def convertDataOnSLURM(client: omscripts.client,
     if not script_id:
         raise Exception(f"Conversion script not found: {CONVERSION_SCRIPTS}")
 
+    # Compute the parent container for the conversion log — same logic as
+    # importResultsToOmero so the log is always linked to a findable container.
+    first_id = unwrap(client.getInput(constants.transfer.IDS))[0]
+    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
+    parent_id = first_id
+    parent_data_type = data_type
+    if data_type == constants.transfer.DATA_TYPE_IMAGE:
+        q = conn.getQueryService()
+        _img_params = Parameters()
+        _img_params.map = {"image_id": rlong(first_id)}
+        _resultPlates = q.projection(
+            "SELECT DISTINCT p.id FROM Plate p"
+            " JOIN p.wells w JOIN w.wellSamples ws JOIN ws.image i"
+            " WHERE i.id = :image_id",
+            _img_params, conn.SERVICE_OPTS)
+        _resultDatasets = q.projection(
+            "SELECT DISTINCT d.id FROM Dataset d"
+            " JOIN d.imageLinks dil JOIN dil.child i"
+            " WHERE i.id = :image_id",
+            _img_params, conn.SERVICE_OPTS)
+        if len(_resultPlates) > len(_resultDatasets):
+            parent_id = _resultPlates[0][0]
+            parent_data_type = constants.transfer.DATA_TYPE_PLATE
+        elif _resultDatasets:
+            parent_id = _resultDatasets[0][0]
+            parent_data_type = constants.transfer.DATA_TYPE_DATASET
+    _conv_fallback_id = unwrap(parent_id)
     inputs = {
         constants.conversion.INPUT_DATA: rstring(zipfile),
         constants.conversion.SOURCE_FORMAT: rstring(source_format),
         constants.conversion.TARGET_FORMAT: rstring(target_format),
         constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True),
-        constants.conversion.PARENT_WORKFLOW_ID: rstring(str(wf_id))
+        constants.conversion.PARENT_WORKFLOW_ID: rstring(str(wf_id)),
+        constants.results.LOG_FALLBACK_TARGET: rstring(
+            f"{parent_data_type}:{_conv_fallback_id}"),
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
@@ -1073,7 +1177,7 @@ def convertDataOnSLURM(client: omscripts.client,
                 job_status_id = unwrap(job_status.getId())
                 logger.debug(f"Conversion script job status ID: {job_status_id}")
                 # Success if job finished (status ID 8)
-                success = job_status_id == 8
+                success = job_status_id in (7, 8)
             except Exception as job_error:
                 logger.warning(f"Could not get job status: {job_error}")
                 success = False
@@ -1213,28 +1317,83 @@ def exportImageToSLURM(client: omscripts.client,
         logger.error(
             f"Database error adding export task to workflow {wf_id}: {db_e}")
         raise
-    rv, job = runOMEROScript(client, svc, script_id, inputs)
-    
-    # Check job status for success/failure
-    job_status_id = None
-    if job:
-        try:
-            job_status = job.getStatus()
-            job_status_id = unwrap(job_status.getId())
-            logger.debug(f"Export script job status ID: {job_status_id}")
-        except Exception as job_error:
-            logger.warning(f"Could not get job status: {job_error}")
-    
-    if 'Message' in rv:
-        msg = unwrap(rv['Message'])
-    else:
-        msg = "Finished export script."
     try:
-        slurmClient.workflowTracker.complete_task(task_id, msg)
-    except Exception as db_e:
-        logger.error(
-            f"Database error completing export task {task_id}: {db_e}")
-        raise
+        rv, job = runOMEROScript(client, svc, script_id, inputs)
+
+        success = False
+        msg = ""
+
+        # Check job status for success/failure.
+        # OMERO uses 8 for finished, 6 for error, 9 for cancelled.
+        job_status_id = None
+        if job:
+            try:
+                job_status = job.getStatus()
+                job_status_id = unwrap(job_status.getId())
+                logger.debug(f"Export script job status ID: {job_status_id}")
+                success = job_status_id in (7, 8)
+            except Exception as job_error:
+                logger.warning(f"Could not get job status: {job_error}")
+                success = False
+
+        if rv and isinstance(rv, dict):
+            if 'Message' in rv:
+                try:
+                    message_content = rv['Message'].getValue()
+                    error_indicators = [
+                        'ERROR:',
+                        'FAILED:',
+                        'Critical error:',
+                        'ZARR export failed',
+                        'Data transfer to SLURM failed',
+                        'Data unpacking on SLURM failed',
+                        'No files exported',
+                    ]
+                    if any(indicator in message_content for indicator in error_indicators):
+                        success = False
+                        msg = f"Export failed - error in message: {message_content}"
+                    else:
+                        msg = message_content
+                except Exception as msg_error:
+                    success = False
+                    msg = f"Failed to extract export message: {msg_error}"
+                    logger.error(msg)
+            else:
+                success = False
+                msg = f"Export script returned no Message output: {rv}"
+        else:
+            success = False
+            msg = f"Export script returned empty/invalid result: {rv}"
+
+        if not success:
+            raise RuntimeError(msg or f"Export script failed with status {job_status_id}")
+
+        # The export sub-script can report success before a later consumer proves
+        # the target folder is actually discoverable on SLURM. Validate that the
+        # expected folder is present now so the workflow fails at the transfer step.
+        _, available_data_files = slurmClient.get_image_versions_and_data_files('cellpose')
+        if zipfile not in available_data_files:
+            error_msg = (
+                f"Exported data folder '{zipfile}' is not available on SLURM after transfer. "
+                f"Export message: {msg}"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        try:
+            slurmClient.workflowTracker.complete_task(task_id, msg)
+        except Exception as db_e:
+            logger.error(
+                f"Database error completing export task {task_id}: {db_e}")
+            raise
+    except Exception as export_error:
+        error_msg = f"Export script execution failed: {export_error}"
+        try:
+            slurmClient.workflowTracker.fail_task(task_id, error_msg)
+        except Exception as db_e:
+            logger.error(
+                f"Database error failing export task {task_id}: {db_e}")
+        raise RuntimeError(error_msg)
     return rv, task_id
 
 
@@ -1387,6 +1546,18 @@ def importResultsToOmero(client: omscripts.client,
             parent_data_type = constants.transfer.DATA_TYPE_DATASET
 
     logger.debug(f"Determined parent to be {parent_data_type}:{parent_id}")
+
+    # Always forward the input's parent container as a guaranteed fallback target
+    # for the job log, independent of the chosen output option. The import scripts
+    # force-link the log here when no richer target resolves, so it is never left
+    # as an unlinked (invisible) annotation. parent_data_type is already the input
+    # container itself for Plate/Screen/Dataset inputs, or the resolved parent for
+    # Image inputs.
+    # parent_id may be a plain int (direct container input) or an RLong returned
+    # by the projection query above; unwrap so the forwarded string is numeric.
+    _fallback_parent_id = unwrap(parent_id)
+    inputs[constants.results.LOG_FALLBACK_TARGET] = rstring(
+        f"{parent_data_type}:{_fallback_parent_id}")
 
     if selected_output[constants.workflow.OUTPUT_PARENT]:
         # For now, there is no attaching to Dataset or Screen...
@@ -1577,15 +1748,19 @@ def importResultsToOmero(client: omscripts.client,
         # When a sub-script raises an exception, OMERO's runner catches it and
         # still completes the job (status != 6), but the script sets the Message
         # to "FAILED: ...".  Check both the job status flag AND the message prefix.
-        message_failed = isinstance(msg, str) and msg.startswith("FAILED:")
+        # Use str() conversion to guard against unwrap() returning an OMERO
+        # RStringI object instead of a plain Python str (which would make
+        # isinstance(msg, str) silently return False).
+        msg_str = str(msg) if msg is not None else ""
+        message_failed = msg_str.startswith("FAILED:")
         if script_failed or message_failed:
-            logger.error(f"Import script failed (status={job_status_id}, msg_prefix={'FAILED' if message_failed else 'ok'}): {msg}")
-            slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg}")
+            logger.error(f"Import script failed (status={job_status_id}, msg_prefix={'FAILED' if message_failed else 'ok'}): {msg_str}")
+            slurmClient.workflowTracker.fail_task(task_id, f"Import failed: {msg_str}")
             wf_failed = True
-            raise RuntimeError(f"Import script failed: {msg}")
+            raise RuntimeError(f"Import script failed: {msg_str}")
         else:
-            logger.info(f"Import script succeeded: {msg}")
-            slurmClient.workflowTracker.complete_task(task_id, msg)
+            logger.info(f"Import script succeeded: {msg_str}")
+            slurmClient.workflowTracker.complete_task(task_id, msg_str)
     except KeyError as e:
         error_msg = "No message returned from import script"
         logger.error(error_msg)

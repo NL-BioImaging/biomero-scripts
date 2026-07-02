@@ -37,7 +37,8 @@ import omero
 import omero.gateway
 from omero import scripts
 from omero.gateway import BlitzGateway
-from omero.rtypes import rstring
+from omero.rtypes import rstring, robject, wrap, unwrap
+from omero.constants.namespaces import NSCREATED
 from biomero import SlurmClient, constants
 import logging
 import os
@@ -50,6 +51,121 @@ CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 
 # Version constant for easy version management
 VERSION = "2.7.0"
+
+
+def resolve_log_fallback_target(client, conn):
+    """Resolve a container to link the conversion log to.
+
+    Reads the ``LOG_FALLBACK_TARGET`` parameter (a ``"DataType:id"`` string
+    forwarded by SLURM_Run_Workflow, e.g. ``"Dataset:42"`` or ``"Plate:7``).
+    When run standalone the user can type e.g. ``Dataset:42`` in the UI field.
+
+    Args:
+        client: OMERO script client for parameter access.
+        conn: OMERO BlitzGateway connection.
+
+    Returns:
+        list: A list with one OMERO container object, or empty list if nothing
+            could be resolved.
+    """
+    raw = unwrap(client.getInput(constants.results.LOG_FALLBACK_TARGET))
+    if raw and ":" in str(raw):
+        data_type, _, obj_id = str(raw).partition(":")
+        data_type = data_type.strip()
+        obj_id = obj_id.strip()
+        if data_type and obj_id:
+            try:
+                obj = conn.getObject(data_type, obj_id)
+                if obj is not None:
+                    logger.info(
+                        f"Conversion log fallback target: {data_type}:{obj_id}")
+                    return [obj]
+                logger.warning(
+                    f"Conversion log fallback target {data_type}:{obj_id} "
+                    f"not found in OMERO")
+            except Exception as e:
+                logger.warning(
+                    f"Could not load conversion log fallback target '{raw}': {e}")
+    return []
+
+
+def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
+                                   targets=None):
+    """Fetch the conversion job log from Slurm and attach it to OMERO.
+
+    The conversion runs as a Slurm array job that writes ``omero-<jobid>_*.log``
+    (one per task). We combine those into a single file and attach it to OMERO
+    as a file annotation, exposing a download URL on the script output.
+
+    The annotation is linked to every container in ``targets`` so it is
+    findable via the normal OMERO search / activity panel. When ``targets``
+    is empty the annotation is uploaded but unlinked (orphaned).
+
+    This is best-effort and must NEVER raise: it runs on both the success and
+    the failure path. Especially on failure the conversion log is the only clue
+    we can show the user, so we always try to get it into OMERO before any
+    cleanup removes it from Slurm.
+
+    Args:
+        client: OMERO script client (for setOutput).
+        conn: OMERO BlitzGateway connection.
+        slurmClient: Active SLURM client.
+        slurmJob: The conversion SlurmJob (carries job_id and log_file glob).
+        wf_id: Workflow UUID for the description.
+        targets: Optional list of OMERO container objects to link the log to.
+            Forwarded from :func:`resolve_log_fallback_target`.
+
+    Returns:
+        str: A short status string to append to the script message.
+    """
+    try:
+        job_id = slurmJob.job_id
+        if job_id is None or int(job_id) < 0:
+            # Job never made it onto Slurm; there is no remote log to fetch.
+            logger.warning(
+                "No valid Slurm job id for conversion; skipping log upload")
+            return " (no conversion log: job not submitted)"
+
+        _, local_path, _ = slurmClient.get_conversion_logfile_from_slurm(
+            job_id, logfile=slurmJob.log_file)
+
+        mimetype = "text/plain"
+        namespace = NSCREATED + "/SLURM/SLURM_REMOTE_CONVERSION"
+        description = f"Conversion log from SLURM job {job_id}"
+        if wf_id:
+            description += f" (Workflow {wf_id})"
+
+        annotation = conn.createFileAnnfromLocalFile(
+            local_path, mimetype=mimetype, ns=namespace, desc=description)
+
+        # Link to every resolved container so the log is findable in OMERO.
+        for target in (targets or []):
+            try:
+                target.linkAnnotation(annotation)
+            except Exception as link_e:
+                logger.warning(
+                    f"Could not link conversion log to {target}: {link_e}")
+
+        # Build a download URL so the log is reachable from the activity panel.
+        obj_id = annotation.getFile().getId()
+        try:
+            config = conn.getConfigService()
+            web_host = (config.getConfigValue(
+                "omero.client.web.host") or "").rstrip("/")
+        except Exception:
+            web_host = ""
+        url = f"{web_host}/webclient/get_original_file/{obj_id}/"
+
+        client.setOutput("Conversion_Log", robject(annotation._obj))
+        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        logger.info(
+            f"Uploaded conversion log {local_path} to OMERO (file {obj_id}), "
+            f"linked to {len(targets or [])} container(s)")
+        return f" Uploaded conversion log (SLURM job {job_id})."
+    except Exception as e:
+        # Never let log upload break the conversion result handling.
+        logger.warning(f"Failed to upload conversion log to OMERO: {e}")
+        return f" (failed to upload conversion log: {e})"
 
 
 def runScript():
@@ -115,6 +231,13 @@ def runScript():
             scripts.String(constants.conversion.PARENT_WORKFLOW_ID, grouping="04",
                            description="Internal parameter for parent wf",
                            optional=True),
+            scripts.String(constants.results.LOG_FALLBACK_TARGET, grouping="05",
+                           description="Container to attach the conversion log to: \"DataType:id\" "
+                                       "e.g. \"Dataset:42\" or \"Plate:7\". "
+                                       "Forwarded automatically by Slurm_Run_Workflow. "
+                                       "When running standalone, enter the container where you "
+                                       "want the conversion log to be findable in OMERO.",
+                           optional=True),
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
             version=script_version,
             authors=["Torec Luik"],
@@ -169,15 +292,33 @@ def runScript():
                     slurmJob = slurmClient.run_conversion_workflow_job(
                         zipfile, convert_from, convert_to, wf_id)
                     logger.info(f"Conversion job submitted: {slurmJob}")
+                    log_targets = resolve_log_fallback_target(client, conn)
                     if not slurmJob.ok:
                         logger.error(
                             f"Error converting data: {slurmJob.get_error()}")
+                        # Upload whatever log exists so the user can see why
+                        # submission failed (best-effort, never raises).
+                        message += upload_conversion_log_to_omero(
+                            client, conn, slurmClient, slurmJob, wf_id,
+                            targets=log_targets)
+                        slurmClient.workflowTracker.fail_task(
+                            slurmJob.task_id,
+                            "Conversion job submission failed")
                         # Only fail workflow if running standalone
                         if not is_subtask:
                             slurmClient.workflowTracker.fail_workflow(
                                 wf_id, "Conversion job submission failed")
+                        raise Exception(
+                            f"Conversion job submission failed: "
+                            f"{slurmJob.get_error()}")
                     else:
                         slurmJob.wait_for_completion(slurmClient, conn)
+                        # Always pull the conversion log into OMERO BEFORE any
+                        # cleanup removes it from Slurm - especially important
+                        # when the conversion failed.
+                        message += upload_conversion_log_to_omero(
+                            client, conn, slurmClient, slurmJob, wf_id,
+                            targets=log_targets)
                         if not slurmJob.completed():
                             log_msg = f"Conversion is not completed: " \
                                 f"{slurmJob}"

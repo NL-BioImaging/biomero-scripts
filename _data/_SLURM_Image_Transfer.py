@@ -271,6 +271,33 @@ def save_image_as_zarr(conn, suuid, image, folder_name=None, ome_zarr_version=No
                  ome_zarr_version)
     
 
+def build_zarr_export_error(object, data_type, stderr):
+    """Build a more actionable error message for failed OME-Zarr exports."""
+    stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ''
+    context = [
+        f"OME-Zarr export failed for {data_type} {object.getId()} ('{object.getName()}')."
+    ]
+
+    if ("Error instantiating pixel buffer" in stderr_text and
+            data_type == constants.transfer.DATA_TYPE_IMAGE):
+        context.append(
+            "OMERO could not open the underlying pixel source for this image."
+        )
+        context.append(
+            "A common cause is an in-place imported image whose original file is no longer reachable at its imported path."
+        )
+        context.append(
+            "Check whether the image was imported with --transfer=ln_s or another in-place mode and whether the source file still exists and is readable by OMERO."
+        )
+
+    if stderr_text:
+        context.append(f"stderr: {stderr_text}")
+    else:
+        context.append("stderr: Unknown error")
+
+    return " ".join(context)
+
+
 def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr_version=None):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
@@ -361,7 +388,10 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
                              f"found after ZARR export")
                 raise FileNotFoundError(error_msg)
         else:
-            error_msg = f"ZARR export failed with return code {process.returncode}: {stderr.decode('utf-8') if stderr else 'Unknown error'}"
+            error_msg = (
+                f"ZARR export failed with return code {process.returncode}: "
+                f"{build_zarr_export_error(object, data_type, stderr)}"
+            )
             logger.error(f"Critical error: {error_msg}")
             raise Exception(error_msg)
     return  # shortcut
@@ -710,6 +740,13 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     try:
         r = slurmClient.transfer_data(Path(export_file))
         logger.debug(r)
+        if hasattr(r, 'ok') and not r.ok:
+            error_msg = (
+                f"Copying to SLURM reported failure: "
+                f"{getattr(r, 'stderr', r)}"
+            )
+            logger.error(error_msg)
+            raise Exception(error_msg)
         message += f"'{folder_name}' succesfully copied to SLURM!\n"
         transfer_successful = True
     except Exception as e:

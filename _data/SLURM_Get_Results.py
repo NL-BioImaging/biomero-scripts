@@ -1268,6 +1268,143 @@ def unzip_zip_locally(message, folder):
     return message
 
 
+def resolve_log_fallback_target(
+    client: Any,
+    conn: BlitzGateway,
+    slurmClient: SlurmClient,
+    slurm_job_id: str,
+    wf_id: Optional[str] = None,
+) -> List[Any]:
+    """Resolve a guaranteed container to force-link the job log to.
+
+    The job log must always be linked to at least one container, otherwise the
+    user cannot find it in OMERO (unlinked annotations are effectively invisible).
+    Every workflow has at least an input container (or one derivable from the
+    input objects), so this never needs to return empty in practice.
+
+    Resolution order:
+
+    1. ``LOG_FALLBACK_TARGET`` script parameter — a ``"DataType:id"`` string
+       forwarded by SLURM_Run_Workflow (e.g. ``"Plate:123"``). This is the input's
+       parent container computed up-front for every input data type, so it already
+       handles Plate/Screen/Dataset inputs natively.
+    2. Derive from the workflow input objects when the parameter is absent
+       (standalone manual runs). The task's ``input_data['IDs']`` are tried as
+       Image (→ navigate to parent Dataset/Plate), then Plate, then Dataset, then
+       Screen — returning the first linkable container found.
+
+    Args:
+        client: OMERO script client for parameter access.
+        conn: OMERO BlitzGateway connection.
+        slurmClient: Active BIOMERO SlurmClient.
+        slurm_job_id: SLURM job ID (used to resolve the task when needed).
+        wf_id: Workflow UUID, used to walk tasks for input IDs. Defaults to None.
+
+    Returns:
+        A list with a single linkable OMERO container object, or an empty list
+        if nothing could be resolved (should not happen for real workflows).
+    """
+    # 1. Explicit forwarded target wins.
+    raw = unwrap(client.getInput(constants.results.LOG_FALLBACK_TARGET))
+    if raw and ":" in str(raw):
+        data_type, _, obj_id = str(raw).partition(":")
+        data_type = data_type.strip()
+        obj_id = obj_id.strip()
+        if data_type and obj_id:
+            try:
+                obj = conn.getObject(data_type, obj_id)
+                if obj is not None:
+                    logger.info(
+                        f"Log fallback target from parameter: {data_type}:{obj_id}")
+                    return [obj]
+                logger.warning(
+                    f"Log fallback target {data_type}:{obj_id} not found in OMERO")
+            except Exception as e:
+                logger.warning(
+                    f"Could not load log fallback target '{raw}': {e}")
+
+    # 2. Derive from the workflow input objects.
+    image_ids: List[int] = []
+    try:
+        _lookup_task_id = None
+        if slurmClient.track_workflows and slurm_job_id:
+            try:
+                _lookup_task_id = slurmClient.jobAccounting.get_task_id(slurm_job_id)
+            except Exception as _te:
+                logger.debug(f"Could not resolve task ID for log fallback: {_te}")
+        if slurmClient.track_workflows and _lookup_task_id:
+            _task = slurmClient.workflowTracker.repository.get(_lookup_task_id)
+            _input_data = _task.input_data if _task else None
+            if isinstance(_input_data, dict):
+                image_ids = _input_data.get('IDs', []) or []
+            elif isinstance(_input_data, list):
+                image_ids = _input_data
+        if not image_ids and wf_id and slurmClient.track_workflows:
+            _wf = slurmClient.workflowTracker.repository.get(wf_id)
+            for _tid in _wf.tasks:
+                _t = slurmClient.workflowTracker.repository.get(_tid)
+                _td = _t.input_data if _t else None
+                if isinstance(_td, dict) and _td.get('IDs'):
+                    image_ids = _td['IDs']
+                    break
+                if isinstance(_td, list) and all(isinstance(x, int) for x in _td) and _td:
+                    image_ids = _td
+                    break
+    except Exception as e:
+        logger.debug(f"Could not resolve input IDs for log fallback: {e}")
+
+    if not image_ids:
+        logger.warning("No input IDs available to derive a log fallback target")
+        return []
+
+    # Input IDs may be Images, or already-container types (Plate workflows).
+    # Try each type in turn and navigate to the first linkable container.
+    for cand_type in ("Image", "Plate", "Dataset", "Screen"):
+        try:
+            objs = [o for o in conn.getObjects(
+                cand_type, ids=[int(i) for i in image_ids]) if o]
+        except Exception:
+            objs = []
+        if not objs:
+            continue
+
+        if cand_type == "Image":
+            # Navigate Image -> parent Dataset or Plate.
+            for img in objs:
+                parent = None
+                try:
+                    parent = img.getParent()  # Dataset, or WellSample->...->Plate
+                except Exception:
+                    parent = None
+                # For plate-bound images getParent() may not yield the Plate;
+                # walk ancestry to find a linkable container.
+                if parent is None:
+                    try:
+                        for anc in img.getAncestry():
+                            if anc.canLink():
+                                parent = anc
+                                break
+                    except Exception:
+                        parent = None
+                if parent is not None and parent.canLink():
+                    logger.info(
+                        f"Derived log fallback target from input image: "
+                        f"{parent.OMERO_CLASS}:{parent.getId()}")
+                    return [parent]
+            continue
+
+        # Plate / Dataset / Screen inputs are containers themselves.
+        for obj in objs:
+            if obj.canLink():
+                logger.info(
+                    f"Derived log fallback target from input: "
+                    f"{cand_type}:{obj.getId()}")
+                return [obj]
+
+    logger.warning("Could not derive any linkable log fallback target from inputs")
+    return []
+
+
 def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_id=None):
     """ Upload a (log/text)file to omero 
 
@@ -1679,6 +1816,9 @@ def runScript():
             scripts.String("Task_ID",
                            optional=True, grouping="01.3",
                            description="Task ID for biomero workflow tracking and status updates"),
+            scripts.String(constants.results.LOG_FALLBACK_TARGET,
+                           optional=True, grouping="01.4",
+                           description="Guaranteed container (\"DataType:id\", e.g. \"Plate:123\") to force-link the job log to when no other attachment target is selected, so the log is always findable in OMERO. Auto-derived from the workflow input if not provided."),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="03",
@@ -1883,10 +2023,17 @@ def runScript():
                     logger.info(message)
                     logger.debug(get_result.__dict__)
 
+                    # Force-link the log to a findable container. Use the chosen
+                    # attachment targets when present, else fall back to the
+                    # guaranteed input container (NOT used for the bulk zip, which
+                    # must only go where the user asked).
+                    _log_targets = projects if projects else resolve_log_fallback_target(
+                        client, conn, slurmClient, slurm_job_id, wf_id)
+
                     # Upload logfile to Omero as Original File
                     message = upload_log_to_omero(
                         client, conn, message,
-                        slurm_job_id, projects, log_file, wf_id=wf_id)
+                        slurm_job_id, _log_targets, log_file, wf_id=wf_id)
 
                     # Read file for data location
                     data_location = slurmClient.extract_data_location_from_log(

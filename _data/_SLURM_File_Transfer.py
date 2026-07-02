@@ -105,6 +105,10 @@ def transfer_file_to_slurm(
     # ------------------------------------------------------------------
     # 1. Fetch the FileAnnotation and its underlying OriginalFile
     # ------------------------------------------------------------------
+    # Use cross-group lookup (-1) so annotations owned by the user but
+    # living in a different group than the current session context are
+    # still accessible (e.g. attachment on a project in another group).
+    conn.SERVICE_OPTS.setOmeroGroup(-1)
     ann = conn.getObject("FileAnnotation", annotation_id)
     if ann is None:
         raise ValueError(
@@ -302,6 +306,7 @@ Connection ready? {slurmClient.validate()}""",
         except Exception as exc:
             logger.exception("File transfer failed")
             client.setOutput("Message", rstring(f"ERROR: {exc}"))
+            raise
 
         finally:
             client.closeSession()
