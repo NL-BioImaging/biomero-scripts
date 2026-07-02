@@ -95,7 +95,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 
 def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway, client: omscripts.client) -> None:

@@ -72,7 +72,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
 
 # Version constant for easy version management
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 
 def runScript():
