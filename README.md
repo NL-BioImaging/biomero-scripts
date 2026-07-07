@@ -53,6 +53,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 
 ### Data Management Scripts (`_data/`)
 - **`_SLURM_Image_Transfer.py`**: Export data from OMERO to SLURM (with cleanup)
+- **`_SLURM_File_Transfer.py`**: Transfer a single OMERO FileAnnotation to a SLURM job's input directory (e.g. model weights, CSV config). Returns the resolved SLURM path for injection as a workflow CLI argument.
 - **`SLURM_Remote_Conversion.py`**: Intelligent format conversion on SLURM
 - **`SLURM_Get_Results.py`**: Upload workflow results back to OMERO (standard mode)
 - **`SLURM_Import_Results.py`**: Import workflow results with full [BIOMERO.importer](https://github.com/NL-BioImaging/BIOMERO.importer) integration — selected automatically when `IMPORTER_ENABLED=true`
@@ -62,6 +63,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 - **`SLURM_Init_environment.py`**: Initialize SLURM environment
 - **`SLURM_check_setup.py`**: Validate BIOMERO configuration
 - **`Tail_logs.py`**: View recent BIOMERO log entries (admin only)
+- **`Example_Minimal_Slurm_Script.py`**: ⚠️ **Admin/example only** — runs ad-hoc SSH commands on the Slurm cluster from OMERO.web. Requires OMERO admin privileges. Note that a compromised admin account can already upload arbitrary scripts and reach the cluster that way, so this adds convenience rather than a new attack surface — but it's still not needed in production. See the note below.
 
 ### Workflow Process
 1. **Export**: Selected data transferred from OMERO to SLURM cluster
@@ -156,8 +158,14 @@ For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/b
 
 Other example OMERO scripts are:
 - [`_data/SLURM Get Update`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Update.py): to run while you are waiting on a job to finish on Slurm; it will try to get a `%` progress from your job's logfile. Depends on your job/workflow logging a `%` of course.
+- [`_data/SLURM File Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_File_Transfer.py): transfers a single OMERO FileAnnotation (e.g. model weights, a CSV) to the SLURM job's input directory. The returned SLURM path is injected as the CLI argument for the corresponding workflow parameter by `SLURM_Run_Workflow.py`.
+- [`admin/Example Minimal Slurm Script`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/Example_Minimal_Slurm_Script.py): ⚠️ **Admin only** — runs ad-hoc SSH commands on the Slurm cluster directly from OMERO. Useful for cluster diagnostics (`squeue`, `sinfo`, `ls`) and as a reference skeleton for building new admin scripts. Dangerous commands are blocked by pattern matching.
 
-> **Note**: The NL-BIOMERO deployment removes example-only scripts by default (`SLURM_CellPose_Segmentation.py`). These are kept in the repository as reference implementations showing how to build a single-workflow script, but you should use `SLURM_Run_Workflow.py` for production use.
+> **Note:** Restricted to OMERO admins, who can already upload arbitrary scripts
+> anyway — so this doesn't add a new attack surface. It's just not needed in most
+> production deployments, which is why the NL-BIOMERO Dockerfile removes it during
+> the image build (see the `admin/` section above). Install it manually when you need
+> it for diagnostics and remove it when you're done.
 
 - [`__workflows/SLURM Run Workflow Batched`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow_Batched.py): This will allow you to run several `__workflows/SLURM Run Workflow` in parallel, by batching your input images into smaller chunks (e.g. turn 64 images into 2 batches of 32 images each). It will then poll all these jobs.
 
