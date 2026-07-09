@@ -1202,16 +1202,19 @@ def convertDataOnSLURM(client: omscripts.client,
                     msg = f"Failed to extract message from result: {msg_e}"
                     logger.error(f"Error extracting message: {msg_e}")
             else:
-                # No Message key - check for other error indicators
-                result_str = str(rv)
-                if any(key in result_str.lower() for key in ['error', 'exception', 'failed']):
-                    success = False
-                    msg = f"Conversion failed - errors in result: {rv}"
-                    logger.error(f"Error indicators found in result: {rv}")
-                else:
-                    success = True
-                    msg = f"Conversion completed (no message): {rv}"
-                    logger.info(f"Conversion assumed successful: {rv}")
+                # No Message key — the sub-script raised an unhandled exception.
+                # OMERO returns {'stdout': RObject, 'stderr': RObject} in that
+                # case; there is never a legitimate success without a Message.
+                success = False
+                stdout_id = unwrap(rv.get('stdout')) if rv else None
+                stderr_id = unwrap(rv.get('stderr')) if rv else None
+                msg = (
+                    f"Conversion script raised an unhandled exception "
+                    f"(no 'Message' in result). "
+                    f"Check OMERO script stdout file {stdout_id} / "
+                    f"stderr file {stderr_id} for the root cause."
+                )
+                logger.error(msg)
         else:
             # Empty or None result typically indicates failure
             success = False
