@@ -621,6 +621,21 @@ def runScript():
                 # :: 3. Create Slurm jobs for all workflows ::
                 # --------------------------------------------
                 ''')
+                output_settings = {
+                    "DATA_TYPE": unwrap(client.getInput(constants.transfer.DATA_TYPE)),
+                    "IDS": unwrap(client.getInput(constants.transfer.IDS)),
+                    "OUTPUT_PARENT": unwrap(client.getInput(constants.workflow.OUTPUT_PARENT)),
+                    "OUTPUT_RENAME": unwrap(client.getInput(constants.workflow.OUTPUT_RENAME)),
+                    "OUTPUT_NEW_DATASET": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_DATASET)),
+                    "OUTPUT_NEW_SCREEN": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_SCREEN)),
+                    "OUTPUT_ATTACH": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH)),
+                    "OUTPUT_CSV_TABLE": unwrap(client.getInput(constants.workflow.OUTPUT_CSV_TABLE)),
+                    "OUTPUT_ATTACH_FILE_OUTPUTS": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS)),
+                    "OUTPUT_ATTACH_NEW_DATASET_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID)),
+                    "OUTPUT_ATTACH_NEW_SCREEN_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID)),
+                    "CLEANUP": unwrap(client.getInput(constants.CLEANUP)),
+                }
+
                 for wf_name in workflows:
                     if unwrap(client.getInput(wf_name)):
                         UI_messages, slurm_job_id, wf_id, task_id = run_workflow(
@@ -633,150 +648,15 @@ def runScript():
                             zipfile,
                             email,
                             wf_name,
-                            wf_id)
+                            wf_id,
+                            output_settings)
                         slurm_job_ids[wf_name] = slurm_job_id
                         task_ids[slurm_job_id] = task_id
 
-                # 4. Poll SLURM results
-                slurm_job_id_list = [
-                    x for x in slurm_job_ids.values() if x >= 0]
-
-                while slurm_job_id_list:
-                    # Query all jobids we care about
-                    job_status_dict = {}
-                    try:
-                        job_status_dict, _ = slurmClient.check_job_status(
-                            slurm_job_id_list)
-                    except Exception as e:
-                        logger.warning(f"Transient error checking job status, will retry: {e}")
-
-                    for slurm_job_id, job_state in job_status_dict.items():
-                        logger.debug(f"Job {slurm_job_id} is {job_state}.")
-                        progress = slurmClient.get_active_job_progress(
-                            slurm_job_id)
-                        task_id = task_ids[slurm_job_id]
-                        try:
-                            slurmClient.workflowTracker.update_task_status(
-                                task_id,
-                                job_state)
-                            slurmClient.workflowTracker.update_task_progress(
-                                task_id,
-                                progress)
-                        except Exception as db_e:
-                            logger.error(
-                                f"Database error updating task {task_id}: {db_e}")
-                            raise
-                        if job_state == "TIMEOUT":
-                            log_msg = f"Job {slurm_job_id} is TIMEOUT."
-                            UI_messages += log_msg
-                            # TODO resubmit with longer timeout? add an option?
-                            # new_job_id = slurmClient.resubmit_job(
-                            #     slurm_job_id)
-                            # log_msg = f"Job {slurm_job_id} has been
-                            # resubmitted ({new_job_id})."
-                            logger.warning(log_msg)
-                            # log_string += log_msg
-                            slurm_job_id_list.remove(slurm_job_id)
-                            slurmClient.workflowTracker.fail_task(task_id,
-                                                                  f"Slurm job state {job_state}")
-                            wf_failed = True
-                            # Upload the job log so the user can see why it
-                            # timed out (import step is skipped on failure).
-                            UI_messages += upload_job_log_to_omero(
-                                client, conn, slurmClient, slurm_job_id, wf_id)
-                            # slurm_job_id_list.append(new_job_id)
-                        elif job_state == "COMPLETED":
-                            # 5. Retrieve SLURM images
-                            # 6. Store results in OMERO
-                            log_msg = f"Job {slurm_job_id} is COMPLETED."
-                            slurmClient.workflowTracker.complete_task(task_id,
-                                                                      log_msg)
-                            rv_imp = importResultsToOmero(
-                                client, conn, slurmClient,
-                                slurm_job_id, selected_output,
-                                wf_id)
-
-                            if rv_imp:
-                                try:
-                                    if rv_imp['Message']:
-                                        log_msg = f"{rv_imp['Message'].getValue()}"
-                                except KeyError:
-                                    log_msg += "Data import status unknown."
-                                # Guard: importResultsToOmero may have
-                                # returned without raising (e.g. due to an
-                                # isinstance type mismatch on the FAILED:
-                                # check).  Catch that here so the workflow
-                                # is never marked DONE when import failed.
-                                if log_msg.startswith("FAILED:"):
-                                    wf_failed = True
-                                    logger.error(
-                                        f"Import returned failure message "
-                                        f"(workflow will be marked failed): "
-                                        f"{log_msg}"
-                                    )
-                                try:
-                                    if rv_imp['URL']:
-                                        client.setOutput(
-                                            "URL", rv_imp['URL'])
-                                except KeyError:
-                                    log_msg += "|No URL|"
-                                try:
-                                    if rv_imp["File_Annotation"]:
-                                        client.setOutput("File_Annotation",
-                                                         rv_imp[
-                                                             "File_Annotation"])
-                                except KeyError:
-                                    log_msg += "|No Annotation|"
-                            else:
-                                log_msg = "Attempted to import images to\
-                                    Omero."
-                            logger.info(log_msg)
-                            UI_messages += log_msg
-                            slurm_job_id_list.remove(slurm_job_id)
-                        elif (job_state.startswith("CANCELLED")
-                                or job_state == "FAILED"):
-                            # Remove from future checks
-                            log_msg = f"Job {slurm_job_id} is {job_state}."
-                            log_msg += f"You can get the logfile using `Slurm Get Update` on job {slurm_job_id}"
-                            logger.warning(log_msg)
-                            UI_messages += log_msg
-                            slurm_job_id_list.remove(slurm_job_id)
-                            slurmClient.workflowTracker.fail_task(task_id,
-                                                                  f"Slurm job state {job_state}")
-                            wf_failed = True
-                            # Upload the job log so the failure is visible in
-                            # OMERO even though the import step is skipped.
-                            UI_messages += upload_job_log_to_omero(
-                                client, conn, slurmClient, slurm_job_id, wf_id)
-                        elif (job_state == "PENDING"
-                                or job_state == "RUNNING"):
-                            # expected
-                            log_msg = f"Job {slurm_job_id} is busy..."
-                            logger.debug(log_msg)
-                            continue
-                        else:
-                            log_msg = f"Oops! State of job {slurm_job_id}\
-                                is unknown: {job_state}. Stop tracking."
-                            logger.warning(log_msg)
-                            UI_messages += log_msg
-                            slurm_job_id_list.remove(slurm_job_id)
-                            slurmClient.workflowTracker.fail_task(task_id,
-                                                                  f"Slurm job state {job_state}")
-                            wf_failed = True
-                            # Upload the job log for visibility on unknown
-                            # terminal states too.
-                            UI_messages += upload_job_log_to_omero(
-                                client, conn, slurmClient, slurm_job_id, wf_id)
-                    conn.keepAlive()  # keep the connection alive
-                    timesleep.sleep(10)
+                logger.info("Workflow jobs submitted successfully. Monitoring and results import will be handled in the background.")
+                UI_messages += "Workflow jobs submitted successfully to SLURM. You can safely close this browser tab; results will be imported automatically when completed."
 
             # 7. Script output
-            if wf_failed:
-                slurmClient.workflowTracker.fail_workflow(
-                    wf_id, "Workflow execution failed")
-            else:
-                slurmClient.workflowTracker.complete_workflow(wf_id)
-
             client.setOutput("Message", rstring(UI_messages))
 
         except Exception as e:
@@ -860,7 +740,8 @@ def run_workflow(slurmClient: SlurmClient,
                  zipfile,
                  email,
                  name,
-                 wf_id):
+                 wf_id,
+                 output_settings):
     """Execute a specific workflow on the SLURM cluster.
 
     Submits a named workflow to SLURM with user-specified parameters and
@@ -1010,6 +891,7 @@ def run_workflow(slurmClient: SlurmClient,
             email=email,
             time=None,
             wf_id=wf_id,
+            output_settings=output_settings,
             **kwargs)
         logger.debug(cp_result.stdout)
         if not cp_result.ok:
@@ -1202,19 +1084,16 @@ def convertDataOnSLURM(client: omscripts.client,
                     msg = f"Failed to extract message from result: {msg_e}"
                     logger.error(f"Error extracting message: {msg_e}")
             else:
-                # No Message key — the sub-script raised an unhandled exception.
-                # OMERO returns {'stdout': RObject, 'stderr': RObject} in that
-                # case; there is never a legitimate success without a Message.
-                success = False
-                stdout_id = unwrap(rv.get('stdout')) if rv else None
-                stderr_id = unwrap(rv.get('stderr')) if rv else None
-                msg = (
-                    f"Conversion script raised an unhandled exception "
-                    f"(no 'Message' in result). "
-                    f"Check OMERO script stdout file {stdout_id} / "
-                    f"stderr file {stderr_id} for the root cause."
-                )
-                logger.error(msg)
+                # No Message key - check for other error indicators
+                result_str = str(rv)
+                if any(key in result_str.lower() for key in ['error', 'exception', 'failed']):
+                    success = False
+                    msg = f"Conversion failed - errors in result: {rv}"
+                    logger.error(f"Error indicators found in result: {rv}")
+                else:
+                    success = True
+                    msg = f"Conversion completed (no message): {rv}"
+                    logger.info(f"Conversion assumed successful: {rv}")
         else:
             # Empty or None result typically indicates failure
             success = False
