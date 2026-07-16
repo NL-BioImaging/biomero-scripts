@@ -380,62 +380,32 @@ def runScript():
                 user,
                 group
             )
-            logger.info('''
-            # --------------------------------------------
-            # :: 1. Split data into batches ::
-            # --------------------------------------------
-            ''')
-            batch_size = unwrap(client.getInput(
-                constants.workflow_batched.BATCH_SIZE))
+
+            batch_size = unwrap(client.getInput(constants.workflow_batched.BATCH_SIZE))
             data_ids = unwrap(client.getInput(constants.transfer.IDS))
             data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
             script_params = client.getInputs(unwrap=True)
             inputs = client.getInputs()
+
+            # Resolve input image/plate IDs
             if data_type == constants.transfer.DATA_TYPE_IMAGE:
                 image_ids = data_ids
             elif data_type == constants.transfer.DATA_TYPE_DATASET:
-                objects, log_message = script_utils.get_objects(conn,
-                                                                script_params)
-                UI_messages['Message'].extend(
-                    [log_message])
+                objects, log_message = script_utils.get_objects(conn, script_params)
                 images = []
                 for ds in objects:
                     images.extend(list(ds.listChildren()))
                 if not images:
-                    error = f"No image found in dataset(s) {data_ids} / {objects}"
-                    UI_messages['Message'].extend(
-                        [error])
-                    raise ValueError(error)
-                else:
-                    image_ids = [img.id for img in images]
-                    inputs[constants.transfer.DATA_TYPE] = rstring(
-                        constants.transfer.DATA_TYPE_IMAGE)
+                    raise ValueError(f"No image found in dataset(s) {data_ids}")
+                image_ids = [img.id for img in images]
             elif data_type == constants.transfer.DATA_TYPE_PLATE:
-                objects, log_message = script_utils.get_objects(conn,
-                                                                script_params)
-                UI_messages['Message'].extend(
-                    [log_message])
-                # Zarr plate-to-plate workflows output to a screen.
-                # In that case, keep Data_Type=Plate and batch by plate ID.
-                # Old-school plate workflows (no screen output) expand wells
-                # into individual images and output to a dataset.
-                output_screen = unwrap(client.getInput(
-                    constants.workflow.OUTPUT_NEW_SCREEN))
-                screen_id_override = unwrap(client.getInput(
-                    constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
-                use_screen_output = (
-                    output_screen and output_screen != constants.workflow.NO
-                ) or screen_id_override
+                objects, log_message = script_utils.get_objects(conn, script_params)
+                output_screen = unwrap(client.getInput(constants.workflow.OUTPUT_NEW_SCREEN))
+                screen_id_override = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
+                use_screen_output = (output_screen and output_screen != constants.workflow.NO) or screen_id_override
                 if use_screen_output:
-                    # Plate-to-plate: batch by plate, preserve Data_Type=Plate
-                    if not objects:
-                        error = f"No plates found for IDs {data_ids}"
-                        UI_messages['Message'].extend([error])
-                        raise ValueError(error)
                     image_ids = [plate.id for plate in objects]
-                    # DATA_TYPE stays Plate — sub-jobs receive Data_Type=Plate
                 else:
-                    # Old-school: expand wells → images, output to dataset
                     images = []
                     wells = []
                     for plate in objects:
@@ -446,202 +416,62 @@ def runScript():
                             image = well.getImage(index)
                             images.append(image)
                     if not images:
-                        error = f"No image found in plate(s) {data_ids} / {objects}"
-                        UI_messages['Message'].extend([error])
-                        raise ValueError(error)
+                        raise ValueError(f"No image found in plate(s) {data_ids}")
                     image_ids = [img.id for img in images]
-                    inputs[constants.transfer.DATA_TYPE] = rstring(
-                        constants.transfer.DATA_TYPE_IMAGE)
             else:
-                raise ValueError(f"Not recognized input data: {data_type}. \
-                    Expected one of {DATATYPES}")
-            # inputs[DATA_TYPE] may have been updated (e.g. plate → image for old-school wells mode)
-            effective_type = unwrap(inputs[constants.transfer.DATA_TYPE]) \
-                if constants.transfer.DATA_TYPE in inputs else data_type
-            batch_ids = chunk(image_ids, batch_size)
-            batch_ids_list = list(batch_ids)  # Convert generator to list
-            logger.info(
-                f"Created {len(batch_ids_list)} batches from {len(image_ids)} {data_type}s (batch size: {batch_size})")
+                raise ValueError(f"Not recognized input data: {data_type}")
 
-            # For batching, force duplicate=False so all batches share one dataset/screen.
-            # Explicit Dataset_ID / Screen_ID overrides are kept as-is (already in inputs).
-            inputs[constants.workflow.OUTPUT_DUPLICATES] = omscripts.rbool(
-                False)
-            processes = {}
-            remaining_batches = {i: b for i, b in enumerate(batch_ids_list)}
-            logger.info("#--------------------------------------------#")
-            logger.info(f"Batch Size: {batch_size}")
-            logger.info(f"Total items: {len(image_ids)}")
-            formatted_batches = pprint.pformat(remaining_batches,
-                                               depth=2,
-                                               compact=True)
-            logger.info(f"Batches: {formatted_batches}")
-            logger.info("#--------------------------------------------#")
+            # Gather all inputs and parameters to store in the launcher task
+            launcher_params = {}
+            for k in inputs:
+                launcher_params[k] = unwrap(client.getInput(k))
 
-            logger.info('''
-            # --------------------------------------------
-            # :: 2. Run workflow(s) per batch ::
-            # --------------------------------------------
-            ''')
-            task_ids = {}
-            logger.info(
-                f"Submitting {len(remaining_batches)} batch jobs at {datetime.datetime.now()}")
-            for i, batch in remaining_batches.items():
-                inputs[constants.transfer.IDS] = rlist([rlong(x)
-                                                        # override ids
-                                                        for x in batch])
+            selected_wfs = [wf_name for wf_name in workflows if unwrap(client.getInput(wf_name))]
+            launcher_params["workflows"] = selected_wfs
+            launcher_params["batch_size"] = batch_size
+            launcher_params["IDS"] = image_ids
 
-                persist_dict = {key: unwrap(value)
-                                for key, value in inputs.items()}
-                # persist_dict[constants.transfer.IDS] = [unwrap(value) for value in persist_dict[constants.transfer.IDS]]
-                script_id = int(script_id)
-                # The last parameter is how long to wait as an RInt
-                proc = svc.runScript(script_id, inputs, None)
-                processes[i] = proc
-                omero_job_id = proc.getJob()._id
-                logger.debug(f"Batch {i+1}: Started OMERO job {omero_job_id}")
-                # TODO: don't do this, use a different domain (driven design)
-                # Now, views will listen to events and not know what they get
-                task_id = slurmClient.workflowTracker.add_task_to_workflow(
-                    wf_id,
-                    PROC_SCRIPTS[0],
-                    params.version,
-                    persist_dict[constants.transfer.IDS],
-                    persist_dict
-                )
-                task_ids[i] = task_id
-                slurmClient.workflowTracker.start_task(task_id)
-                # slurmClient.workflowTracker.add_job_id(task_id, unwrap(omero_job_id))
+            for wf_name in selected_wfs:
+                launcher_params[f"wf_params_{wf_name}"] = _workflow_params[wf_name]
+                launcher_params[f"wf_file_params_{wf_name}"] = _workflow_file_params[wf_name]
 
-            logger.info('''
-            # --------------------------------------------
-            # :: 3. Track all the batch jobs ::
-            # --------------------------------------------
-            ''')
-            finished = []
-            # Check if any tasks failed by tracking failure status
-            wf_failed = False
-            try:
-                # 4. Poll results
-                current_batch_being_processed = None
-                while remaining_batches:
-                    # loop the remaining processes
-                    for i, batch in remaining_batches.items():
-                        current_batch_being_processed = i
-                        task_id = task_ids[i]
-                        process = processes[i]
-                        try:
-                            return_code = process.poll()
-                            logger.debug(
-                                f"Process {process} polled: {return_code}")
-                        except Exception as poll_e:
-                            logger.error(
-                                f"Error polling process for batch {i}: {poll_e}")
-                            raise
+            output_settings = {
+                "DATA_TYPE": unwrap(client.getInput(constants.transfer.DATA_TYPE)),
+                "IDS": image_ids,
+                "OUTPUT_PARENT": unwrap(client.getInput(constants.workflow.OUTPUT_PARENT)),
+                "OUTPUT_RENAME": unwrap(client.getInput(constants.workflow.OUTPUT_RENAME)),
+                "OUTPUT_NEW_DATASET": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_DATASET)),
+                "OUTPUT_NEW_SCREEN": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_SCREEN)),
+                "OUTPUT_ATTACH": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH)),
+                "OUTPUT_CSV_TABLE": unwrap(client.getInput(constants.workflow.OUTPUT_CSV_TABLE)),
+                "OUTPUT_ATTACH_FILE_OUTPUTS": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS)),
+                "OUTPUT_ATTACH_NEW_DATASET_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID)),
+                "OUTPUT_ATTACH_NEW_SCREEN_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID)),
+                "CLEANUP": unwrap(client.getInput(constants.CLEANUP)),
+            }
+            launcher_params["output_settings"] = output_settings
 
-                        try:
-                            # TODO don't
-                            slurmClient.workflowTracker.update_task_status(
-                                task_id,
-                                f"{return_code}")
-                        except Exception as status_e:
-                            logger.error(
-                                f"Error updating task status for batch {i}, task {task_id}: {status_e}")
-                            raise
+            # Register the launcher task in the event store
+            task_id = slurmClient.workflowTracker.add_task_to_workflow(
+                wf_id,
+                'SLURM_Run_Workflow_Batched.py',
+                VERSION,
+                image_ids,
+                launcher_params
+            )
 
-                        if return_code:  # None if not finished
-                            try:
-                                results = process.getResults(
-                                    0)  # 0 ms; RtypeDict
-                                if 'Message' in results:
-                                    result_msg = results['Message'].getValue()
-                                    logger.info(result_msg)
-                                    UI_messages['Message'].extend(
-                                        [f">> Batch {i}: ",
-                                         result_msg])
+            msg = "Workflow batch initialization complete. Your jobs have been queued and will be processed in the background. You can safely close this browser tab; results will be imported automatically."
+            client.setOutput("Message", rstring(msg))
 
-                                if 'File_Annotation' in results:
-                                    UI_messages['File_Annotation'].append(
-                                        results['File_Annotation'].getValue())
-                            except Exception as results_e:
-                                logger.error(
-                                    f"Error getting results for batch {i}: {results_e}")
-                                raise
-
-                            finished.append(i)
-                            if return_code.getValue() == 0:
-                                msg = f"Batch {i} - [{remaining_batches[i]}] finished."
-                                logger.info(
-                                    msg)
-                                UI_messages['Message'].extend(
-                                    [msg])
-                                try:
-                                    slurmClient.workflowTracker.complete_task(
-                                        task_id, result_msg + msg)
-                                except Exception as complete_e:
-                                    logger.error(
-                                        f"Error completing task {task_id} for batch {i}: {complete_e}")
-                                    raise
-
-                                # Add batch supervisor metadata for this completed batch
-                                try:
-                                    add_batch_supervisor_metadata_for_batch(
-                                        conn, slurmClient, wf_id, i, batch, len(batch_ids_list), inputs, effective_type)
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Failed to add batch supervisor metadata for batch {i}: {e}")
-                            else:
-                                msg = f"Batch {i} - [{remaining_batches[i]}] failed!"
-                                logger.info(
-                                    msg)
-                                UI_messages['Message'].extend(
-                                    [msg])
-                                try:
-                                    slurmClient.workflowTracker.fail_task(
-                                        task_id, "Batch failed")
-                                except Exception as fail_e:
-                                    logger.error(
-                                        f"Error failing task {task_id} for batch {i}: {fail_e}")
-                                    raise
-                                wf_failed = True
-                        else:
-                            pass
-
-                    # clear out our tracking list, to end while loop at some point
-                    for i in finished:
-                        del remaining_batches[i]
-                    finished = []
-                    # wait for 10 seconds before checking again
-                    conn.keepAlive()  # keep connection alive w/ omero/ice
-                    timesleep.sleep(10)
-            except Exception as e:
-                logger.error(
-                    f"Exception in batch monitoring loop for batch {current_batch_being_processed}: {e}")
-                # Mark the workflow as failed due to monitoring exception
-                wf_failed = True
-                # Re-raise the exception to ensure it's not silently ignored
-                raise
-            finally:
-                logger.info('''
-                # ====================================
-                # :: Finished all batches ::
-                # ====================================
-                ''')
-                for proc in processes.values():
-                    proc.close(False)  # stop the scripts
-
-            # 7. Script output
-            client.setOutput("Message",
-                             rstring("\n".join(UI_messages['Message'])))
-
-            if wf_failed:
-                slurmClient.workflowTracker.fail_workflow(
-                    wf_id, "One or more workflow batches failed")
-            else:
-                slurmClient.workflowTracker.complete_workflow(wf_id)
-
-            for i, ann in enumerate(UI_messages['File_Annotation']):
-                client.setOutput(f"File_Annotation_{i}", robject(ann))
+        except Exception as e:
+            logger.error("Exception in batch wf: ", exc_info=True)
+            if 'wf_id' in locals() and wf_id is not None:
+                try:
+                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+                except Exception as db_e:
+                    logger.error(f"Database error marking workflow {wf_id} as failed: {db_e}")
+            client.setOutput("Message", rstring(f"ERROR: {str(e)}"))
+            raise
         finally:
             client.closeSession()
 

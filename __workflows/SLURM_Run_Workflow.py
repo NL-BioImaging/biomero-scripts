@@ -557,110 +557,57 @@ def runScript():
                 user,
                 group
             )
-            wf_failed = False  # wf state
 
             # Early validation: Check importer write access if needed
             # This prevents expensive SLURM operations if we can't write results
             validate_importer_write_access(slurmClient, conn, client)
 
-            logger.info('''
-            # --------------------------------------------
-            # :: 1. Push selected data to Slurm ::
-            # --------------------------------------------
-            ''')
-            # Generate a filename for the input data
-            zipfile = createFileName(client, conn, wf_id)
-            # Send data to Slurm, zipped, over SSH
-            # Uses _SLURM_Image_Transfer script from Omero
-            rv, task_id = exportImageToSLURM(client, conn, slurmClient,
-                                             zipfile, wf_id, ome_zarr_version)
-            logger.debug(f"Ran data export: {rv.keys()}, {rv}")
-            if 'Message' in rv:
-                logger.info(rv['Message'].getValue())  # log
-            UI_messages += "Exported data to Slurm. "
+            # Gather all inputs and parameters to store in the launcher task
+            launcher_params = {}
+            for k in inputs:
+                launcher_params[k] = unwrap(client.getInput(k))
 
-            logger.info('''
-            # --------------------------------------------
-            # :: 2. Convert data on Slurm ::
-            # --------------------------------------------
-            ''')
-            # Note: Moved unzipping data to transfer script, removed from here
-            slurm_job_ids = {}
-            task_ids = {}
-            # Quick git pull on Slurm for latest version of job scripts
-            update_result = slurmClient.update_slurm_scripts()
-            logger.debug(update_result.__dict__)
+            selected_wfs = [wf_name for wf_name in workflows if unwrap(client.getInput(wf_name))]
+            launcher_params["workflows"] = selected_wfs
+            launcher_params["email"] = email
+            launcher_params["zipfile"] = createFileName(client, conn, wf_id)
+            launcher_params["use_zarr_format"] = use_zarr_format
+            launcher_params["ome_zarr_version"] = ome_zarr_version
 
-            # Determine conversion format based on ZARR preference
-            if use_zarr_format:
-                # No-op conversion: zarr to zarr (skipped in conversion script)
-                source_format = 'zarr'
-                target_format = 'zarr'
-                UI_messages += "Using ZARR format (no conversion needed). "
-            else:
-                # Traditional conversion: zarr to tiff
-                source_format = 'zarr'
-                target_format = 'tiff'
-                UI_messages += "Converting ZARR to TIFF. "
+            for wf_name in selected_wfs:
+                launcher_params[f"wf_params_{wf_name}"] = _workflow_params[wf_name]
+                launcher_params[f"wf_file_params_{wf_name}"] = _workflow_file_params[wf_name]
 
-            # Run conversion using the SLURM_Remote_Conversion script
-            rv_conv, task_id = convertDataOnSLURM(
-                client, conn, slurmClient, zipfile, source_format,
-                target_format, wf_id)
-            logger.debug(f"Ran data conversion: {rv_conv.keys()}, {rv_conv}")
-            if 'Message' in rv_conv:
-                logger.info(rv_conv['Message'].getValue())  # log
-                UI_messages += rv_conv['Message'].getValue() + " "
+            output_settings = {
+                "DATA_TYPE": unwrap(client.getInput(constants.transfer.DATA_TYPE)),
+                "IDS": unwrap(client.getInput(constants.transfer.IDS)),
+                "OUTPUT_PARENT": unwrap(client.getInput(constants.workflow.OUTPUT_PARENT)),
+                "OUTPUT_RENAME": unwrap(client.getInput(constants.workflow.OUTPUT_RENAME)),
+                "OUTPUT_RENAME_SELECTED": selected_output[constants.workflow.OUTPUT_RENAME],
+                "OUTPUT_NEW_DATASET": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_DATASET)),
+                "OUTPUT_NEW_DATASET_SELECTED": selected_output[constants.workflow.OUTPUT_NEW_DATASET],
+                "OUTPUT_NEW_SCREEN": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_SCREEN)),
+                "OUTPUT_NEW_SCREEN_SELECTED": selected_output[constants.workflow.OUTPUT_NEW_SCREEN],
+                "OUTPUT_DUPLICATES": unwrap(client.getInput(constants.workflow.OUTPUT_DUPLICATES)),
+                "OUTPUT_ATTACH": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH)),
+                "OUTPUT_CSV_TABLE": unwrap(client.getInput(constants.workflow.OUTPUT_CSV_TABLE)),
+                "OUTPUT_ATTACH_FILE_OUTPUTS": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS)),
+                "OUTPUT_ATTACH_NEW_DATASET_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID)),
+                "OUTPUT_ATTACH_NEW_SCREEN_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID)),
+                "CLEANUP": unwrap(client.getInput(constants.CLEANUP)),
+            }
+            launcher_params["output_settings"] = output_settings
 
-            slurm_job_ids = {}
-            task_ids = {}
+            # Register the launcher task in the event store
+            task_id = slurmClient.workflowTracker.add_task_to_workflow(
+                wf_id,
+                'SLURM_Run_Workflow.py',
+                VERSION,
+                unwrap(client.getInput(constants.transfer.IDS)),
+                launcher_params
+            )
 
-            if not wf_failed:
-                logger.info('''
-                # --------------------------------------------
-                # :: 3. Create Slurm jobs for all workflows ::
-                # --------------------------------------------
-                ''')
-                output_settings = {
-                    "DATA_TYPE": unwrap(client.getInput(constants.transfer.DATA_TYPE)),
-                    "IDS": unwrap(client.getInput(constants.transfer.IDS)),
-                    "OUTPUT_PARENT": unwrap(client.getInput(constants.workflow.OUTPUT_PARENT)),
-                    "OUTPUT_RENAME": unwrap(client.getInput(constants.workflow.OUTPUT_RENAME)),
-                    "OUTPUT_RENAME_SELECTED": selected_output[constants.workflow.OUTPUT_RENAME],
-                    "OUTPUT_NEW_DATASET": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_DATASET)),
-                    "OUTPUT_NEW_DATASET_SELECTED": selected_output[constants.workflow.OUTPUT_NEW_DATASET],
-                    "OUTPUT_NEW_SCREEN": unwrap(client.getInput(constants.workflow.OUTPUT_NEW_SCREEN)),
-                    "OUTPUT_NEW_SCREEN_SELECTED": selected_output[constants.workflow.OUTPUT_NEW_SCREEN],
-                    "OUTPUT_DUPLICATES": unwrap(client.getInput(constants.workflow.OUTPUT_DUPLICATES)),
-                    "OUTPUT_ATTACH": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH)),
-                    "OUTPUT_CSV_TABLE": unwrap(client.getInput(constants.workflow.OUTPUT_CSV_TABLE)),
-                    "OUTPUT_ATTACH_FILE_OUTPUTS": unwrap(client.getInput(constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS)),
-                    "OUTPUT_ATTACH_NEW_DATASET_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID)),
-                    "OUTPUT_ATTACH_NEW_SCREEN_ID": unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID)),
-                    "CLEANUP": unwrap(client.getInput(constants.CLEANUP)),
-                }
-
-                for wf_name in workflows:
-                    if unwrap(client.getInput(wf_name)):
-                        UI_messages, slurm_job_id, wf_id, task_id = run_workflow(
-                            slurmClient,
-                            _workflow_params[wf_name],
-                            _workflow_file_params[wf_name],
-                            client,
-                            conn,
-                            UI_messages,
-                            zipfile,
-                            email,
-                            wf_name,
-                            wf_id,
-                            output_settings)
-                        slurm_job_ids[wf_name] = slurm_job_id
-                        task_ids[slurm_job_id] = task_id
-
-                logger.info("Workflow jobs submitted successfully. Monitoring and results import will be handled in the background.")
-                UI_messages += "Workflow jobs submitted successfully to SLURM. You can safely close this browser tab; results will be imported automatically when completed."
-
-            # 7. Script output
+            UI_messages = "Workflow initialization complete. Your job has been queued and will be processed in the background. You can safely close this browser tab; results will be imported automatically."
             client.setOutput("Message", rstring(UI_messages))
 
         except Exception as e:
