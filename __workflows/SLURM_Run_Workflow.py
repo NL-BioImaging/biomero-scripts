@@ -163,7 +163,15 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
         # Prepare inputs for write access validation (DRY-RUN ONLY)
         inputs = {
             constants.results.TEST_WRITE_PERMISSIONS_ONLY: rbool(True),
-            constants.results.OUTPUT_SLURM_JOB_ID: rstring(dummy_job_id)
+            constants.results.OUTPUT_SLURM_JOB_ID: rstring(dummy_job_id),
+            constants.results.OUTPUT_COMPLETED_JOB: rbool(True),
+            constants.results.OUTPUT_ATTACH_PROJECT: rbool(False),
+            constants.results.OUTPUT_ATTACH_DATASET: rbool(False),
+            constants.results.OUTPUT_ATTACH_PLATE: rbool(False),
+            constants.results.OUTPUT_ATTACH_OG_IMAGES: rbool(False),
+            constants.results.OUTPUT_ATTACH_NEW_DATASET: rbool(False),
+            constants.results.OUTPUT_ATTACH_NEW_SCREEN: rbool(False),
+            constants.results.OUTPUT_ATTACH_TABLE: rbool(False)
         }
         
         logger.info(f"Calling {script_name} for write access validation with job ID: {dummy_job_id}")
