@@ -150,6 +150,18 @@ This repository provides example OMERO scripts for using [BIOMERO](https://githu
 
 Always start with initiating the Slurm environment at least once, for example using [admin/SLURM Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
 
+### Group folder mappings for importer results
+
+`SLURM_Import_Results.py` supports both the legacy
+`/opt/omero/server/biomero-config.json["group_mappings"]` configuration and an
+optional dedicated `/opt/omero/server/group-mappings.json` file. Mappings are
+merged by group key. Entries found only in either source are retained, and the
+dedicated file wins when the same group is present in both.
+
+Override the default paths with `OMERO_BIOMERO_CONFIG_FILE` and
+`OMERO_BIOMERO_GROUP_MAPPINGS_FILE`. Deployments that do not mount the dedicated
+file continue using the legacy configuration unchanged.
+
 For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow.py) should provide an easy way to send data to Slurm, run the configured and chosen workflow, poll Slurm until jobs are done (or errors) and retrieve the results when the job is done. This workflow script uses some of the other scripts, like
 
 -  [`_data/SLURM Image Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_Image_Transfer.py): to export your selected images / dataset / screen as ZARR files to a Slurm dir.
@@ -294,5 +306,4 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
-
 

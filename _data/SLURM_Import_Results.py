@@ -143,6 +143,50 @@ if not IMPORTER_ENABLED:
 # Version constant for easy version management
 VERSION = "2.8.0"
 
+
+def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
+    """Load legacy and dedicated group mappings with dedicated values winning.
+
+    Both files are optional. The legacy file stores mappings under its
+    ``group_mappings`` key, while the dedicated file contains the mapping
+    object directly. Invalid or non-object sources are ignored independently
+    so one valid source remains usable.
+    """
+    config_file_path = config_file_path or os.getenv(
+        'OMERO_BIOMERO_CONFIG_FILE',
+        '/opt/omero/server/biomero-config.json',
+    )
+    group_mappings_file_path = group_mappings_file_path or os.getenv(
+        'OMERO_BIOMERO_GROUP_MAPPINGS_FILE',
+        '/opt/omero/server/group-mappings.json',
+    )
+
+    def load_json_object(path):
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, 'r', encoding='utf-8') as json_file:
+                data = json.load(json_file)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            logger.warning(
+                "Could not load group mappings from %s",
+                path,
+                exc_info=True,
+            )
+            return {}
+
+    legacy_config = load_json_object(config_file_path)
+    legacy_mappings = legacy_config.get('group_mappings', {})
+    if not isinstance(legacy_mappings, dict):
+        legacy_mappings = {}
+
+    dedicated_mappings = load_json_object(group_mappings_file_path)
+    merged_mappings = legacy_mappings.copy()
+    merged_mappings.update(dedicated_mappings)
+    return merged_mappings
+
+
 OBJECT_TYPES = (
     'Plate',
     'Screen',
@@ -1389,8 +1433,9 @@ def upload_zip_to_omero(
 def get_importer_group_base_path(group_name: str) -> str:
     """Get the base path for a group in importer storage.
 
-    Uses frontend group mappings from biomero-config.json, falling back to
-    base_dir + group_name if no specific mapping exists.
+    Uses merged frontend group mappings from the legacy config and optional
+    dedicated mappings file, falling back to base_dir + group_name if no
+    specific mapping exists.
 
     Args:
         group_name: Name of the OMERO group.
@@ -1412,14 +1457,12 @@ def get_importer_group_base_path(group_name: str) -> str:
     base_dir = IMPORTER_CONFIG.get('base_dir', '/data')
 
     try:
-        # Load frontend group mappings from biomero-config.json
-        with open('/opt/omero/server/biomero-config.json', 'r') as f:
-            frontend_config = json.load(f)
-
-        group_mappings = frontend_config.get('group_mappings', {})
+        group_mappings = load_group_mappings()
 
         # Look up group by groupName to get folder mapping
         for group_id, mapping in group_mappings.items():
+            if not isinstance(mapping, dict):
+                continue
             if mapping.get('groupName') == group_name:
                 folder_name = mapping.get('folder')
                 if folder_name:
@@ -3630,11 +3673,11 @@ def check_write_access_for_importer(group_name: str, test_wf_id: str = None, con
         # Simplify accessible mappings display 
         accessible_mappings = []
         try:
-            with open('/opt/omero/server/biomero-config.json', 'r') as f:
-                config = json.load(f)
-            group_mappings = config.get('group_mappings', {})
-            
+            group_mappings = load_group_mappings()
+
             for group_id, mapping in group_mappings.items():
+                if not isinstance(mapping, dict):
+                    continue
                 group_name_mapped = mapping.get('groupName', 'unknown')
                 if group_name_mapped in user_groups:
                     folder_mapped = mapping.get('folder', 'default')
