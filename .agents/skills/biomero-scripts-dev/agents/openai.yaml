@@ -1,0 +1,4 @@
+interface:
+  display_name: "BIOMERO Scripts Development"
+  short_description: "Develop and release BIOMERO OMERO scripts"
+  default_prompt: "Use $biomero-scripts-dev to update BIOMERO scripts safely and keep their release version aligned with the BIOMERO library."

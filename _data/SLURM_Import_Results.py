@@ -141,7 +141,7 @@ if not IMPORTER_ENABLED:
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
 # Version constant for easy version management
-VERSION = "2.8.0"
+VERSION = "2.8.1"
 
 
 def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
