@@ -69,10 +69,11 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE,
-                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
+                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
+                  constants.workflow.OUTPUT_CREATE_ROIS]
 
 # Version constant for easy version management
-VERSION = "2.8.1"
+VERSION = "2.9.0"
 
 
 def runScript():
@@ -213,7 +214,23 @@ def runScript():
                            optional=True,
                            grouping="02.85",
                            description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
-                           default=False)
+                           default=False),
+            omscripts.Bool(constants.workflow.OUTPUT_CREATE_ROIS,
+                           optional=True,
+                           grouping="02.86",
+                           description="After importing label images, create ROIs on their original source images. Requires Dataset or Screen image import.",
+                           default=False),
+            omscripts.String(constants.workflow.ROI_LABEL_PATTERN,
+                             optional=True,
+                             grouping="02.87",
+                             description="Glob matching label result basenames, e.g. *_cp_masks.tif",
+                             default=""),
+            omscripts.String(constants.workflow.ROI_SHAPE,
+                             optional=True,
+                             grouping="02.88",
+                             description="OMERO ROI representation",
+                             values=[rstring("Polygon"), rstring("Mask")],
+                             default="Polygon")
         ]
         # Generate script parameters for all our workflows
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()

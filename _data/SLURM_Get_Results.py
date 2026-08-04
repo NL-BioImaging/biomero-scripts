@@ -52,6 +52,7 @@ License: GPL v2+ (see LICENSE.txt)
 """
 
 import difflib
+import fnmatch
 import shutil
 import sys
 import uuid
@@ -61,7 +62,7 @@ import omero.gateway
 from omero import scripts
 from omero.constants.namespaces import NSCREATED
 from omero.gateway import BlitzGateway
-from omero.rtypes import rstring, robject, unwrap, wrap
+from omero.rtypes import rlong, rstring, robject, unwrap, wrap
 import os
 import re
 import zipfile
@@ -75,7 +76,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.8.1"
+VERSION = "2.9.0"
 
 OBJECT_TYPES = (
     'Plate',
@@ -86,6 +87,76 @@ OBJECT_TYPES = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# OMERO processors download only the selected script into an isolated working
+# directory. Keep this small integration self-contained instead of importing a
+# sibling module which would be absent on a remote worker.
+def matches_roi_label_output(path, pattern):
+    """Match a user glob against either the basename or normalized path."""
+    if not pattern or not pattern.strip():
+        return False
+    normalized = str(path).replace(chr(92), "/")
+    pattern = pattern.strip()
+    return (fnmatch.fnmatchcase(os.path.basename(normalized), pattern)
+            or fnmatch.fnmatchcase(normalized, pattern))
+
+
+def _get_roi_script_capability(script_service):
+    matches = [script for script in script_service.getScripts()
+               if unwrap(script.getName()) == constants.LABELS_TO_ROIS_SCRIPT]
+    if not matches:
+        return {"available": False,
+                "reason": "The Labels2Rois utility script is not installed."}
+    return {"available": True, "script_id": int(unwrap(matches[0].id))}
+
+
+def execute_roi_postprocessing(client, script_service, image_pairs,
+                               roi_shape="Polygon"):
+    """Run Labels2Rois with exact imported-label/source-image ID pairs."""
+    pairs = [(int(label_id), int(target_id))
+             for label_id, target_id in image_pairs]
+    if not pairs:
+        return {"status": "skipped",
+                "message": "No imported label images matched the ROI selector."}
+    if roi_shape not in ("Polygon", "Mask"):
+        raise ValueError("ROI shape must be Polygon or Mask")
+    capability = _get_roi_script_capability(script_service)
+    if not capability["available"]:
+        return {"status": "skipped", "message": capability["reason"]}
+
+    from omero.rtypes import rbool, rlist, rlong
+    roi_inputs = {
+        "Mapping_Mode": rstring("Explicit Image IDs"),
+        "Label_Image_IDs": rlist([rlong(label) for label, _ in pairs]),
+        "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
+        "ROI_type": rstring(roi_shape),
+        "Clear_Existing_ROIs": rbool(False),
+        "Delete_Label_Image": rbool(False),
+    }
+    process = script_service.runScript(
+        capability["script_id"], roi_inputs, None)
+    try:
+        callback = scripts.ProcessCallbackI(client, process)
+        try:
+            while not callback.block(1000):
+                pass
+        finally:
+            callback.close()
+        results = process.getResults(0) or {}
+        job = process.getJob()
+        status_id = (int(unwrap(job.getStatus().getId()))
+                     if job is not None else None)
+        returned_message = unwrap(results.get("Message"))
+        message = str(returned_message or "ROI postprocessing completed")
+        if status_id in (6, 9) or message.startswith("FAILED:"):
+            raise RuntimeError(
+                message if returned_message else
+                f"Labels2Rois failed with OMERO job status {status_id}")
+        return {"status": "completed", "message": message,
+                "pairs": len(pairs)}
+    finally:
+        process.close(False)
 
 _LOGFILE_PATH_PATTERN_GROUP = "DATA_PATH"
 _LOGFILE_PATH_PATTERN = "Running [\w-]+? Job w\/ .+? \| .+? \| (?P<DATA_PATH>.+?) \|.*"
@@ -678,7 +749,9 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
         )
 
 
-def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, new_dataset=True, wf_id=None, input_images=None):
+def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id,
+                               new_dataset=True, wf_id=None, input_images=None,
+                               roi_label_pattern="", roi_pairs=None):
     """Save images from a (unzipped) folder to OMERO as a dataset via pixel upload.
 
     Reads each image with tifffile, reshapes to 5D XYZCT, and posts via
@@ -754,6 +827,13 @@ def saveImagesToOmeroAsDataset(conn, slurmClient, folder, client, dataset_id, ne
                                             dim_order="xyzct",
                                             # source_image_id=source_image_id,
                                             description=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}" + (f" | source: {source_img.getName()} (id: {source_img.getId()})" if source_img else ""))
+
+                if (roi_pairs is not None and source_img is not None
+                        and matches_roi_label_output(name, roi_label_pattern)):
+                    roi_pairs.append((int(img_id), int(source_img.getId())))
+                    logger.info(
+                        f"Selected imported label image {img_id} for ROI target "
+                        f"{source_img.getId()} using pattern '{roi_label_pattern}'")
 
                 # Add metadata
                 add_image_annotations(conn, slurmClient, img_id, job_id, wf_id)
@@ -1145,8 +1225,9 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
     return created_files
 
 
-def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadata_files, wf_id=None,
-                             input_images=None):
+def upload_contents_to_omero(client, conn, slurmClient, message, folder,
+                             metadata_files, wf_id=None, input_images=None,
+                             roi_pairs=None):
     """Upload contents of folder to OMERO
 
     Args:
@@ -1239,7 +1320,10 @@ def upload_contents_to_omero(client, conn, slurmClient, message, folder, metadat
                                              dataset_id=dataset_id,
                                              new_dataset=create_new_dataset,
                                              wf_id=wf_id,
-                                             input_images=input_images)
+                                             input_images=input_images,
+                                             roi_label_pattern=(unwrap(client.getInput(
+                                                 constants.results.ROI_LABEL_PATTERN)) or ""),
+                                             roi_pairs=roi_pairs)
             message += msg
 
     except Exception as e:
@@ -1819,6 +1903,9 @@ def runScript():
             scripts.String(constants.results.LOG_FALLBACK_TARGET,
                            optional=True, grouping="01.4",
                            description="Guaranteed container (\"DataType:id\", e.g. \"Plate:123\") to force-link the job log to when no other attachment target is selected, so the log is always findable in OMERO. Auto-derived from the workflow input if not provided."),
+            scripts.List(constants.results.ROI_TARGET_IMAGE_IDS,
+                         optional=True, grouping="01.5",
+                         description="Original image IDs available as ROI targets").ofType(rlong(0)),
             scripts.Bool(constants.results.OUTPUT_ATTACH_PROJECT,
                          optional=False,
                          grouping="03",
@@ -1930,6 +2017,22 @@ def runScript():
                          grouping="08.4",
                          description="Plate to attach non-image file outputs to",
                          values=_plates),
+            scripts.Bool(constants.results.OUTPUT_CREATE_ROIS,
+                         optional=True,
+                         grouping="08.5",
+                         description="Create ROIs on original images from selected imported label images. Requires dataset image import.",
+                         default=False),
+            scripts.String(constants.results.ROI_LABEL_PATTERN,
+                           optional=True,
+                           grouping="08.6",
+                           description="Glob matching label result basenames, for example *_cp_masks.tif",
+                           default=""),
+            scripts.String(constants.results.ROI_SHAPE,
+                           optional=True,
+                           grouping="08.7",
+                           description="OMERO ROI shape representation",
+                           values=[rstring("Polygon"), rstring("Mask")],
+                           default="Polygon"),
             scripts.Bool("Cleanup?",
                          optional=True,
                          grouping="09",
@@ -2096,7 +2199,13 @@ def runScript():
 
                             # Load input images for best-effort attachment matching
                             # (handles workflows that rename outputs, e.g. NucleiLabels -> CellsLabels)
-                            input_images = []
+                            _roi_target_ids = unwrap(client.getInput(
+                                constants.results.ROI_TARGET_IMAGE_IDS)) or []
+                            input_images = [
+                                img for img in conn.getObjects(
+                                    "Image", ids=[int(i) for i in _roi_target_ids])
+                                if img
+                            ]
                             _lookup_task_id = task_id
                             if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
                                 try:
@@ -2104,7 +2213,11 @@ def runScript():
                                     logger.info(f"Resolved task ID from job accounting: {_lookup_task_id}")
                                 except Exception as _te:
                                     logger.debug(f"Could not resolve task ID from job accounting: {_te}")
-                            if slurmClient.track_workflows and _lookup_task_id:
+                            if (not input_images
+                                    and not unwrap(client.getInput(
+                                        constants.results.OUTPUT_CREATE_ROIS))
+                                    and slurmClient.track_workflows
+                                    and _lookup_task_id):
                                 try:
                                     _task = slurmClient.workflowTracker.repository.get(_lookup_task_id)
                                     _input_data = _task.input_data if _task else None
@@ -2147,9 +2260,41 @@ def runScript():
                                     logger.warning(
                                         f"Could not load input images from task for matching: {_ie}")
 
+                            roi_pairs = []
                             message = upload_contents_to_omero(
                                 client, conn, slurmClient, message, folder, metadata_files,
-                                wf_id=wf_id, input_images=input_images)
+                                wf_id=wf_id, input_images=input_images,
+                                roi_pairs=roi_pairs)
+
+                            if unwrap(client.getInput(constants.results.OUTPUT_CREATE_ROIS)):
+                                try:
+                                    if slurmClient.track_workflows and task_id:
+                                        slurmClient.workflowTracker.update_task_status(
+                                            task_id,
+                                            constants.workflow_status.POSTPROCESSING)
+                                except Exception as status_error:
+                                    logger.warning(
+                                        f"Could not publish ROI postprocessing status: {status_error}")
+                                try:
+                                    roi_result = execute_roi_postprocessing(
+                                        client,
+                                        conn.getScriptService(),
+                                        roi_pairs,
+                                        unwrap(client.getInput(constants.results.ROI_SHAPE))
+                                        or "Polygon",
+                                    )
+                                    if roi_result["status"] == "completed":
+                                        message += f"\nROI postprocessing: {roi_result['message']}"
+                                    else:
+                                        message += f"\nROI postprocessing warning: {roi_result['message']}"
+                                except Exception as roi_error:
+                                    logger.warning(
+                                        f"ROI postprocessing failed without failing import: {roi_error}",
+                                        exc_info=True)
+                                    message += (
+                                        "\nROI postprocessing warning: "
+                                        f"{roi_error}. Imported result images were preserved."
+                                    )
 
                             # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
                             if unwrap(client.getInput(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS)):

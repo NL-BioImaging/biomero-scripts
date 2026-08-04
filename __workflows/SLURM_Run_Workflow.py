@@ -94,8 +94,75 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_NEW_SCREEN,
                   constants.workflow.OUTPUT_ATTACH,
                   constants.workflow.OUTPUT_CSV_TABLE,
-                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS]
-VERSION = "2.8.1"
+                  constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
+                  constants.workflow.OUTPUT_CREATE_ROIS]
+VERSION = "2.9.0"
+
+def get_roi_script_capability(conn: BlitzGateway) -> dict:
+    """Ask OMERO whether its optional Labels2Rois script is installed."""
+    svc = conn.getScriptService()
+    matches = [script for script in svc.getScripts()
+               if unwrap(script.getName()) == constants.LABELS_TO_ROIS_SCRIPT]
+    if not matches:
+        return {"available": False,
+                "reason": "The Labels2Rois utility script is not installed."}
+    return {"available": True, "reason": None,
+            "script_id": int(unwrap(matches[0].id))}
+
+
+def validate_roi_output_request(client, conn, selected_output,
+                                selected_descriptors):
+    """Validate and normalize ROI output settings before expensive work."""
+    if not selected_output.get(constants.workflow.OUTPUT_CREATE_ROIS, False):
+        return "", None
+
+    # An optional integration must remain backward compatible. Check for the
+    # utility first so older deployments merely ignore this requested output,
+    # even if they cannot validate its remaining settings.
+    capability = get_roi_script_capability(conn)
+    if not capability["available"]:
+        selected_output[constants.workflow.OUTPUT_CREATE_ROIS] = False
+        return "", (
+            "ROI postprocessing was requested but will be skipped: "
+            f"{capability['reason']}"
+        )
+
+    imports_images = (
+        selected_output.get(constants.workflow.OUTPUT_NEW_DATASET, False)
+        or selected_output.get(constants.workflow.OUTPUT_NEW_SCREEN, False)
+    )
+    if not imports_images:
+        raise ValueError(
+            "ROI creation requires importing result images into a Dataset or Screen."
+        )
+
+    roi_shape = unwrap(client.getInput(constants.workflow.ROI_SHAPE)) or "Polygon"
+    if roi_shape not in ("Polygon", "Mask"):
+        raise ValueError("ROI shape must be Polygon or Mask")
+
+    pattern = (unwrap(client.getInput(constants.workflow.ROI_LABEL_PATTERN))
+               or "").strip()
+    if not pattern:
+        image_outputs = [
+            output
+            for descriptor in selected_descriptors
+            for output in descriptor.get("outputs", [])
+            if str(output.get("type", "")).lower() == "image"
+        ]
+        all_images_are_labels = bool(image_outputs) and all(
+            "label" in [str(value).lower() for value in
+                        (output.get("sub-type") or output.get("subtype") or [])]
+            for output in image_outputs
+        )
+        if all_images_are_labels:
+            pattern = "*"
+        else:
+            raise ValueError(
+                "A label image pattern is required because the selected workflow "
+                "does not describe every image output as subtype 'label'."
+            )
+
+    return pattern, None
 
 
 def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway, client: omscripts.client) -> None:
@@ -363,6 +430,22 @@ def runScript():
                            grouping="02.85",
                            description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
                            default=False),
+            omscripts.Bool(constants.workflow.OUTPUT_CREATE_ROIS,
+                           optional=True,
+                           grouping="02.86",
+                           description="After importing label images, create ROIs on their original source images. Requires Dataset or Screen image import.",
+                           default=False),
+            omscripts.String(constants.workflow.ROI_LABEL_PATTERN,
+                             optional=True,
+                             grouping="02.87",
+                             description="Glob matching label result basenames, e.g. *_cp_masks.tif. Optional when every descriptor image output has subtype label.",
+                             default=""),
+            omscripts.String(constants.workflow.ROI_SHAPE,
+                             optional=True,
+                             grouping="02.88",
+                             description="OMERO ROI representation",
+                             values=[rstring("Polygon"), rstring("Mask")],
+                             default="Polygon"),
             omscripts.Bool(constants.CLEANUP,
                            optional=True,
                            grouping="02.9", 
@@ -376,6 +459,7 @@ def runScript():
         _workflow_params = {}
         _workflow_file_params = {}  # file-attachment params keyed by param_id
         _workflow_available_versions = {}
+        _workflow_descriptors = {}
         # All currently configured workflows
         workflows = wf_versions.keys()
         for group_incr, wf in enumerate(workflows):
@@ -392,6 +476,7 @@ def runScript():
             _workflow_params[wf] = {k: v for k, v in _all_wf_params.items() if not v['file_attachment']}
             _workflow_file_params[wf] = {k: v for k, v in _all_wf_params.items() if v['file_attachment']}
             descriptor = slurmClient.generic_descriptor_from_github(wf)
+            _workflow_descriptors[wf] = descriptor
             wf_descr = descriptor['description']
             # Build value-choices lookup from the descriptor (scoped per wf,
             # so param name collisions across workflows are not an issue)
@@ -550,6 +635,16 @@ def runScript():
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")
+            selected_descriptors = [
+                _workflow_descriptors[name]
+                for name, selected in selected_workflows.items()
+                if selected
+            ]
+            roi_label_pattern, roi_warning = validate_roi_output_request(
+                client, conn, selected_output, selected_descriptors)
+            if roi_warning:
+                logger.warning(roi_warning)
+                UI_messages += roi_warning + " "
             # Start tracking the workflow on a unique ID
             wf_id = slurmClient.workflowTracker.initiate_workflow(
                 params.name,
@@ -694,7 +789,7 @@ def runScript():
                             rv_imp = importResultsToOmero(
                                 client, conn, slurmClient,
                                 slurm_job_id, selected_output,
-                                wf_id)
+                                wf_id, roi_label_pattern=roi_label_pattern)
 
                             if rv_imp:
                                 try:
@@ -1462,12 +1557,48 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
     return rv, job
 
 
+def get_roi_target_image_ids(conn, data_type, object_ids):
+    """Expand the selected OMERO objects to source image IDs for ROI mapping."""
+    image_ids = []
+
+    def add_image(image):
+        if image is not None:
+            image_id = int(image.getId())
+            if image_id not in image_ids:
+                image_ids.append(image_id)
+
+    def add_plate(plate):
+        if plate is None:
+            return
+        for well in plate.listChildren():
+            for well_sample in well.listChildren():
+                add_image(well_sample.getImage())
+
+    for object_id in object_ids:
+        if data_type == constants.transfer.DATA_TYPE_IMAGE:
+            add_image(conn.getObject("Image", int(object_id)))
+        elif data_type == constants.transfer.DATA_TYPE_DATASET:
+            dataset = conn.getObject("Dataset", int(object_id))
+            if dataset is not None:
+                for image in dataset.listChildren():
+                    add_image(image)
+        elif data_type == constants.transfer.DATA_TYPE_PLATE:
+            add_plate(conn.getObject("Plate", int(object_id)))
+        elif data_type == constants.transfer.DATA_TYPE_SCREEN:
+            screen = conn.getObject("Screen", int(object_id))
+            if screen is not None:
+                for plate in screen.listChildren():
+                    add_plate(plate)
+    return image_ids
+
+
 def importResultsToOmero(client: omscripts.client,
                          conn: BlitzGateway,
                          slurmClient: SlurmClient,
                          slurm_job_id: int,
                          selected_output: list,
-                         wf_id: UUID) -> str:
+                         wf_id: UUID,
+                         roi_label_pattern: str = "") -> str:
     """
     Import workflow results from SLURM back into OMERO.
 
@@ -1712,6 +1843,30 @@ def importResultsToOmero(client: omscripts.client,
             inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(False)
     else:
         inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(False)
+
+    if selected_output.get(constants.workflow.OUTPUT_CREATE_ROIS, False):
+        inputs[constants.results.OUTPUT_CREATE_ROIS] = rbool(True)
+        inputs[constants.results.ROI_LABEL_PATTERN] = rstring(
+            roi_label_pattern)
+        inputs[constants.results.ROI_SHAPE] = (
+            client.getInput(constants.workflow.ROI_SHAPE)
+            or rstring("Polygon"))
+        try:
+            target_image_ids = get_roi_target_image_ids(
+                conn,
+                data_type,
+                unwrap(client.getInput(constants.transfer.IDS)) or [],
+            )
+            inputs[constants.results.ROI_TARGET_IMAGE_IDS] = rlist(
+                [rlong(image_id) for image_id in target_image_ids])
+            logger.info(
+                f"Forwarding {len(target_image_ids)} source images for ROI mapping")
+        except Exception as roi_target_error:
+            logger.warning(
+                "Could not expand workflow inputs to ROI target images; "
+                f"postprocessing will be skipped: {roi_target_error}")
+    else:
+        inputs[constants.results.OUTPUT_CREATE_ROIS] = rbool(False)
 
     # Wait for Slurm Accounting to update
     wait_for_job_completion(slurmClient, slurm_job_id)

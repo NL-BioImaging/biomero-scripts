@@ -162,6 +162,23 @@ Override the default paths with `OMERO_BIOMERO_CONFIG_FILE` and
 `OMERO_BIOMERO_GROUP_MAPPINGS_FILE`. Deployments that do not mount the dedicated
 file continue using the legacy configuration unchanged.
 
+### Optional ROI postprocessing
+
+`SLURM_Run_Workflow.py` can optionally turn imported grayscale label images
+into ROIs on their exact source images. Enable **Create ROIs from label
+images**, import the image results into a Dataset or Screen, and choose Polygon
+or Mask output. BIOMERO records each imported label-image ID together with the
+source-image ID it matched and passes those explicit pairs to the OMERO
+`Labels2Rois` utility script after import.
+
+If every image output in the selected workflow descriptor has subtype `label`,
+all imported images are selected automatically. Mixed or descriptor-less
+workflows require a glob such as `*_cp_masks.tif`; it is matched against result
+paths before result-image renaming. A missing `Labels2Rois` script disables this
+optional step with a warning. Import and workflow completion remain successful,
+and the result images are retained, if the utility is missing or the
+postprocessing run fails.
+
 For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow.py) should provide an easy way to send data to Slurm, run the configured and chosen workflow, poll Slurm until jobs are done (or errors) and retrieve the results when the job is done. This workflow script uses some of the other scripts, like
 
 -  [`_data/SLURM Image Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_Image_Transfer.py): to export your selected images / dataset / screen as ZARR files to a Slurm dir.
@@ -306,4 +323,3 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
-
