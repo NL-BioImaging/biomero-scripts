@@ -197,8 +197,9 @@ def runScript():
             with {constants.IMAGE_EXPORT_SCRIPT}"
         conversion_descr = "Convert from X to Y"
         cleanup_descr = "Cleanup logfile (default) or not? Turn off for debugging."
-        _, _datafiles = slurmClient.get_image_versions_and_data_files(
-            'cellpose')
+        # Input data is shared by all workflows. Do not require a workflow
+        # configured under the legacy "cellpose" key just to list it.
+        _, _datafiles = slurmClient.get_all_image_versions_and_data_files()
         script_name = 'SLURM Remote Conversion'
         script_descr = f'''Use Slurm to convert data on your remote slurm cluster.
             By default BIOMERO only supplies ZARR to TIFF conversion.

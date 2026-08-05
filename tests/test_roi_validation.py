@@ -238,3 +238,12 @@ def test_export_verification_is_not_tied_to_cellpose_config_key():
     assert "get_image_versions_and_data_files('cellpose')" not in source
     assert ("_, available_data_files = "
             "slurmClient.get_all_image_versions_and_data_files()") in source
+
+
+def test_remote_conversion_is_not_tied_to_cellpose_config_key():
+    source = (Path(__file__).parents[1] / "_data" /
+              "SLURM_Remote_Conversion.py").read_text(encoding="utf-8")
+
+    assert "get_image_versions_and_data_files(\n            'cellpose')" not in source
+    assert ("_, _datafiles = "
+            "slurmClient.get_all_image_versions_and_data_files()") in source
