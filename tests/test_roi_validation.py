@@ -229,3 +229,12 @@ def test_plate_and_screen_inputs_expand_to_exact_image_ids():
 
     assert expand(ObjectConnection(), "Plate", [7]) == [101, 102]
     assert expand(ObjectConnection(), "Screen", [8]) == [101, 102]
+
+
+def test_export_verification_is_not_tied_to_cellpose_config_key():
+    source = (Path(__file__).parents[1] / "__workflows" /
+              "SLURM_Run_Workflow.py").read_text(encoding="utf-8")
+
+    assert "get_image_versions_and_data_files('cellpose')" not in source
+    assert ("_, available_data_files = "
+            "slurmClient.get_all_image_versions_and_data_files()") in source

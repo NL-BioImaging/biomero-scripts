@@ -1467,7 +1467,9 @@ def exportImageToSLURM(client: omscripts.client,
         # The export sub-script can report success before a later consumer proves
         # the target folder is actually discoverable on SLURM. Validate that the
         # expected folder is present now so the workflow fails at the transfer step.
-        _, available_data_files = slurmClient.get_image_versions_and_data_files('cellpose')
+        # Refresh the shared data-folder listing without assuming that a
+        # workflow named "cellpose" exists in this deployment.
+        _, available_data_files = slurmClient.get_all_image_versions_and_data_files()
         if zipfile not in available_data_files:
             error_msg = (
                 f"Exported data folder '{zipfile}' is not available on SLURM after transfer. "
