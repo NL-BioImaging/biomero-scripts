@@ -154,13 +154,11 @@ def validate_roi_output_request(client, conn, selected_output,
                         (output.get("sub-type") or output.get("subtype") or [])]
             for output in image_outputs
         )
+        # A label-only descriptor is definitive. Otherwise leave the selector
+        # empty: result import performs conservative best-effort selection per
+        # matched source image instead of asking users to predict filenames.
         if all_images_are_labels:
             pattern = "*"
-        else:
-            raise ValueError(
-                "A label image pattern is required because the selected workflow "
-                "does not describe every image output as subtype 'label'."
-            )
 
     return pattern, None
 
@@ -438,7 +436,7 @@ def runScript():
             omscripts.String(constants.workflow.ROI_LABEL_PATTERN,
                              optional=True,
                              grouping="02.87",
-                             description="Glob matching label result basenames, e.g. *_cp_masks.tif. Optional when every descriptor image output has subtype label.",
+                             description="Optional advanced glob override for label result basenames, e.g. *_cp_masks.tif. Leave empty for automatic best-effort selection.",
                              default=""),
             omscripts.String(constants.workflow.ROI_SHAPE,
                              optional=True,

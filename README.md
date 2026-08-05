@@ -172,12 +172,16 @@ source-image ID it matched and passes those explicit pairs to the OMERO
 `Labels2Rois` utility script after import.
 
 If every image output in the selected workflow descriptor has subtype `label`,
-all imported images are selected automatically. Mixed or descriptor-less
-workflows require a glob such as `*_cp_masks.tif`; it is matched against result
-paths before result-image renaming. A missing `Labels2Rois` script disables this
-optional step with a warning. Import and workflow completion remain successful,
-and the result images are retained, if the utility is missing or the
-postprocessing run fails.
+all imported images are selected automatically. For mixed or descriptor-less
+workflows, BIOMERO groups imported results by their matched source image. A sole
+result is selected directly; with multiple results, label-like names such as
+`mask`, `label`, or `segment` are selected. Ambiguous groups are skipped without
+failing import. The lower-level result scripts retain an optional glob such as
+`*_cp_masks.tif` as an advanced override, matched before result-image renaming.
+A missing `Labels2Rois` script disables this optional step with a warning.
+Import and workflow completion remain successful, and result images are
+retained, if selection is ambiguous, the utility is missing, or postprocessing
+fails.
 
 For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/biomero-scripts/blob/master/__workflows/SLURM_Run_Workflow.py) should provide an easy way to send data to Slurm, run the configured and chosen workflow, poll Slurm until jobs are done (or errors) and retrieve the results when the job is done. This workflow script uses some of the other scripts, like
 

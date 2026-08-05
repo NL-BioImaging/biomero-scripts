@@ -223,7 +223,7 @@ def runScript():
             omscripts.String(constants.workflow.ROI_LABEL_PATTERN,
                              optional=True,
                              grouping="02.87",
-                             description="Glob matching label result basenames, e.g. *_cp_masks.tif",
+                             description="Optional advanced glob override for label result basenames, e.g. *_cp_masks.tif. Leave empty for automatic best-effort selection.",
                              default=""),
             omscripts.String(constants.workflow.ROI_SHAPE,
                              optional=True,

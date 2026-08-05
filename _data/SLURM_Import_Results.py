@@ -120,6 +120,57 @@ def matches_roi_label_output(path, pattern):
             or fnmatch.fnmatchcase(normalized, pattern))
 
 
+ROI_LABEL_NAME_HINTS = ("mask", "label", "segment", "instance", "prediction")
+
+
+def select_roi_image_pairs(image_candidates, pattern=""):
+    """Select label/source pairs explicitly or by conservative best effort."""
+    candidates = []
+    seen = set()
+    for candidate in image_candidates or []:
+        result_id, source_id = int(candidate[0]), int(candidate[1])
+        result_name = str(candidate[2]) if len(candidate) > 2 else ""
+        source_name = str(candidate[3]) if len(candidate) > 3 else ""
+        key = (result_id, source_id)
+        if key not in seen:
+            candidates.append((result_id, source_id, result_name, source_name))
+            seen.add(key)
+
+    if pattern and pattern.strip():
+        return ([(result_id, source_id)
+                 for result_id, source_id, result_name, _ in candidates
+                 if matches_roi_label_output(result_name, pattern)], 0)
+
+    grouped = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate[1], []).append(candidate)
+
+    selected = []
+    ambiguous_sources = 0
+    for source_candidates in grouped.values():
+        if len(source_candidates) == 1:
+            selected.append(source_candidates[0][:2])
+            continue
+
+        hinted = []
+        for candidate in source_candidates:
+            result_name = os.path.basename(candidate[2]).lower()
+            source_stem = os.path.basename(candidate[3]).lower()
+            while os.path.splitext(source_stem)[1] in (
+                    ".tif", ".tiff", ".ome", ".png", ".zarr"):
+                source_stem = os.path.splitext(source_stem)[0]
+            distinguishing_name = result_name.replace(source_stem, "")
+            if any(hint in distinguishing_name
+                   for hint in ROI_LABEL_NAME_HINTS):
+                hinted.append(candidate[:2])
+        if hinted:
+            selected.extend(hinted)
+        else:
+            ambiguous_sources += 1
+
+    return selected, ambiguous_sources
+
+
 def _get_roi_script_capability(script_service):
     matches = [script for script in script_service.getScripts()
                if unwrap(script.getName()) == constants.LABELS_TO_ROIS_SCRIPT]
@@ -130,12 +181,14 @@ def _get_roi_script_capability(script_service):
 
 
 def execute_roi_postprocessing(client, script_service, image_pairs,
-                               roi_shape="Polygon"):
-    pairs = [(int(label_id), int(target_id))
-             for label_id, target_id in image_pairs]
+                               roi_shape="Polygon", roi_label_pattern=""):
+    pairs, ambiguous_sources = select_roi_image_pairs(
+        image_pairs, roi_label_pattern)
     if not pairs:
         return {"status": "skipped",
-                "message": "No imported label images matched the ROI selector."}
+                "message": (
+                    "No unambiguous label images could be selected "
+                    "automatically; imported results were preserved.")}
     if roi_shape not in ("Polygon", "Mask"):
         raise ValueError("ROI shape must be Polygon or Mask")
     capability = _get_roi_script_capability(script_service)
@@ -170,6 +223,9 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
             raise RuntimeError(
                 message if returned_message else
                 f"Labels2Rois failed with OMERO job status {status_id}")
+        if ambiguous_sources:
+            message += (f"; skipped {ambiguous_sources} source image(s) "
+                        "with ambiguous result images")
         return {"status": "completed", "message": message,
                 "pairs": len(pairs)}
     finally:
@@ -2598,15 +2654,14 @@ def add_metadata_to_imported_images(
                                 if os.path.basename(current_path) == img.getName():
                                     match_name = pre_rename
                                     break
-                        if (roi_pairs is not None
-                                and matches_roi_label_output(
-                                    match_name, roi_label_pattern)):
-                            roi_pairs.append(
-                                (int(img.getId()), int(source_img.getId())))
+                        if roi_pairs is not None:
+                            roi_pairs.append((
+                                int(img.getId()), int(source_img.getId()),
+                                match_name, source_img.getName()))
                             logger.info(
-                                f"Selected imported label image {img.getId()} for "
-                                f"ROI target {source_img.getId()} using pattern "
-                                f"'{roi_label_pattern}'")
+                                f"Queued imported result image {img.getId()} for "
+                                f"automatic ROI selection against source "
+                                f"{source_img.getId()}")
                         source_tag = f"source: {source_img.getName()} (id: {source_img.getId()})"
                         existing_desc = img.getDescription() or ""
                         if source_tag not in existing_desc:
@@ -3996,7 +4051,7 @@ def runScript() -> None:
             scripts.String(constants.results.ROI_LABEL_PATTERN,
                            optional=True,
                            grouping="09.6",
-                           description="Glob matching label result basenames, for example *_cp_masks.tif",
+                           description="Optional advanced glob override for label result basenames. Leave empty for automatic best-effort selection.",
                            default=""),
             scripts.String(constants.results.ROI_SHAPE,
                            optional=True,
@@ -4390,6 +4445,8 @@ def runScript() -> None:
                         roi_pairs,
                         unwrap(client.getInput(constants.results.ROI_SHAPE))
                         or "Polygon",
+                        unwrap(client.getInput(
+                            constants.results.ROI_LABEL_PATTERN)) or "",
                     )
                     if roi_result["status"] == "completed":
                         message += f"\nROI postprocessing: {roi_result['message']}"

@@ -1,4 +1,6 @@
 import ast
+import fnmatch
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,7 +120,7 @@ def test_all_label_outputs_get_automatic_selector():
     assert warning is None
 
 
-def test_mixed_outputs_require_user_pattern():
+def test_mixed_outputs_use_automatic_best_effort_selector():
     selected = {
         WF.OUTPUT_CREATE_ROIS: True,
         WF.OUTPUT_NEW_DATASET: True,
@@ -128,9 +130,68 @@ def test_mixed_outputs_require_user_pattern():
         {"type": "image", "subtype": ["grayscale"]},
     ]}]
 
-    with pytest.raises(ValueError, match="label image pattern"):
-        validate(Client({WF.ROI_SHAPE: "Mask"}),
-                 Connection([Script(7)]), selected, descriptors)
+    pattern, warning = validate(
+        Client({WF.ROI_SHAPE: "Mask"}),
+        Connection([Script(7)]), selected, descriptors)
+
+    assert pattern == ""
+    assert warning is None
+
+
+def _load_result_selector(script_name):
+    path = Path(__file__).parents[1] / "_data" / script_name
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    wanted_functions = {"matches_roi_label_output", "select_roi_image_pairs"}
+    nodes = [
+        node for node in tree.body
+        if ((isinstance(node, ast.FunctionDef)
+             and node.name in wanted_functions)
+            or (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name)
+                        and target.id == "ROI_LABEL_NAME_HINTS"
+                        for target in node.targets)))
+    ]
+    namespace = {"fnmatch": fnmatch, "os": os}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"),
+         namespace)
+    return namespace["select_roi_image_pairs"]
+
+
+@pytest.mark.parametrize("script_name", [
+    "SLURM_Get_Results.py",
+    "SLURM_Import_Results.py",
+])
+def test_auto_selector_uses_single_results_and_label_name_hints(script_name):
+    select = _load_result_selector(script_name)
+    candidates = [
+        (11, 1, "cellA_result.tif", "cellA.tif"),
+        (21, 2, "cellB_probability.tif", "cellB.tif"),
+        (22, 2, "cellB_cp_masks.tif", "cellB.tif"),
+        (31, 3, "cellC_first.tif", "cellC.tif"),
+        (32, 3, "cellC_second.tif", "cellC.tif"),
+    ]
+
+    pairs, ambiguous = select(candidates)
+
+    assert pairs == [(11, 1), (22, 2)]
+    assert ambiguous == 1
+
+
+@pytest.mark.parametrize("script_name", [
+    "SLURM_Get_Results.py",
+    "SLURM_Import_Results.py",
+])
+def test_advanced_glob_overrides_automatic_selection(script_name):
+    select = _load_result_selector(script_name)
+    candidates = [
+        (21, 2, "cellB_probability.tif", "cellB.tif"),
+        (22, 2, "cellB_cp_masks.tif", "cellB.tif"),
+    ]
+
+    pairs, ambiguous = select(candidates, "*_probability.tif")
+
+    assert pairs == [(21, 2)]
+    assert ambiguous == 0
 
 
 def test_plate_and_screen_inputs_expand_to_exact_image_ids():
