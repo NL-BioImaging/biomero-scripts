@@ -11,7 +11,7 @@ class Value:
 
 
 class Script:
-    def __init__(self, script_id, name="Labels2Rois"):
+    def __init__(self, script_id, name="Labels2Rois.py"):
         self.id = Value(script_id)
         self.name = name
 
@@ -65,7 +65,7 @@ def _load_validation_functions():
     namespace = {
         "BlitzGateway": object,
         "constants": SimpleNamespace(
-            LABELS_TO_ROIS_SCRIPT="Labels2Rois",
+            LABELS_TO_ROIS_SCRIPT="Labels2Rois.py",
             workflow=workflow,
             transfer=SimpleNamespace(
                 DATA_TYPE_IMAGE="Image",
