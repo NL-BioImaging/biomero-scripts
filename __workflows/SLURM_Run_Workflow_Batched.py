@@ -230,7 +230,12 @@ def runScript():
                              grouping="02.88",
                              description="OMERO ROI representation",
                              values=[rstring("Polygon"), rstring("Mask")],
-                             default="Polygon")
+                             default="Polygon"),
+            omscripts.Bool(constants.workflow.ROI_DELETE_LABEL_IMAGES,
+                           optional=True,
+                           grouping="02.89",
+                           description="Delete converted label images from OMERO after successful ROI creation. Workflow files remain in result storage.",
+                           default=False)
         ]
         # Generate script parameters for all our workflows
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()

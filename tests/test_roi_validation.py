@@ -247,3 +247,15 @@ def test_remote_conversion_is_not_tied_to_cellpose_config_key():
     assert "get_image_versions_and_data_files(\n            'cellpose')" not in source
     assert ("_, _datafiles = "
             "slurmClient.get_all_image_versions_and_data_files()") in source
+
+
+@pytest.mark.parametrize("script_name", [
+    "SLURM_Get_Results.py",
+    "SLURM_Import_Results.py",
+])
+def test_roi_postprocessing_forwards_label_image_cleanup(script_name):
+    source = (Path(__file__).parents[1] / "_data" / script_name).read_text(
+        encoding="utf-8")
+
+    assert "delete_label_images=False" in source
+    assert '"Delete_Label_Image": rbool(delete_label_images)' in source

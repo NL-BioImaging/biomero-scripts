@@ -444,6 +444,11 @@ def runScript():
                              description="OMERO ROI representation",
                              values=[rstring("Polygon"), rstring("Mask")],
                              default="Polygon"),
+            omscripts.Bool(constants.workflow.ROI_DELETE_LABEL_IMAGES,
+                           optional=True,
+                           grouping="02.89",
+                           description="Delete converted label images from OMERO after successful ROI creation. Workflow files remain in result storage.",
+                           default=False),
             omscripts.Bool(constants.CLEANUP,
                            optional=True,
                            grouping="02.9", 
@@ -1851,6 +1856,10 @@ def importResultsToOmero(client: omscripts.client,
         inputs[constants.results.ROI_SHAPE] = (
             client.getInput(constants.workflow.ROI_SHAPE)
             or rstring("Polygon"))
+        delete_label_images = bool(unwrap(client.getInput(
+            constants.workflow.ROI_DELETE_LABEL_IMAGES)))
+        if delete_label_images:
+            inputs[constants.results.ROI_DELETE_LABEL_IMAGES] = rbool(True)
         try:
             target_image_ids = get_roi_target_image_ids(
                 conn,

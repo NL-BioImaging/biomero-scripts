@@ -171,6 +171,12 @@ or Mask output. BIOMERO records each imported label-image ID together with the
 source-image ID it matched and passes those explicit pairs to the OMERO
 `Labels2Rois` utility script after import.
 
+Imported label images are retained in OMERO by default. The optional **Delete
+from OMERO after ROI creation** setting forwards the native `Labels2Rois`
+cleanup flag, which deletes each imported label image only after its ROI
+conversion succeeds. This removes only the OMERO image; workflow result files
+in remote storage (including importer `.analyzed` storage) are preserved.
+
 If every image output in the selected workflow descriptor has subtype `label`,
 all imported images are selected automatically. For mixed or descriptor-less
 workflows, BIOMERO groups imported results by their matched source image. A sole

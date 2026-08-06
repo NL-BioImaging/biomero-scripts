@@ -169,7 +169,8 @@ def _get_roi_script_capability(script_service):
 
 
 def execute_roi_postprocessing(client, script_service, image_pairs,
-                               roi_shape="Polygon", roi_label_pattern=""):
+                               roi_shape="Polygon", roi_label_pattern="",
+                               delete_label_images=False):
     """Run Labels2Rois with exact imported-label/source-image ID pairs."""
     pairs, ambiguous_sources = select_roi_image_pairs(
         image_pairs, roi_label_pattern)
@@ -191,7 +192,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
         "Clear_Existing_ROIs": rbool(False),
-        "Delete_Label_Image": rbool(False),
+        "Delete_Label_Image": rbool(delete_label_images),
     }
     process = script_service.runScript(
         capability["script_id"], roi_inputs, None)
@@ -2096,6 +2097,11 @@ def runScript():
                            description="OMERO ROI shape representation",
                            values=[rstring("Polygon"), rstring("Mask")],
                            default="Polygon"),
+            scripts.Bool(constants.results.ROI_DELETE_LABEL_IMAGES,
+                         optional=True,
+                         grouping="08.8",
+                         description="Delete converted label images from OMERO after successful ROI creation. Workflow files remain in result storage.",
+                         default=False),
             scripts.Bool("Cleanup?",
                          optional=True,
                          grouping="09",
@@ -2348,6 +2354,9 @@ def runScript():
                                         unwrap(client.getInput(
                                             constants.results.ROI_LABEL_PATTERN))
                                         or "",
+                                        unwrap(client.getInput(
+                                            constants.results.ROI_DELETE_LABEL_IMAGES))
+                                        or False,
                                     )
                                     if roi_result["status"] == "completed":
                                         message += f"\nROI postprocessing: {roi_result['message']}"
