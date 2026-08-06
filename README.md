@@ -171,6 +171,12 @@ or Mask output. BIOMERO records each imported label-image ID together with the
 source-image ID it matched and passes those explicit pairs to the OMERO
 `Labels2Rois` utility script after import.
 
+Created ROI names use `workflow_name__workflow_uuid__label_value`, making them
+filterable by algorithm or by an exact workflow run. The optional **Clear
+existing ROIs on original images** setting forwards the native clear behavior;
+its case-sensitive name filter limits deletion, while an empty filter clears
+all existing ROIs on each original image. Clearing is disabled by default.
+
 Imported label images are retained in OMERO by default. The optional **Delete
 from OMERO after ROI creation** setting forwards the native `Labels2Rois`
 cleanup flag, which deletes each imported label image only after its ROI

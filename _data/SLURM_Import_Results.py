@@ -182,7 +182,10 @@ def _get_roi_script_capability(script_service):
 
 def execute_roi_postprocessing(client, script_service, image_pairs,
                                roi_shape="Polygon", roi_label_pattern="",
-                               delete_label_images=False):
+                               delete_label_images=False,
+                               roi_name_prefix="",
+                               clear_existing_rois=False,
+                               clear_roi_filter=""):
     pairs, ambiguous_sources = select_roi_image_pairs(
         image_pairs, roi_label_pattern)
     if not pairs:
@@ -202,7 +205,9 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         "Label_Image_IDs": rlist([rlong(label) for label, _ in pairs]),
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
-        "Clear_Existing_ROIs": rbool(False),
+        "ROI_Name_Prefix": rstring(roi_name_prefix),
+        "Clear_Existing_ROIs": rbool(clear_existing_rois),
+        "Clear_ROI_Filter": rstring(clear_roi_filter),
         "Delete_Label_Image": rbool(delete_label_images),
     }
     process = script_service.runScript(
@@ -4065,6 +4070,21 @@ def runScript() -> None:
                          grouping="09.8",
                          description="Delete converted label images from OMERO after successful ROI creation. Workflow files remain in result storage.",
                          default=False),
+            scripts.String(constants.results.ROI_NAME_PREFIX,
+                           optional=True,
+                           grouping="09.9",
+                           description="Optional provenance prefix for created ROI names. Run Workflow supplies workflow_name__workflow_uuid automatically.",
+                           default=""),
+            scripts.Bool(constants.results.ROI_CLEAR_EXISTING,
+                         optional=True,
+                         grouping="09.10",
+                         description="Delete existing ROIs from the original images before adding new ROIs.",
+                         default=False),
+            scripts.String(constants.results.ROI_CLEAR_FILTER,
+                           optional=True,
+                           grouping="09.11",
+                           description="Optional case-sensitive ROI name filter. Empty deletes all existing ROIs when clearing is enabled.",
+                           default=""),
             scripts.Bool(constants.CLEANUP,
                          optional=True,
                          grouping="10",
@@ -4453,9 +4473,15 @@ def runScript() -> None:
                         or "Polygon",
                         unwrap(client.getInput(
                             constants.results.ROI_LABEL_PATTERN)) or "",
-                        unwrap(client.getInput(
+                        delete_label_images=(unwrap(client.getInput(
                             constants.results.ROI_DELETE_LABEL_IMAGES))
-                        or False,
+                            or False),
+                        roi_name_prefix=(unwrap(client.getInput(
+                            constants.results.ROI_NAME_PREFIX)) or ""),
+                        clear_existing_rois=(unwrap(client.getInput(
+                            constants.results.ROI_CLEAR_EXISTING)) or False),
+                        clear_roi_filter=(unwrap(client.getInput(
+                            constants.results.ROI_CLEAR_FILTER)) or ""),
                     )
                     if roi_result["status"] == "completed":
                         message += f"\nROI postprocessing: {roi_result['message']}"

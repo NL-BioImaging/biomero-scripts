@@ -259,3 +259,29 @@ def test_roi_postprocessing_forwards_label_image_cleanup(script_name):
 
     assert "delete_label_images=False" in source
     assert '"Delete_Label_Image": rbool(delete_label_images)' in source
+
+
+@pytest.mark.parametrize("script_name", [
+    "SLURM_Get_Results.py",
+    "SLURM_Import_Results.py",
+])
+def test_roi_postprocessing_forwards_provenance_and_clear_options(script_name):
+    source = (Path(__file__).parents[1] / "_data" / script_name).read_text(
+        encoding="utf-8")
+
+    assert 'roi_name_prefix=""' in source
+    assert "clear_existing_rois=False" in source
+    assert 'clear_roi_filter=""' in source
+    assert '"ROI_Name_Prefix": rstring(roi_name_prefix)' in source
+    assert '"Clear_Existing_ROIs": rbool(clear_existing_rois)' in source
+    assert '"Clear_ROI_Filter": rstring(clear_roi_filter)' in source
+
+
+def test_run_workflow_builds_filterable_roi_provenance_prefix():
+    source = (Path(__file__).parents[1] / "__workflows" /
+              "SLURM_Run_Workflow.py").read_text(encoding="utf-8")
+
+    assert 'f"{workflow_name}__{wf_id}"' in source
+    assert "constants.results.ROI_NAME_PREFIX" in source
+    assert "constants.workflow.ROI_CLEAR_EXISTING" in source
+    assert "constants.workflow.ROI_CLEAR_FILTER" in source

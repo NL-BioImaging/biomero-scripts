@@ -449,6 +449,16 @@ def runScript():
                            grouping="02.89",
                            description="Delete converted label images from OMERO after successful ROI creation. Workflow files remain in result storage.",
                            default=False),
+            omscripts.Bool(constants.workflow.ROI_CLEAR_EXISTING,
+                           optional=True,
+                           grouping="02.90",
+                           description="Delete existing ROIs from the original images before adding this workflow's ROIs.",
+                           default=False),
+            omscripts.String(constants.workflow.ROI_CLEAR_FILTER,
+                             optional=True,
+                             grouping="02.91",
+                             description="Optional case-sensitive text filter for ROI names to delete. Empty deletes all existing ROIs when clearing is enabled.",
+                             default=""),
             omscripts.Bool(constants.CLEANUP,
                            optional=True,
                            grouping="02.9", 
@@ -789,10 +799,16 @@ def runScript():
                             log_msg = f"Job {slurm_job_id} is COMPLETED."
                             slurmClient.workflowTracker.complete_task(task_id,
                                                                       log_msg)
+                            completed_workflow_name = next(
+                                name for name, job_id
+                                in slurm_job_ids.items()
+                                if job_id == slurm_job_id)
                             rv_imp = importResultsToOmero(
                                 client, conn, slurmClient,
                                 slurm_job_id, selected_output,
-                                wf_id, roi_label_pattern=roi_label_pattern)
+                                wf_id,
+                                roi_label_pattern=roi_label_pattern,
+                                workflow_name=completed_workflow_name)
 
                             if rv_imp:
                                 try:
@@ -1603,7 +1619,8 @@ def importResultsToOmero(client: omscripts.client,
                          slurm_job_id: int,
                          selected_output: list,
                          wf_id: UUID,
-                         roi_label_pattern: str = "") -> str:
+                         roi_label_pattern: str = "",
+                         workflow_name: str = "workflow") -> str:
     """
     Import workflow results from SLURM back into OMERO.
 
@@ -1856,6 +1873,16 @@ def importResultsToOmero(client: omscripts.client,
         inputs[constants.results.ROI_SHAPE] = (
             client.getInput(constants.workflow.ROI_SHAPE)
             or rstring("Polygon"))
+        inputs[constants.results.ROI_NAME_PREFIX] = rstring(
+            f"{workflow_name}__{wf_id}")
+        clear_existing_rois = bool(unwrap(client.getInput(
+            constants.workflow.ROI_CLEAR_EXISTING)))
+        clear_roi_filter = (unwrap(client.getInput(
+            constants.workflow.ROI_CLEAR_FILTER)) or "").strip()
+        inputs[constants.results.ROI_CLEAR_EXISTING] = rbool(
+            clear_existing_rois)
+        inputs[constants.results.ROI_CLEAR_FILTER] = rstring(
+            clear_roi_filter if clear_existing_rois else "")
         delete_label_images = bool(unwrap(client.getInput(
             constants.workflow.ROI_DELETE_LABEL_IMAGES)))
         if delete_label_images:

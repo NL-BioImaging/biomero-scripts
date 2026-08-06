@@ -235,7 +235,17 @@ def runScript():
                            optional=True,
                            grouping="02.89",
                            description="Delete converted label images from OMERO after successful ROI creation. Workflow files remain in result storage.",
-                           default=False)
+                           default=False),
+            omscripts.Bool(constants.workflow.ROI_CLEAR_EXISTING,
+                           optional=True,
+                           grouping="02.90",
+                           description="Delete existing ROIs from the original images before adding this workflow's ROIs.",
+                           default=False),
+            omscripts.String(constants.workflow.ROI_CLEAR_FILTER,
+                             optional=True,
+                             grouping="02.91",
+                             description="Optional case-sensitive text filter for ROI names to delete. Empty deletes all existing ROIs when clearing is enabled.",
+                             default="")
         ]
         # Generate script parameters for all our workflows
         (wf_versions, _) = slurmClient.get_all_image_versions_and_data_files()
