@@ -1548,15 +1548,16 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
     proc = svc.runScript(script_id, inputs, None)
     try:
         cb = omero.scripts.ProcessCallbackI(client, proc)
-        # Snapshot position once so we only process NEW events each iteration
-        next_position = 1
+        # Snapshot the last processed notification ID. pull_and_process() treats
+        # ``start`` as exclusive, so passing this ID processes the next event.
+        next_position = 0
         if slurmClient is not None and slurmClient.wfProgress is not None:
             try:
                 next_position = slurmClient.wfProgress.recorder.max_tracking_id(
                     application_name='WorkflowTracker'
-                ) + 1
+                ) or 0
             except Exception:
-                next_position = 1
+                next_position = 0
         while not cb.block(1000):  # ms.
             if slurmClient is not None and slurmClient.wfProgress is not None:
                 try:
@@ -1569,9 +1570,9 @@ def runOMEROScript(client: omscripts.client, svc, script_id, inputs,
                     try:
                         new_position = slurmClient.wfProgress.recorder.max_tracking_id(
                             application_name='WorkflowTracker'
-                        ) + 1
+                        ) or 0
                         if new_position > next_position:
-                            logger.debug(f"Import subscript progress: picked up {new_position - next_position} new workflow event(s) (events {next_position}-{new_position - 1})")
+                            logger.debug(f"Import subscript progress: picked up {new_position - next_position} new workflow event(s) (events {next_position + 1}-{new_position})")
                         next_position = new_position
                     except Exception:
                         pass

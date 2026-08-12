@@ -300,3 +300,74 @@ def test_run_workflow_builds_filterable_roi_provenance_prefix():
     assert "constants.workflow.ROI_CLEAR_FILTER" in source
     assert "constants.workflow.ROI_COLOR" in source
     assert "constants.results.ROI_COLOR" in source
+
+
+def _load_run_omero_script():
+    path = (Path(__file__).parents[1] / "__workflows" /
+            "SLURM_Run_Workflow.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "runOMEROScript"
+    )
+    namespace = {
+        "omscripts": SimpleNamespace(client=object),
+        "omero": SimpleNamespace(scripts=SimpleNamespace()),
+        "logger": SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path),
+                 "exec"), namespace)
+    return namespace
+
+
+def test_import_progress_poll_uses_last_processed_event_as_exclusive_start():
+    namespace = _load_run_omero_script()
+
+    class Process:
+        def getResults(self, _timeout):
+            return {"Message": "done"}
+
+        def getJob(self):
+            return "job"
+
+        def close(self, _detach):
+            pass
+
+    process = Process()
+
+    class Service:
+        def runScript(self, _script_id, _inputs, _wait):
+            return process
+
+    class Callback:
+        def __init__(self, _client, _process):
+            self.polls = iter([False, False, True])
+
+        def block(self, _milliseconds):
+            return next(self.polls)
+
+        def close(self):
+            pass
+
+    namespace["omero"].scripts.ProcessCallbackI = Callback
+
+    class Recorder:
+        def __init__(self):
+            self.positions = iter([10, 11, 12])
+
+        def max_tracking_id(self, application_name):
+            assert application_name == "WorkflowTracker"
+            return next(self.positions)
+
+    starts = []
+    slurm_client = SimpleNamespace(
+        wfProgress=SimpleNamespace(recorder=Recorder()),
+        bring_listener_uptodate=lambda _listener, start: starts.append(start),
+    )
+
+    results, job = namespace["runOMEROScript"](
+        object(), Service(), 7, {}, slurmClient=slurm_client)
+
+    assert starts == [10, 11]
+    assert results == {"Message": "done"}
+    assert job == "job"
