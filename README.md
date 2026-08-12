@@ -172,7 +172,11 @@ source-image ID it matched and passes those explicit pairs to the OMERO
 `Labels2Rois` utility script after import.
 
 Created ROI names use `workflow_name__workflow_uuid__label_value`, making them
-filterable by algorithm or by an exact workflow run. The optional **Clear
+filterable by algorithm or by an exact workflow run. By default, the workflow
+UUID also selects a deterministic color from a curated palette, so separate
+ROI runs are visually distinct. An optional `#RRGGBB` override can be supplied
+by clients such as OMERO.biomero. Labels2Rois applies that color as a
+translucent Mask fill or as a Polygon fill and outline. The optional **Clear
 existing ROIs on original images** setting forwards the native clear behavior;
 its case-sensitive name filter limits deletion, while an empty filter clears
 all existing ROIs on each original image. Clearing is disabled by default.

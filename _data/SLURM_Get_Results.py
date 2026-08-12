@@ -88,7 +88,6 @@ OBJECT_TYPES = (
 
 logger = logging.getLogger(__name__)
 
-
 # OMERO processors download only the selected script into an isolated working
 # directory. Keep this small integration self-contained instead of importing a
 # sibling module which would be absent on a remote worker.
@@ -172,6 +171,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
                                roi_shape="Polygon", roi_label_pattern="",
                                delete_label_images=False,
                                roi_name_prefix="",
+                               roi_color="",
                                clear_existing_rois=False,
                                clear_roi_filter=""):
     """Run Labels2Rois with exact imported-label/source-image ID pairs."""
@@ -195,6 +195,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
         "ROI_Name_Prefix": rstring(roi_name_prefix),
+        "ROI_Color": rstring(roi_color),
         "Clear_Existing_ROIs": rbool(clear_existing_rois),
         "Clear_ROI_Filter": rstring(clear_roi_filter),
         "Delete_Label_Image": rbool(delete_label_images),
@@ -2112,6 +2113,11 @@ def runScript():
                            grouping="08.9",
                            description="Optional provenance prefix for created ROI names. Run Workflow supplies workflow_name__workflow_uuid automatically.",
                            default=""),
+            scripts.String(constants.results.ROI_COLOR,
+                           optional=True,
+                           grouping="08.95",
+                           description="Optional #RRGGBB ROI color override. Leave empty to derive a stable color from the workflow UUID.",
+                           default=""),
             scripts.Bool(constants.results.ROI_CLEAR_EXISTING,
                          optional=True,
                          grouping="08.10",
@@ -2380,6 +2386,10 @@ def runScript():
                                         roi_name_prefix=(unwrap(
                                             client.getInput(constants.results.ROI_NAME_PREFIX))
                                             or ""),
+                                        roi_color=constants.resolve_workflow_color(
+                                            unwrap(client.getInput(
+                                                constants.results.ROI_COLOR)),
+                                            wf_id),
                                         clear_existing_rois=(unwrap(
                                             client.getInput(constants.results.ROI_CLEAR_EXISTING))
                                             or False),

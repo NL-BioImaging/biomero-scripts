@@ -444,6 +444,11 @@ def runScript():
                              description="OMERO ROI representation",
                              values=[rstring("Polygon"), rstring("Mask")],
                              default="Polygon"),
+            omscripts.String(constants.workflow.ROI_COLOR,
+                             optional=True,
+                             grouping="02.885",
+                             description="Optional #RRGGBB ROI color override. Leave empty to derive a stable color from the workflow run UUID.",
+                             default=""),
             omscripts.Bool(constants.workflow.ROI_DELETE_LABEL_IMAGES,
                            optional=True,
                            grouping="02.89",
@@ -1875,6 +1880,10 @@ def importResultsToOmero(client: omscripts.client,
             or rstring("Polygon"))
         inputs[constants.results.ROI_NAME_PREFIX] = rstring(
             f"{workflow_name}__{wf_id}")
+        roi_color = constants.resolve_workflow_color(
+            unwrap(client.getInput(constants.workflow.ROI_COLOR)), wf_id)
+        inputs[constants.results.ROI_COLOR] = rstring(roi_color)
+        logger.info(f"Using ROI color {roi_color} for workflow {wf_id}")
         clear_existing_rois = bool(unwrap(client.getInput(
             constants.workflow.ROI_CLEAR_EXISTING)))
         clear_roi_filter = (unwrap(client.getInput(

@@ -157,6 +157,17 @@ def _load_result_selector(script_name):
     return namespace["select_roi_image_pairs"]
 
 
+@pytest.mark.parametrize("path", [
+    Path(__file__).parents[1] / "__workflows" / "SLURM_Run_Workflow.py",
+    Path(__file__).parents[1] / "_data" / "SLURM_Get_Results.py",
+    Path(__file__).parents[1] / "_data" / "SLURM_Import_Results.py",
+])
+def test_roi_color_uses_shared_workflow_color_resolver(path):
+    source = path.read_text(encoding="utf-8")
+    assert "constants.resolve_workflow_color(" in source
+    assert "QUALITATIVE_COLOR_SCHEME" not in source
+
+
 @pytest.mark.parametrize("script_name", [
     "SLURM_Get_Results.py",
     "SLURM_Import_Results.py",
@@ -270,9 +281,11 @@ def test_roi_postprocessing_forwards_provenance_and_clear_options(script_name):
         encoding="utf-8")
 
     assert 'roi_name_prefix=""' in source
+    assert 'roi_color=""' in source
     assert "clear_existing_rois=False" in source
     assert 'clear_roi_filter=""' in source
     assert '"ROI_Name_Prefix": rstring(roi_name_prefix)' in source
+    assert '"ROI_Color": rstring(roi_color)' in source
     assert '"Clear_Existing_ROIs": rbool(clear_existing_rois)' in source
     assert '"Clear_ROI_Filter": rstring(clear_roi_filter)' in source
 
@@ -285,3 +298,5 @@ def test_run_workflow_builds_filterable_roi_provenance_prefix():
     assert "constants.results.ROI_NAME_PREFIX" in source
     assert "constants.workflow.ROI_CLEAR_EXISTING" in source
     assert "constants.workflow.ROI_CLEAR_FILTER" in source
+    assert "constants.workflow.ROI_COLOR" in source
+    assert "constants.results.ROI_COLOR" in source
