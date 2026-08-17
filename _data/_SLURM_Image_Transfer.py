@@ -76,6 +76,13 @@ from biomero.zarr_contracts import (
     CanonicalInput,
     CanonicalZarrSource,
 )
+from biomero_importer.utils.canonical_promotion import (
+    CanonicalPromotionService,
+)
+from biomero_importer.utils.pixel_identity import (
+    IsccBioIdentityProvider,
+    read_zarr_v2_semantic_guard,
+)
 import logging
 import sys
 
@@ -192,6 +199,23 @@ def discover_canonical_inputs(objects, object_type):
     return sources, tuple(canonical_inputs) if complete else ()
 
 
+def canonical_inputs_from_sources(objects, object_type, sources):
+    """Build an ordered all-or-nothing snapshot after export-side promotion."""
+    inputs = []
+    for ordinal, obj in enumerate(objects):
+        object_id = int(obj.getId())
+        source = sources.get(object_id)
+        if source is None:
+            return ()
+        inputs.append(CanonicalInput(
+            ordinal=ordinal,
+            selected_object_type=object_type,
+            selected_object_id=object_id,
+            source=source,
+        ))
+    return tuple(inputs)
+
+
 def load_storage_roots(config_file=None):
     """Load logical canonical storage roots from BIOMERO's shared config."""
     config_path = Path(config_file or BIOMERO_CONFIG_FILE)
@@ -298,6 +322,130 @@ def attach_canonical_source(
         ns=CANONICAL_SOURCE_NAMESPACE,
         across_groups=False,
     )
+
+
+def validate_omero_image_semantics(image, guard):
+    """Require exported NGFF dimensions and dtype to match the OMERO Image."""
+    sizes = {
+        "t": int(image.getSizeT()),
+        "c": int(image.getSizeC()),
+        "z": int(image.getSizeZ()),
+        "y": int(image.getSizeY()),
+        "x": int(image.getSizeX()),
+    }
+    try:
+        expected_shape = tuple(sizes[axis.lower()] for axis in guard.axes)
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported NGFF axis for OMERO Image {image.getId()}: {exc.args[0]}"
+        ) from exc
+    if expected_shape != tuple(guard.shape):
+        raise ValueError(
+            f"Exported NGFF shape {guard.shape} does not match OMERO Image "
+            f"{image.getId()} shape {expected_shape}"
+        )
+
+    pixels_type = image.getPrimaryPixels().getPixelsType().getValue()
+    pixels_type = str(getattr(pixels_type, "val", pixels_type)).lower()
+    dtype_names = {
+        "bit": "bool",
+        "uint8": "uint8",
+        "int8": "int8",
+        "uint16": "uint16",
+        "int16": "int16",
+        "uint32": "uint32",
+        "int32": "int32",
+        "float": "float32",
+        "double": "float64",
+        "complex": "complex64",
+        "double-complex": "complex128",
+    }
+    expected_dtype = dtype_names.get(pixels_type)
+    if expected_dtype is None or expected_dtype != guard.dtype:
+        raise ValueError(
+            f"Exported NGFF pixel type {guard.dtype} does not match OMERO "
+            f"Image {image.getId()} pixel type {pixels_type}"
+        )
+
+
+def promote_exported_image_zarr(
+    conn,
+    image,
+    export_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    semantic_guard_reader=None,
+    promotion_service_factory=None,
+    annotation_writer=None,
+):
+    """Verify a fresh Image export, commit it, annotate it, and restore a task copy."""
+    storage_id, storage_root = select_object_storage_root(
+        image, storage_roots)
+    source_directory = derive_canonical_source_directory(image, storage_root)
+    semantic_guard_reader = (
+        semantic_guard_reader or read_zarr_v2_semantic_guard
+    )
+    guard = semantic_guard_reader(export_path, ".")
+    validate_omero_image_semantics(image, guard)
+    guard_values = {
+        "node_path": ".",
+        "role": "image",
+        "shape": guard.shape,
+        "dtype": guard.dtype,
+        "axes": guard.axes,
+        "coordinate_transformations": guard.coordinate_transformations,
+    }
+    identity_provider = identity_provider or IsccBioIdentityProvider()
+    original_identity = identity_provider.generate_omero(
+        conn,
+        image_id=int(image.getId()),
+        **guard_values,
+    )
+    exported_identity = identity_provider.generate(
+        Path(export_path),
+        **guard_values,
+    )
+
+    promotion_service_factory = (
+        promotion_service_factory or CanonicalPromotionService
+    )
+    promotion = promotion_service_factory(
+        storage_root_id=storage_id,
+        storage_root=storage_root,
+    )
+    result = promotion.promote(
+        export_path,
+        source_directory=source_directory,
+        source_object_type="Image",
+        source_object_id=int(image.getId()),
+        source_generation=source_generation,
+        node_path=".",
+        original_identity=original_identity,
+        exported_identity=exported_identity,
+        pixel_identity_origin="omero-pixels",
+    )
+    attach_canonical_source(
+        conn,
+        image,
+        "Image",
+        result.source,
+        annotation_writer=annotation_writer,
+    )
+
+    export_path = Path(export_path)
+    if not export_path.exists():
+        shutil.copytree(
+            result.path,
+            export_path,
+            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+        )
+    log(
+        " Verified canonical Image %s generation %s at %s"
+        % (image.getId(), source_generation, result.path)
+    )
+    return result.source
 
 
 def resolve_managed_source_path(source, storage_roots):
@@ -533,9 +681,16 @@ def save_plate_as_zarr(
     # (1) find out the plate's file
     # (2) (a) if not zarr: subprocess raw on that file
     # (2) (b) if zarr: copy/scp directly
-    save_as_zarr(conn, suuid, plate, folder_name,
-                 constants.transfer.DATA_TYPE_PLATE,
-                 ome_zarr_version, canonical_source, storage_roots)
+    return save_as_zarr(
+        conn,
+        suuid,
+        plate,
+        folder_name,
+        constants.transfer.DATA_TYPE_PLATE,
+        ome_zarr_version,
+        canonical_source,
+        storage_roots,
+    )
 
 
 def save_image_as_zarr(
@@ -556,9 +711,16 @@ def save_image_as_zarr(
         folder_name (str, optional): Target folder for export.
         ome_zarr_version (str, optional): OMERO version for export.
     """
-    save_as_zarr(conn, suuid, image, folder_name,
-                 constants.transfer.DATA_TYPE_IMAGE,
-                 ome_zarr_version, canonical_source, storage_roots)
+    return save_as_zarr(
+        conn,
+        suuid,
+        image,
+        folder_name,
+        constants.transfer.DATA_TYPE_IMAGE,
+        ome_zarr_version,
+        canonical_source,
+        storage_roots,
+    )
     
 
 def build_zarr_export_error(object, data_type, stderr):
@@ -627,7 +789,12 @@ def save_as_zarr(
         object, canonical_source, storage_roots or {})
     if source_path is not None:
         log(" Copying file as: %s" % img_name)
-        shutil.copytree(source_path, img_name, dirs_exist_ok=True)
+        shutil.copytree(
+            source_path,
+            img_name,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+        )
     else:
         log("  Saving file as: %s" % img_name)
         curr_dir = os.getcwd()
@@ -687,7 +854,17 @@ def save_as_zarr(
             )
             logger.error(f"Critical error: {error_msg}")
             raise Exception(error_msg)
-    return  # shortcut
+        if (
+            data_type == constants.transfer.DATA_TYPE_IMAGE
+            and canonical_source is None
+        ):
+            canonical_source = promote_exported_image_zarr(
+                conn,
+                object,
+                img_name,
+                storage_roots or {},
+            )
+    return canonical_source
 
 
 def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
@@ -976,7 +1153,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_OMEZARR:
-            save_image_as_zarr(
+            promoted_source = save_image_as_zarr(
                 conn,
                 suuid,
                 img,
@@ -985,6 +1162,8 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 canonical_source=canonical_sources.get(int(img.getId())),
                 storage_roots=storage_roots,
             )
+            if promoted_source is not None:
+                canonical_sources[int(img.getId())] = promoted_source
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -1043,6 +1222,13 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
 
         # write log for exported images (not needed for ome-tiff)
         write_logfile(exp_dir)
+
+    if format == constants.transfer.FORMAT_OMEZARR:
+        canonical_inputs = canonical_inputs_from_sources(
+            export_objects,
+            canonical_object_type,
+            canonical_sources,
+        )
 
     if len(os.listdir(exp_dir)) == 0:
         error_msg = "No files exported. Check export settings and data availability."

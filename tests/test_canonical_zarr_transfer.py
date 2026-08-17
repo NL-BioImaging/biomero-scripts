@@ -3,6 +3,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +35,9 @@ def _load_canonical_functions():
         "select_object_storage_root",
         "derive_canonical_source_directory",
         "attach_canonical_source",
+        "promote_exported_image_zarr",
+        "canonical_inputs_from_sources",
+        "validate_omero_image_semantics",
     }
     nodes = [
         node for node in tree.body
@@ -46,7 +51,9 @@ def _load_canonical_functions():
         "json": json,
         "logging": logging,
         "logger": logging.getLogger(__name__),
+        "log": lambda text: None,
         "os": os,
+        "shutil": shutil,
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
                  "exec"), namespace)
@@ -74,10 +81,19 @@ class Annotation:
 
 
 class Object:
-    def __init__(self, object_id, annotations, group_id=3):
+    def __init__(
+        self,
+        object_id,
+        annotations,
+        group_id=3,
+        shape=(1, 1, 1, 16, 16),
+        pixel_type="uint16",
+    ):
         self.object_id = object_id
         self.annotations = annotations
         self.group_id = group_id
+        self.shape = shape
+        self.pixel_type = pixel_type
 
     def getId(self):
         return self.object_id
@@ -87,6 +103,40 @@ class Object:
 
     def getDetails(self):
         return Details(self.group_id)
+
+    def getSizeT(self):
+        return self.shape[0]
+
+    def getSizeC(self):
+        return self.shape[1]
+
+    def getSizeZ(self):
+        return self.shape[2]
+
+    def getSizeY(self):
+        return self.shape[3]
+
+    def getSizeX(self):
+        return self.shape[4]
+
+    def getPrimaryPixels(self):
+        return Pixels(self.pixel_type)
+
+
+class PixelsType:
+    def __init__(self, value):
+        self.value = value
+
+    def getValue(self):
+        return self.value
+
+
+class Pixels:
+    def __init__(self, pixel_type):
+        self.pixel_type = pixel_type
+
+    def getPixelsType(self):
+        return PixelsType(self.pixel_type)
 
 
 class Group:
@@ -349,9 +399,126 @@ def test_attaches_canonical_source_annotation_once(pixel_identity):
     ) is None
 
 
+def test_promotes_verified_image_and_restores_task_copy(
+    tmp_path, pixel_identity
+):
+    ns = _load_canonical_functions()
+    root = tmp_path / "managed"
+    export = tmp_path / "task" / "image.zarr"
+    export.mkdir(parents=True)
+    (export / ".zgroup").write_text("{}", encoding="utf-8")
+    canonical_path = root / ".processed/Image-7.g1.ome.zarr"
+    canonical = source(pixel_identity)
+    identities = []
+    writes = []
+
+    class Provider:
+        def generate(self, path, **guard):
+            identities.append(("zarr", path, guard))
+            return pixel_identity
+
+        def generate_omero(self, conn, **guard):
+            identities.append(("omero", conn, guard))
+            return pixel_identity
+
+    class Promotion:
+        def promote(self, staging, **kwargs):
+            canonical_path.parent.mkdir(parents=True)
+            shutil.move(staging, canonical_path)
+            (canonical_path / ".biomero-canonical.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            return SimpleNamespace(source=canonical, path=canonical_path)
+
+    result = ns["promote_exported_image_zarr"](
+        "connection",
+        Object(7, []),
+        export,
+        {"group-3-data": root},
+        identity_provider=Provider(),
+        semantic_guard_reader=lambda path, node: SimpleNamespace(
+            shape=(1, 1, 1, 16, 16),
+            dtype="uint16",
+            axes=("t", "c", "z", "y", "x"),
+            coordinate_transformations=(),
+        ),
+        promotion_service_factory=lambda **kwargs: Promotion(),
+        annotation_writer=lambda **kwargs: writes.append(kwargs) or 99,
+    )
+
+    assert result == canonical
+    assert canonical_path.is_dir()
+    assert export.is_dir()
+    assert (export / ".zgroup").is_file()
+    assert not (export / ".biomero-canonical.json").exists()
+    assert [item[0] for item in identities] == ["omero", "zarr"]
+    assert writes[0]["ns"] == CANONICAL_SOURCE_NAMESPACE
+
+
+def test_rejects_ngff_shape_or_dtype_that_disagrees_with_omero():
+    ns = _load_canonical_functions()
+    image = Object(7, [], shape=(1, 2, 3, 16, 32), pixel_type="uint16")
+
+    ns["validate_omero_image_semantics"](
+        image,
+        SimpleNamespace(
+            axes=("t", "c", "z", "y", "x"),
+            shape=(1, 2, 3, 16, 32),
+            dtype="uint16",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="shape"):
+        ns["validate_omero_image_semantics"](
+            image,
+            SimpleNamespace(
+                axes=("t", "c", "z", "y", "x"),
+                shape=(1, 2, 3, 32, 16),
+                dtype="uint16",
+            ),
+        )
+    with pytest.raises(ValueError, match="pixel type"):
+        ns["validate_omero_image_semantics"](
+            image,
+            SimpleNamespace(
+                axes=("t", "c", "z", "y", "x"),
+                shape=(1, 2, 3, 16, 32),
+                dtype="uint8",
+            ),
+        )
+
+
+def test_builds_snapshot_from_promoted_and_existing_sources(pixel_identity):
+    ns = _load_canonical_functions()
+    objects = [Object(7, []), Object(8, [])]
+    first = source(pixel_identity)
+    second = first.model_copy(update={
+        "source_object_id": 8,
+        "relative_path": ".processed/Image-8.g1.ome.zarr",
+    })
+
+    inputs = ns["canonical_inputs_from_sources"](
+        objects, "Image", {7: first, 8: second}
+    )
+
+    assert [item.ordinal for item in inputs] == [0, 1]
+    assert [item.source.source_object_id for item in inputs] == [7, 8]
+    assert ns["canonical_inputs_from_sources"](
+        objects, "Image", {7: first}
+    ) == ()
+
+
 def test_image_transfer_publishes_canonical_inputs_output():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert 'CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"' in script
     assert "client.setOutput(" in script
     assert "CANONICAL_INPUTS_OUTPUT," in script
+
+
+def test_fresh_image_exports_feed_promotion_and_final_snapshot():
+    script = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "canonical_source = promote_exported_image_zarr(" in script
+    assert "promoted_source = save_image_as_zarr(" in script
+    assert "canonical_inputs = canonical_inputs_from_sources(" in script
