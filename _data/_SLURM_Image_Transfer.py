@@ -54,6 +54,7 @@ License: GPL v2+ (see LICENSE.txt)
 import shutil
 import subprocess
 import shlex
+import json
 import omero.scripts as scripts
 from omero.gateway import BlitzGateway
 import omero.util.script_utils as script_utils
@@ -70,6 +71,11 @@ try:
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
+from biomero.zarr_contracts import (
+    CANONICAL_SOURCE_NAMESPACE,
+    CanonicalInput,
+    CanonicalZarrSource,
+)
 import logging
 import sys
 
@@ -77,9 +83,194 @@ logger = logging.getLogger(__name__)
 
 # Version constant for easy version management
 VERSION = "2.8.1"
+BIOMERO_CONFIG_FILE = os.getenv(
+    "BIOMERO_CONFIG_FILE",
+    "/opt/omero/server/biomero-config.json",
+)
+CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 # keep track of log strings.
 log_strings = []
+
+
+def _annotation_namespace(annotation):
+    """Return a MapAnnotation namespace without relying on wrapper ordering."""
+    namespace = annotation.getNs() if hasattr(annotation, "getNs") else None
+    if hasattr(namespace, "getValue"):
+        namespace = namespace.getValue()
+    return getattr(namespace, "val", namespace)
+
+
+def _annotation_values(annotation):
+    """Normalize gateway or model MapAnnotation entries to string values."""
+    values = {}
+    for entry in annotation.getMapValue() or []:
+        if hasattr(entry, "name"):
+            name, value = entry.name, entry.value
+        else:
+            name, value = entry
+        if hasattr(name, "getValue"):
+            name = name.getValue()
+        if hasattr(value, "getValue"):
+            value = value.getValue()
+        values[str(getattr(name, "val", name))] = str(
+            getattr(value, "val", value)
+        )
+    return values
+
+
+def get_canonical_source(obj, object_type):
+    """Resolve one deterministic canonical-source record from OMERO metadata."""
+    object_id = int(obj.getId())
+    candidates = []
+    for annotation in obj.listAnnotations():
+        if _annotation_namespace(annotation) != CANONICAL_SOURCE_NAMESPACE:
+            continue
+        try:
+            candidate = CanonicalZarrSource.from_annotation_values(
+                _annotation_values(annotation)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid canonical Zarr annotation on %s %s: %s",
+                object_type, object_id, exc,
+            )
+            continue
+        if (
+            candidate.source_object_type != object_type
+            or candidate.source_object_id != object_id
+        ):
+            logger.warning(
+                "Ignoring canonical Zarr annotation owned by %s %s on %s %s",
+                candidate.source_object_type,
+                candidate.source_object_id,
+                object_type,
+                object_id,
+            )
+            continue
+        candidates.append(candidate)
+
+    if not candidates:
+        return None
+    current_generation = max(
+        candidate.source_generation for candidate in candidates
+    )
+    current = [
+        candidate for candidate in candidates
+        if candidate.source_generation == current_generation
+    ]
+    distinct = {
+        json.dumps(candidate.to_dict(), sort_keys=True)
+        for candidate in current
+    }
+    if len(distinct) != 1:
+        raise ValueError(
+            f"Canonical source metadata is ambiguous for {object_type} "
+            f"{object_id} generation {current_generation}"
+        )
+    return current[0]
+
+
+def discover_canonical_inputs(objects, object_type):
+    """Return reusable sources and an all-or-nothing ordered input snapshot."""
+    sources = {}
+    canonical_inputs = []
+    complete = True
+    for ordinal, obj in enumerate(objects):
+        object_id = int(obj.getId())
+        source = get_canonical_source(obj, object_type)
+        if source is None:
+            complete = False
+            continue
+        sources[object_id] = source
+        canonical_inputs.append(CanonicalInput(
+            ordinal=ordinal,
+            selected_object_type=object_type,
+            selected_object_id=object_id,
+            source=source,
+        ))
+    return sources, tuple(canonical_inputs) if complete else ()
+
+
+def load_storage_roots(config_file=None):
+    """Load logical canonical storage roots from BIOMERO's shared config."""
+    config_path = Path(config_file or BIOMERO_CONFIG_FILE)
+    if not config_path.is_file():
+        logger.info("No BIOMERO storage-root config at %s", config_path)
+        return {}
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Could not load BIOMERO storage roots from {config_path}: {exc}"
+        ) from exc
+    configured_roots = config.get("storage_roots", {})
+    if not isinstance(configured_roots, dict):
+        raise ValueError("storage_roots must be a JSON object")
+    storage_roots = {}
+    for storage_id, root_value in configured_roots.items():
+        root = Path(root_value)
+        if not storage_id or not root.is_absolute():
+            raise ValueError(
+                "storage_roots must map non-empty IDs to absolute paths"
+            )
+        storage_roots[str(storage_id)] = root.resolve()
+    return storage_roots
+
+
+def resolve_managed_source_path(source, storage_roots):
+    """Resolve an existing canonical root without escaping its configured root."""
+    root = storage_roots.get(source.storage_root)
+    if root is None:
+        return None
+    root = Path(root).resolve()
+    candidate = (root / Path(source.relative_path)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Canonical source escapes storage root {source.storage_root}"
+        ) from exc
+    if not candidate.is_dir():
+        logger.warning("Canonical Zarr path is unavailable: %s", candidate)
+        return None
+    return candidate
+
+
+def get_legacy_zarr_path(obj):
+    """Resolve legacy Zarr annotations with explicit, stable precedence."""
+    candidates = {"Imported_from": set(), "Filepath": set()}
+    for annotation in obj.listAnnotations():
+        if not hasattr(annotation, "getMapValue"):
+            continue
+        for key, value in _annotation_values(annotation).items():
+            if key not in candidates:
+                continue
+            path = Path(value)
+            if value.lower().endswith(".zarr") and path.is_dir():
+                candidates[key].add(str(path.resolve()))
+    for key in ("Imported_from", "Filepath"):
+        if len(candidates[key]) > 1:
+            raise ValueError(f"Legacy {key} Zarr metadata is ambiguous")
+        if candidates[key]:
+            return Path(next(iter(candidates[key])))
+    return None
+
+
+def select_zarr_source_path(obj, canonical_source, storage_roots):
+    """Select a reusable root, never silently bypassing canonical metadata."""
+    if canonical_source is not None:
+        if canonical_source.node_path != ".":
+            logger.info(
+                "Canonical source for %s %s uses nested node %s; exporting "
+                "a standalone Zarr until node materialization is available",
+                canonical_source.source_object_type,
+                canonical_source.source_object_id,
+                canonical_source.node_path,
+            )
+            return None
+        return resolve_managed_source_path(canonical_source, storage_roots)
+    return get_legacy_zarr_path(obj)
 
 
 def log(text):
@@ -236,7 +427,16 @@ def save_as_ome_tiff(conn, image, folder_name=None):
             f.write(piece)
 
 
-def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None, ome_zarr_version=None):
+def save_plate_as_zarr(
+    conn,
+    suuid,
+    plate,
+    folder_name=None,
+    client=None,
+    ome_zarr_version=None,
+    canonical_source=None,
+    storage_roots=None,
+):
     """Export plate as ZARR format using omero-cli-zarr.
     
     Args:
@@ -253,10 +453,18 @@ def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None, ome_za
     # (2) (b) if zarr: copy/scp directly
     save_as_zarr(conn, suuid, plate, folder_name,
                  constants.transfer.DATA_TYPE_PLATE,
-                 ome_zarr_version)
+                 ome_zarr_version, canonical_source, storage_roots)
 
 
-def save_image_as_zarr(conn, suuid, image, folder_name=None, ome_zarr_version=None):
+def save_image_as_zarr(
+    conn,
+    suuid,
+    image,
+    folder_name=None,
+    ome_zarr_version=None,
+    canonical_source=None,
+    storage_roots=None,
+):
     """Export image as ZARR format using omero-cli-zarr.
     
     Args:
@@ -268,7 +476,7 @@ def save_image_as_zarr(conn, suuid, image, folder_name=None, ome_zarr_version=No
     """
     save_as_zarr(conn, suuid, image, folder_name,
                  constants.transfer.DATA_TYPE_IMAGE,
-                 ome_zarr_version)
+                 ome_zarr_version, canonical_source, storage_roots)
     
 
 def build_zarr_export_error(object, data_type, stderr):
@@ -298,7 +506,16 @@ def build_zarr_export_error(object, data_type, stderr):
     return " ".join(context)
 
 
-def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr_version=None):
+def save_as_zarr(
+    conn,
+    suuid,
+    object,
+    folder_name=None,
+    data_type=None,
+    ome_zarr_version=None,
+    canonical_source=None,
+    storage_roots=None,
+):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
     Args:
@@ -324,17 +541,11 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
         img_name = "%s_(%d).%s" % (path_name, i, extension)
         i += 1
 
-    filepath = None
-    annotations = object.listAnnotations()
-    for annotation in annotations:
-        if annotation.OMERO_TYPE == omero.model.MapAnnotationI:
-            for ann in annotation.getMapValue():
-                if ann.name in ['Filepath', 'Imported_from']:
-                    filepath = ann.value
-
-    if filepath and filepath.lower().endswith('.zarr') and os.path.exists(filepath):
+    source_path = select_zarr_source_path(
+        object, canonical_source, storage_roots or {})
+    if source_path is not None:
         log(" Copying file as: %s" % img_name)
-        shutil.copytree(filepath, img_name, dirs_exist_ok=True)
+        shutil.copytree(source_path, img_name, dirs_exist_ok=True)
     else:
         log("  Saving file as: %s" % img_name)
         curr_dir = os.getcwd()
@@ -514,10 +725,14 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     ome_zarr_version = script_params[constants.transfer.OME_VERSION]
     project_z = constants.transfer.Z in script_params and \
         script_params[constants.transfer.Z] == constants.transfer.Z_MAXPROJ
+    message = ""
+    canonical_inputs = ()
+    canonical_sources = {}
+    storage_roots = {}
 
     if (not split_cs) and (not merged_cs):
         log("Not chosen to save Individual Channels OR Merged Image")
-        return
+        return None, "No channel export mode selected", canonical_inputs
 
     # check if we have these params
     channel_names = []
@@ -581,11 +796,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         return t_range
 
     # Get the images or datasets
-    message = ""
     objects, log_message = script_utils.get_objects(conn, script_params)
     message += log_message
     if not objects:
-        return None, message
+        return None, message, canonical_inputs
 
     # Attach figure to the first image
     parent = objects[0]
@@ -596,7 +810,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             images.extend(list(ds.listChildren()))
         if not images:
             message += "No image found in dataset(s)"
-            return None, message
+            return None, message, canonical_inputs
     elif data_type == constants.transfer.DATA_TYPE_PLATE:
         if format == constants.transfer.FORMAT_OMEZARR:
             log("Processing %s Plates to ZARR, not individual images." % len(objects))         
@@ -614,9 +828,20 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                     images.append(image)
             if not images:
                 message += "No image found in plate(s)"
-                return None, message
+                return None, message, canonical_inputs
     else:
         images = objects
+
+    if format == constants.transfer.FORMAT_OMEZARR:
+        storage_roots = load_storage_roots()
+        if data_type == constants.transfer.DATA_TYPE_PLATE:
+            export_objects = objects
+            canonical_object_type = "Plate"
+        else:
+            export_objects = images
+            canonical_object_type = "Image"
+        canonical_sources, canonical_inputs = discover_canonical_inputs(
+            export_objects, canonical_object_type)
 
     log("Processing %s images" % len(images))
 
@@ -637,7 +862,16 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     if format == constants.transfer.FORMAT_OMEZARR and data_type == constants.transfer.DATA_TYPE_PLATE:
         for plate in objects:
             log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
-            save_plate_as_zarr(conn, suuid, plate, folder_name, client, ome_zarr_version=ome_zarr_version)
+            save_plate_as_zarr(
+                conn,
+                suuid,
+                plate,
+                folder_name,
+                client,
+                ome_zarr_version=ome_zarr_version,
+                canonical_source=canonical_sources.get(int(plate.getId())),
+                storage_roots=storage_roots,
+            )
             write_logfile(exp_dir)
             
     for img in images:
@@ -651,12 +885,24 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             if img._prepareRE().requiresPixelsPyramid():
                 log("  ** Can't export a 'Big' image to OME-TIFF. **")
                 if len(images) == 1:
-                    return None, "Can't export a 'Big' image to %s." % format
+                    return (
+                        None,
+                        "Can't export a 'Big' image to %s." % format,
+                        canonical_inputs,
+                    )
                 continue
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_OMEZARR:
-            save_image_as_zarr(conn, suuid, img, folder_name, ome_zarr_version=ome_zarr_version)
+            save_image_as_zarr(
+                conn,
+                suuid,
+                img,
+                folder_name,
+                ome_zarr_version=ome_zarr_version,
+                canonical_source=canonical_sources.get(int(img.getId())),
+                storage_roots=storage_roots,
+            )
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -665,7 +911,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                       "See 'omero.client.download_as.max_size'" % size
                 log("  ** %s. **" % msg)
                 if len(images) == 1:
-                    return None, msg
+                    return None, msg, canonical_inputs
                 continue
             else:
                 log("Exporting image as %s: %s" % (format, img.getName()))
@@ -796,7 +1042,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                     "You can download the zip/ZARR from the attachments.\n")
         logger.info(f"File annotation {file_annotation.id} preserved for download")
 
-    return file_annotation, message
+    return file_annotation, message, canonical_inputs
 
 
 def write_logfile(exp_dir):
@@ -990,7 +1236,7 @@ def run_script():
                 log("%s:%s" % (key, value))
 
             # call the main script - returns a file annotation wrapper
-            file_annotation, message = batch_image_export(
+            file_annotation, message, canonical_inputs = batch_image_export(
                 conn, script_params, slurmClient, suuid, client)
 
             stop_time = datetime.now()
@@ -998,6 +1244,12 @@ def run_script():
 
             # return this fileAnnotation to the client.
             client.setOutput("Message", rstring(message))
+            client.setOutput(
+                CANONICAL_INPUTS_OUTPUT,
+                rstring(json.dumps([
+                    item.to_dict() for item in canonical_inputs
+                ], separators=(",", ":"), sort_keys=True)),
+            )
             if file_annotation is not None:
                 client.setOutput("File_Annotation",
                                  robject(file_annotation._obj))
