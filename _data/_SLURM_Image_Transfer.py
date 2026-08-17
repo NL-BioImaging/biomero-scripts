@@ -218,6 +218,88 @@ def load_storage_roots(config_file=None):
     return storage_roots
 
 
+def select_object_storage_root(obj, storage_roots):
+    """Select the configured managed root belonging to the object's OMERO group."""
+    try:
+        group_id = int(obj.getDetails().getGroup().getId())
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot determine the OMERO group for object {obj.getId()}"
+        ) from exc
+    storage_id = f"group-{group_id}-data"
+    storage_root = storage_roots.get(storage_id)
+    if storage_root is None:
+        raise ValueError(
+            f"No canonical storage root is configured for OMERO group {group_id}"
+        )
+    return storage_id, Path(storage_root).resolve()
+
+
+def derive_canonical_source_directory(obj, storage_root):
+    """Derive a managed source directory from ordered legacy provenance."""
+    storage_root = Path(storage_root).resolve()
+    candidates = {"Imported_from": set(), "Filepath": set()}
+    for annotation in obj.listAnnotations():
+        if not hasattr(annotation, "getMapValue"):
+            continue
+        for key, value in _annotation_values(annotation).items():
+            if key not in candidates:
+                continue
+            path = Path(value)
+            if not path.is_absolute():
+                continue
+            resolved = path.resolve()
+            directory = resolved.parent if resolved.suffix else resolved
+            try:
+                relative = directory.relative_to(storage_root)
+            except ValueError:
+                continue
+            candidates[key].add(relative.as_posix())
+
+    for key in ("Imported_from", "Filepath"):
+        if len(candidates[key]) > 1:
+            raise ValueError(
+                f"Managed {key} provenance is ambiguous for object {obj.getId()}"
+            )
+        if candidates[key]:
+            return Path(next(iter(candidates[key])))
+    return Path(".")
+
+
+def attach_canonical_source(
+    conn,
+    obj,
+    object_type,
+    source,
+    annotation_writer=None,
+):
+    """Attach one canonical record without creating same-generation ambiguity."""
+    existing = get_canonical_source(obj, object_type)
+    if existing == source:
+        return None
+    if (
+        existing is not None
+        and existing.source_generation >= source.source_generation
+    ):
+        raise ValueError(
+            f"Cannot replace canonical {object_type} {obj.getId()} generation "
+            f"{existing.source_generation} with generation "
+            f"{source.source_generation}"
+        )
+    if annotation_writer is None:
+        from ezomero import post_map_annotation
+
+        annotation_writer = post_map_annotation
+    return annotation_writer(
+        conn=conn,
+        object_type=object_type,
+        object_id=int(obj.getId()),
+        kv_dict=source.to_annotation_values(),
+        ns=CANONICAL_SOURCE_NAMESPACE,
+        across_groups=False,
+    )
+
+
 def resolve_managed_source_path(source, storage_roots):
     """Resolve an existing canonical root without escaping its configured root."""
     root = storage_roots.get(source.storage_root)

@@ -30,6 +30,9 @@ def _load_canonical_functions():
         "resolve_managed_source_path",
         "get_legacy_zarr_path",
         "select_zarr_source_path",
+        "select_object_storage_root",
+        "derive_canonical_source_directory",
+        "attach_canonical_source",
     }
     nodes = [
         node for node in tree.body
@@ -71,15 +74,35 @@ class Annotation:
 
 
 class Object:
-    def __init__(self, object_id, annotations):
+    def __init__(self, object_id, annotations, group_id=3):
         self.object_id = object_id
         self.annotations = annotations
+        self.group_id = group_id
 
     def getId(self):
         return self.object_id
 
     def listAnnotations(self):
         return self.annotations
+
+    def getDetails(self):
+        return Details(self.group_id)
+
+
+class Group:
+    def __init__(self, group_id):
+        self.group_id = group_id
+
+    def getId(self):
+        return self.group_id
+
+
+class Details:
+    def __init__(self, group_id):
+        self.group_id = group_id
+
+    def getGroup(self):
+        return Group(self.group_id)
 
 
 @pytest.fixture
@@ -243,6 +266,87 @@ def test_nested_canonical_source_falls_back_to_fresh_export(
     )
 
     assert selected is None
+
+
+def test_selects_storage_root_from_omero_group(tmp_path):
+    ns = _load_canonical_functions()
+    roots = {
+        "group-0-data": tmp_path / "system",
+        "group-3-data": tmp_path / "test",
+    }
+
+    storage_id, storage_root = ns["select_object_storage_root"](
+        Object(7, [], group_id=3), roots
+    )
+
+    assert storage_id == "group-3-data"
+    assert storage_root == tmp_path / "test"
+
+
+def test_missing_group_storage_root_fails_closed(tmp_path):
+    ns = _load_canonical_functions()
+
+    with pytest.raises(ValueError, match="group 3"):
+        ns["select_object_storage_root"](
+            Object(7, [], group_id=3), {"group-0-data": tmp_path}
+        )
+
+
+def test_derives_source_directory_from_managed_provenance(tmp_path):
+    ns = _load_canonical_functions()
+    root = tmp_path / "group"
+    raw_file = root / "project" / "dataset" / "source.lif"
+    obj = Object(7, [Annotation("legacy", {
+        "Imported_from": str(raw_file),
+        "Filepath": str(root / "other" / "ignored.tif"),
+    })])
+
+    relative = ns["derive_canonical_source_directory"](obj, root)
+
+    assert relative == Path("project/dataset")
+
+
+def test_source_directory_falls_back_to_group_root(tmp_path):
+    ns = _load_canonical_functions()
+    root = tmp_path / "group"
+
+    assert ns["derive_canonical_source_directory"](
+        Object(7, []), root
+    ) == Path(".")
+
+
+def test_attaches_canonical_source_annotation_once(pixel_identity):
+    ns = _load_canonical_functions()
+    canonical = source(pixel_identity)
+    obj = Object(7, [])
+    writes = []
+
+    result = ns["attach_canonical_source"](
+        "connection",
+        obj,
+        "Image",
+        canonical,
+        annotation_writer=lambda **kwargs: writes.append(kwargs) or 99,
+    )
+
+    assert result == 99
+    assert writes == [{
+        "conn": "connection",
+        "object_type": "Image",
+        "object_id": 7,
+        "kv_dict": canonical.to_annotation_values(),
+        "ns": CANONICAL_SOURCE_NAMESPACE,
+        "across_groups": False,
+    }]
+
+    obj.annotations.append(annotation_for(canonical))
+    assert ns["attach_canonical_source"](
+        "connection",
+        obj,
+        "Image",
+        canonical,
+        annotation_writer=lambda **kwargs: pytest.fail("duplicate write"),
+    ) is None
 
 
 def test_image_transfer_publishes_canonical_inputs_output():
