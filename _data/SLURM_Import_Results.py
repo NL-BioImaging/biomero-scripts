@@ -98,6 +98,7 @@ from omero_metadata.populate import ParsingContext
 import ezomero
 
 from biomero import SlurmClient, constants
+from biomero.zarr_contracts import CanonicalInputManifest
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True
@@ -272,6 +273,50 @@ if not IMPORTER_ENABLED:
 
 # Version constant for easy version management
 VERSION = "2.9.0"
+
+
+def load_canonical_input_snapshot(slurm_client, workflow_id, data_location):
+    """Resolve the exact workflow input snapshot from tracking and recovery."""
+    workflow_id = UUID(str(workflow_id))
+    tracked = None
+    if slurm_client.track_workflows:
+        try:
+            tracked = slurm_client.workflowTracker.get_canonical_input_manifest(
+                workflow_id
+            )
+        except Exception as exc:
+            logger.info(
+                "No tracked canonical input snapshot for workflow %s: %s",
+                workflow_id,
+                exc,
+            )
+
+    recovered = slurm_client.read_canonical_input_manifest(
+        data_location,
+        expected_workflow_id=workflow_id,
+    )
+    if tracked is not None and recovered is not None and tracked != recovered:
+        raise ValueError(
+            "Tracked and recovery canonical input snapshots disagree for "
+            f"workflow {workflow_id}"
+        )
+    return tracked or recovered
+
+
+def persist_canonical_input_snapshot(results_path, manifest):
+    """Persist the validated snapshot beside durable workflow results."""
+    if not isinstance(manifest, CanonicalInputManifest):
+        manifest = CanonicalInputManifest.from_dict(manifest)
+    metadata_directory = Path(results_path) / ".biomero"
+    metadata_directory.mkdir(parents=True, exist_ok=True)
+    destination = metadata_directory / "canonical-inputs.json"
+    temporary = metadata_directory / "canonical-inputs.json.tmp"
+    temporary.write_text(
+        json.dumps(manifest.to_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+    return destination
 
 
 def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
@@ -4326,6 +4371,24 @@ def runScript() -> None:
                 logger.error(f"Failed to extract SLURM results: {e}")
                 message += f"\nFailed to extract SLURM results: {e}"
                 extraction_error = e  # defer raise so log is still uploaded below
+
+            canonical_input_manifest = None
+            if not extraction_error and slurm_data_path and permanent_storage_path:
+                canonical_input_manifest = load_canonical_input_snapshot(
+                    slurmClient,
+                    wf_id,
+                    slurm_data_path,
+                )
+                if canonical_input_manifest is not None:
+                    snapshot_path = persist_canonical_input_snapshot(
+                        permanent_storage_path,
+                        canonical_input_manifest,
+                    )
+                    logger.info(
+                        "Preserved canonical input snapshot at %s",
+                        snapshot_path,
+                    )
+                    message += "\nPreserved canonical input provenance snapshot."
 
             # Copy log to permanent storage (only possible when extraction succeeded),
             # then upload from the best available path so the in-place symlink stays valid.
