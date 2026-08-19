@@ -2497,7 +2497,7 @@ def create_upload_orders_for_results(
     label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
 
     if automatic_shallow_import:
-        normalize_eligible_returned_zarrs(
+        normalized_results = normalize_eligible_returned_zarrs(
             shallow_decisions,
             wf_id,
             results_path,
@@ -2512,17 +2512,23 @@ def create_upload_orders_for_results(
             for decision in shallow_decisions
             if getattr(decision, "unchanged_passthrough", False)
         }
+        shallow_primary_paths = {
+            str(Path(result.store_path).resolve())
+            for result in normalized_results
+        }
         image_files = [
             path for path in all_image_files
             if str(Path(path).resolve()) not in label_paths
             and str(Path(path).resolve()) not in passthrough_paths
+            and str(Path(path).resolve()) not in shallow_primary_paths
         ]
         logger.info(
             "Automatic shallow result selection prepared %s primary image "
-            "path(s), %s label projection(s), and skipped %s unchanged "
-            "pass-through store(s)",
+            "path(s), %s label projection(s), skipped %s shallow top-image "
+            "duplicate(s), and skipped %s unchanged pass-through store(s)",
             len(image_files),
             len(label_zarr_files),
+            len(shallow_primary_paths),
             len(passthrough_paths),
         )
     else:

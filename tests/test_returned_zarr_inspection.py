@@ -161,4 +161,5 @@ def test_shallow_mode_automates_primary_and_label_import_selection():
     assert "import_label_zarrs = True" in source
     assert "import_only_labels = False" in source
     assert "unchanged_passthrough" in source
+    assert "shallow_primary_paths" in source
     assert "Automatic shallow result selection prepared" in source
