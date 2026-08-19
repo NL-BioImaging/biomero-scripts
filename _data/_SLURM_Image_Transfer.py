@@ -75,6 +75,8 @@ from biomero.zarr_contracts import (
     CANONICAL_SOURCE_NAMESPACE,
     CanonicalInput,
     CanonicalZarrSource,
+    ManagedZarrNode,
+    ZarrLabelComponent,
 )
 import logging
 import sys
@@ -96,6 +98,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
             pixel_identities_match,
             read_zarr_v2_semantic_guard,
         )
+        from biomero_importer.utils.result_zarr import discover_ngff_nodes
     except ImportError as exc:
         SHALLOW_ZARR_SUPPORT_AVAILABLE = False
         logger.warning(
@@ -262,11 +265,60 @@ def discover_canonical_inputs(objects, object_type):
     return sources, tuple(canonical_inputs) if complete else ()
 
 
+def discover_canonical_label_components(
+    source,
+    storage_roots,
+    identity_provider=None,
+):
+    """Inventory and hash labels already present in one managed image Zarr."""
+    if source.source_object_type != "Image":
+        return ()
+    root = resolve_managed_source_path(source, storage_roots)
+    if root is None:
+        raise ValueError("Managed canonical Zarr is unavailable")
+    provider = identity_provider or IsccBioIdentityProvider()
+    components = []
+    for node in discover_ngff_nodes(root):
+        if (
+            node.role != "label"
+            or node.parent_image_node_path != source.node_path
+        ):
+            continue
+        guard = read_zarr_v2_semantic_guard(root, node.node_path)
+        identity = provider.generate(
+            root,
+            node_path=node.node_path,
+            role="label",
+            shape=guard.shape,
+            dtype=guard.dtype,
+            axes=guard.axes,
+            coordinate_transformations=guard.coordinate_transformations,
+        )
+        components.append(ZarrLabelComponent(
+            logical_node_path=node.node_path,
+            pixel_identity=identity,
+            source=ManagedZarrNode(
+                storage_root=source.storage_root,
+                relative_path=source.relative_path,
+                node_path=node.node_path,
+            ),
+        ))
+        logger.info(
+            "Indexed canonical label for %s %s: node=%s, pixel ISCC=%s",
+            source.source_object_type,
+            source.source_object_id,
+            node.node_path,
+            identity.iscc_code,
+        )
+    return tuple(components)
+
+
 def canonical_inputs_from_sources(
     objects,
     object_type,
     sources,
     transfer_artifacts=None,
+    storage_roots=None,
 ):
     """Build an ordered all-or-nothing snapshot after export-side promotion."""
     transfer_artifacts = transfer_artifacts or {}
@@ -279,12 +331,31 @@ def canonical_inputs_from_sources(
         if source is None or transfer_artifact is None:
             missing_ids.append(object_id)
             continue
+        labels = ()
+        if storage_roots is not None:
+            try:
+                labels = discover_canonical_label_components(
+                    source,
+                    storage_roots,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Canonical label inventory failed for %s %s; disabling "
+                    "shallow result matching for this selection: %s",
+                    object_type,
+                    object_id,
+                    exc,
+                    exc_info=True,
+                )
+                missing_ids.append(object_id)
+                continue
         inputs.append(CanonicalInput(
             ordinal=ordinal,
             selected_object_type=object_type,
             selected_object_id=object_id,
             transfer_artifact=transfer_artifact,
             source=source,
+            labels=labels,
         ))
     if missing_ids:
         logger.info(
@@ -1658,6 +1729,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             canonical_object_type,
             canonical_sources,
             transfer_artifacts,
+            storage_roots,
         )
 
     if len(os.listdir(exp_dir)) == 0:

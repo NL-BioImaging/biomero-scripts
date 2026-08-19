@@ -12,7 +12,9 @@ from biomero_schema.zarr import (
     CANONICAL_SOURCE_NAMESPACE,
     CanonicalInput,
     CanonicalZarrSource,
+    ManagedZarrNode,
     PixelIdentity,
+    ZarrLabelComponent,
 )
 
 
@@ -39,6 +41,7 @@ def _load_canonical_functions():
         "promote_exported_image_zarr",
         "index_existing_image_zarr",
         "canonical_inputs_from_sources",
+        "discover_canonical_label_components",
         "validate_omero_image_semantics",
         "is_shallow_zarr_storage_enabled",
     }
@@ -50,6 +53,8 @@ def _load_canonical_functions():
         "CANONICAL_SOURCE_NAMESPACE": CANONICAL_SOURCE_NAMESPACE,
         "CanonicalInput": CanonicalInput,
         "CanonicalZarrSource": CanonicalZarrSource,
+        "ManagedZarrNode": ManagedZarrNode,
+        "ZarrLabelComponent": ZarrLabelComponent,
         "Path": Path,
         "json": json,
         "logging": logging,
@@ -120,7 +125,7 @@ def test_importer_dependencies_are_only_imported_behind_capability_guard():
             and node.module.startswith("biomero_importer.")
         )
     ]
-    assert len(guarded_imports) == 2
+    assert len(guarded_imports) == 3
 
 
 class NamedValue:
@@ -731,6 +736,59 @@ def test_builds_snapshot_from_promoted_and_existing_sources(pixel_identity):
     ) == ()
 
 
+def test_snapshot_hashes_labels_already_in_canonical_zarr(
+    tmp_path,
+    pixel_identity,
+):
+    ns = _load_canonical_functions()
+    canonical = source(pixel_identity)
+    canonical_root = tmp_path / canonical.relative_path
+    canonical_root.mkdir(parents=True)
+    label_identity = pixel_identity.model_copy(update={
+        "node_path": "labels/nuclei",
+        "role": "label",
+        "instance_code": "ISCC:INUCLEI",
+    })
+
+    ns["discover_ngff_nodes"] = lambda _root: (
+        SimpleNamespace(
+            node_path=".", role="image", parent_image_node_path=None),
+        SimpleNamespace(
+            node_path="labels/nuclei",
+            role="label",
+            parent_image_node_path=".",
+        ),
+    )
+    ns["read_zarr_v2_semantic_guard"] = lambda _root, _node: SimpleNamespace(
+        shape=label_identity.shape,
+        dtype=label_identity.dtype,
+        axes=label_identity.axes,
+        coordinate_transformations=label_identity.coordinate_transformations,
+    )
+
+    class Provider:
+        def generate(self, _root, **_kwargs):
+            return label_identity
+
+    ns["IsccBioIdentityProvider"] = Provider
+    inputs = ns["canonical_inputs_from_sources"](
+        [Object(7, [])],
+        "Image",
+        {7: canonical},
+        {7: "image.zarr"},
+        {"group-3-data": tmp_path},
+    )
+
+    assert len(inputs) == 1
+    assert inputs[0].labels == (ZarrLabelComponent(
+        logical_node_path="labels/nuclei",
+        pixel_identity=label_identity,
+        source=ManagedZarrNode(
+            storage_root="group-3-data",
+            relative_path=canonical.relative_path,
+            node_path="labels/nuclei",
+        ),
+    ),)
 def test_image_transfer_publishes_canonical_inputs_output():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
