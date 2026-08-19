@@ -8,7 +8,6 @@ import pytest
 
 from biomero_schema.zarr import (
     CanonicalInput,
-    CanonicalInputManifest,
     CanonicalZarrSource,
     PixelIdentity,
 )
@@ -25,7 +24,7 @@ def _load_snapshot_functions():
     wanted = {
         "ensure_tracking_uuid",
         "parse_canonical_inputs_output",
-        "persist_canonical_input_snapshot",
+        "record_canonical_input_snapshot",
     }
     functions = [
         node for node in tree.body
@@ -34,7 +33,6 @@ def _load_snapshot_functions():
     namespace = {
         "CANONICAL_INPUTS_OUTPUT": CANONICAL_INPUTS_OUTPUT,
         "CanonicalInput": CanonicalInput,
-        "CanonicalInputManifest": CanonicalInputManifest,
         "UUID": UUID,
         "json": json,
         "logger": SimpleNamespace(info=lambda *args, **kwargs: None),
@@ -95,13 +93,9 @@ class Tracker:
 
 
 class Slurm:
-    def __init__(self):
+    def __init__(self, track_workflows=True):
+        self.track_workflows = track_workflows
         self.workflowTracker = Tracker()
-        self.manifests = []
-
-    def write_canonical_input_manifest(self, folder, manifest):
-        self.manifests.append((folder, manifest))
-        return f"/remote/{folder}/.biomero/canonical-inputs.json"
 
 
 def test_parse_canonical_inputs_output_validates_wire_payload():
@@ -131,33 +125,42 @@ def test_missing_canonical_output_is_an_empty_snapshot():
     assert ns["parse_canonical_inputs_output"]({}) == ()
 
 
-def test_persist_snapshot_records_event_and_recovery_manifest():
+def test_snapshot_is_recorded_in_event_store():
     ns = _load_snapshot_functions()
     slurm = Slurm()
     workflow_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
     task_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
     item = canonical_input()
 
-    manifest = ns["persist_canonical_input_snapshot"](
-        slurm, workflow_id, task_id, "batch-1", (item,))
+    recorded = ns["record_canonical_input_snapshot"](
+        slurm, workflow_id, task_id, (item,))
 
-    assert isinstance(manifest, CanonicalInputManifest)
+    assert recorded is True
     assert slurm.workflowTracker.calls == [
         (workflow_id, task_id, (item,))
     ]
-    assert slurm.manifests == [("batch-1", manifest)]
 
 
 def test_empty_snapshot_does_not_write_partial_provenance():
     ns = _load_snapshot_functions()
     slurm = Slurm()
 
-    result = ns["persist_canonical_input_snapshot"](
-        slurm, uuid4(), uuid4(), "batch-1", ())
+    result = ns["record_canonical_input_snapshot"](
+        slurm, uuid4(), uuid4(), ())
 
-    assert result is None
+    assert result is False
     assert slurm.workflowTracker.calls == []
-    assert slurm.manifests == []
+
+
+def test_tracking_disabled_uses_identity_fallback_without_recording():
+    ns = _load_snapshot_functions()
+    slurm = Slurm(track_workflows=False)
+
+    result = ns["record_canonical_input_snapshot"](
+        slurm, uuid4(), uuid4(), (canonical_input(),))
+
+    assert result is False
+    assert slurm.workflowTracker.calls == []
 
 
 def test_tracking_uuid_preserves_value_or_generates_fallback():

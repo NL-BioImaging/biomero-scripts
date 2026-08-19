@@ -1,5 +1,4 @@
 import ast
-import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,17 +20,13 @@ def load_functions():
     tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
     wanted = {
         "load_canonical_input_snapshot",
-        "persist_canonical_input_snapshot",
     }
     nodes = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     namespace = {
-        "CanonicalInputManifest": CanonicalInputManifest,
-        "Path": Path,
         "UUID": UUID,
-        "json": json,
         "logger": logging.getLogger(__name__),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH), "exec"), namespace)
@@ -77,7 +72,7 @@ def manifest():
     )
 
 
-def test_tracking_and_recovery_manifest_must_agree(manifest):
+def test_snapshot_is_loaded_from_workflow_tracking(manifest):
     ns = load_functions()
     tracker = SimpleNamespace(
         get_canonical_input_manifest=lambda workflow_id: manifest
@@ -85,41 +80,36 @@ def test_tracking_and_recovery_manifest_must_agree(manifest):
     client = SimpleNamespace(
         track_workflows=True,
         workflowTracker=tracker,
-        read_canonical_input_manifest=lambda path, expected_workflow_id: manifest,
     )
 
     assert ns["load_canonical_input_snapshot"](
-        client, str(manifest.workflow_id), "/remote/task"
+        client, str(manifest.workflow_id)
     ) == manifest
 
-    other = manifest.model_copy(update={"export_task_id": UUID(
-        "cccccccc-cccc-cccc-cccc-cccccccccccc"
-    )})
-    client.read_canonical_input_manifest = lambda *args, **kwargs: other
-    with pytest.raises(ValueError, match="disagree"):
-        ns["load_canonical_input_snapshot"](
-            client, str(manifest.workflow_id), "/remote/task"
-        )
 
-
-def test_recovery_manifest_works_without_tracking(manifest):
+def test_tracking_disabled_returns_no_lineage_candidate(manifest):
     ns = load_functions()
     client = SimpleNamespace(
         track_workflows=False,
-        read_canonical_input_manifest=lambda path, expected_workflow_id: manifest,
     )
 
     assert ns["load_canonical_input_snapshot"](
-        client, str(manifest.workflow_id), "/remote/task"
-    ) == manifest
+        client, str(manifest.workflow_id)
+    ) is None
 
 
-def test_persists_snapshot_beside_permanent_results(tmp_path, manifest):
+def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest):
     ns = load_functions()
+    tracker = SimpleNamespace(
+        get_canonical_input_manifest=lambda workflow_id: (_ for _ in ()).throw(
+            ValueError("workflow predates canonical snapshots")
+        )
+    )
+    client = SimpleNamespace(
+        track_workflows=True,
+        workflowTracker=tracker,
+    )
 
-    path = ns["persist_canonical_input_snapshot"](tmp_path, manifest)
-
-    assert path == tmp_path / ".biomero/canonical-inputs.json"
-    assert CanonicalInputManifest.from_dict(
-        json.loads(path.read_text(encoding="utf-8"))
-    ) == manifest
+    assert ns["load_canonical_input_snapshot"](
+        client, str(manifest.workflow_id)
+    ) is None

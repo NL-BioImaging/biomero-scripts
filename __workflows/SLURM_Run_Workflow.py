@@ -66,10 +66,7 @@ from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
-from biomero.zarr_contracts import (
-    CanonicalInput,
-    CanonicalInputManifest,
-)
+from biomero.zarr_contracts import CanonicalInput
 import logging
 import os
 import time as timesleep
@@ -127,41 +124,45 @@ def parse_canonical_inputs_output(results):
     return tuple(CanonicalInput.from_dict(item) for item in payload)
 
 
-def persist_canonical_input_snapshot(
+def record_canonical_input_snapshot(
     slurm_client,
     workflow_id,
     export_task_id,
-    input_folder,
     canonical_inputs,
 ):
-    """Record the event snapshot and its task-side recovery manifest."""
+    """Record the immutable canonical input snapshot in workflow tracking."""
     if not canonical_inputs:
         logger.info(
             "Image Transfer returned no complete canonical input snapshot "
-            "for workflow %s; result-side canonical comparison is unavailable",
+            "for workflow %s; result processing will use returned pixel "
+            "identity matching instead of task-lineage candidates",
             workflow_id,
         )
-        return None
+        return False
+    if not slurm_client.track_workflows:
+        logger.info(
+            "Workflow tracking is disabled for %s; the canonical input "
+            "snapshot is not recorded and result processing will use returned "
+            "pixel identity matching",
+            workflow_id,
+        )
+        return False
     logger.info(
         "Image Transfer returned %s canonical input record(s) for workflow %s; "
         "persisting the immutable task snapshot",
         len(canonical_inputs),
         workflow_id,
     )
-    manifest = CanonicalInputManifest(
-        workflow_id=workflow_id,
-        export_task_id=export_task_id,
-        inputs=tuple(canonical_inputs),
-    )
     slurm_client.workflowTracker.record_canonical_inputs(
         workflow_id,
         export_task_id,
         tuple(canonical_inputs),
     )
-    remote_path = slurm_client.write_canonical_input_manifest(
-        input_folder, manifest)
-    logger.info("Wrote canonical input manifest to %s", remote_path)
-    return manifest
+    logger.info(
+        "Recorded canonical input snapshot in the workflow event store for %s",
+        workflow_id,
+    )
+    return True
 
 def get_roi_script_capability(conn: BlitzGateway) -> dict:
     """Ask OMERO whether its optional Labels2Rois script is installed."""
@@ -1574,11 +1575,10 @@ def exportImageToSLURM(client: omscripts.client,
             raise RuntimeError(error_msg)
 
         canonical_inputs = parse_canonical_inputs_output(rv)
-        persist_canonical_input_snapshot(
+        record_canonical_input_snapshot(
             slurmClient,
             wf_id,
             task_id,
-            zipfile,
             canonical_inputs,
         )
 
