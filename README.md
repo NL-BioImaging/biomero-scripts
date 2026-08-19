@@ -150,9 +150,9 @@ This repository provides example OMERO scripts for using [BIOMERO](https://githu
 
 Always start with initiating the Slurm environment at least once, for example using [admin/SLURM Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
 
-### Group folder mappings for importer results
+### Shared group folder mappings
 
-`SLURM_Import_Results.py` supports both the legacy
+`SLURM_Import_Results.py` and `_SLURM_Image_Transfer.py` support both the legacy
 `/opt/omero/server/biomero-config.json["group_mappings"]` configuration and an
 optional dedicated `/opt/omero/server/group-mappings.json` file. Mappings are
 merged by group key. Entries found only in either source are retained, and the
@@ -161,6 +161,13 @@ dedicated file wins when the same group is present in both.
 Override the default paths with `OMERO_BIOMERO_CONFIG_FILE` and
 `OMERO_BIOMERO_GROUP_MAPPINGS_FILE`. Deployments that do not mount the dedicated
 file continue using the legacy configuration unchanged.
+
+Image Transfer derives each group's managed storage root at runtime as
+`IMPORT_MOUNT_PATH / mapping.folder`. There is no separate `storage_roots`
+configuration. The processor worker must receive the same read-only mapping
+files that OMERO.biomero edits and the same shared-storage mount; mappings are
+read for each script execution, so runtime changes do not require an image
+rebuild.
 
 ### Optional ROI postprocessing
 

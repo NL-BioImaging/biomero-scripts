@@ -28,7 +28,7 @@ def _load_canonical_functions():
         "_annotation_values",
         "get_canonical_source",
         "discover_canonical_inputs",
-        "load_storage_roots",
+        "load_group_storage_roots",
         "resolve_managed_source_path",
         "get_legacy_zarr_path",
         "select_zarr_source_path",
@@ -54,6 +54,9 @@ def _load_canonical_functions():
         "log": lambda text: None,
         "os": os,
         "shutil": shutil,
+        "BIOMERO_CONFIG_FILE": "/missing/biomero-config.json",
+        "GROUP_MAPPINGS_FILE": "/missing/group-mappings.json",
+        "IMPORT_MOUNT_PATH": "/data",
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
                  "exec"), namespace)
@@ -250,23 +253,70 @@ def test_discovery_only_returns_snapshot_when_every_object_has_source(
     assert inputs == ()
 
 
-def test_storage_root_config_resolves_only_managed_existing_path(
+def test_group_mapping_resolves_managed_root_under_import_mount(
     tmp_path, pixel_identity
 ):
     ns = _load_canonical_functions()
-    managed_root = tmp_path / "group"
+    import_mount = tmp_path / "import-mount"
+    managed_root = import_mount / "Project A"
     canonical_path = managed_root / ".processed/Image-7.g1.ome.zarr"
     canonical_path.mkdir(parents=True)
     config_path = tmp_path / "biomero-config.json"
     config_path.write_text(json.dumps({
-        "storage_roots": {"group-3-data": str(managed_root)}
+        "group_mappings": {
+            "3": {"folder": "Project A", "groupName": "test"}
+        }
     }), encoding="utf-8")
+    dedicated_path = tmp_path / "missing-group-mappings.json"
 
-    roots = ns["load_storage_roots"](config_path)
+    roots = ns["load_group_storage_roots"](
+        config_path,
+        dedicated_path,
+        import_mount,
+    )
     resolved = ns["resolve_managed_source_path"](
         source(pixel_identity), roots)
 
     assert resolved == canonical_path.resolve()
+
+
+def test_dedicated_group_mapping_overrides_legacy_config(tmp_path):
+    ns = _load_canonical_functions()
+    import_mount = tmp_path / "import-mount"
+    config_path = tmp_path / "biomero-config.json"
+    config_path.write_text(json.dumps({
+        "group_mappings": {"3": {"folder": "Old Project"}}
+    }), encoding="utf-8")
+    dedicated_path = tmp_path / "group-mappings.json"
+    dedicated_path.write_text(json.dumps({
+        "3": {"folder": "Current Project", "groupName": "test"}
+    }), encoding="utf-8")
+
+    roots = ns["load_group_storage_roots"](
+        config_path,
+        dedicated_path,
+        import_mount,
+    )
+
+    assert roots == {
+        "group-3-data": (import_mount / "Current Project").resolve()
+    }
+
+
+@pytest.mark.parametrize("folder", ["../escape", "/absolute"])
+def test_group_mapping_cannot_escape_import_mount(tmp_path, folder):
+    ns = _load_canonical_functions()
+    config_path = tmp_path / "biomero-config.json"
+    config_path.write_text(json.dumps({
+        "group_mappings": {"3": {"folder": folder}}
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="IMPORT_MOUNT_PATH"):
+        ns["load_group_storage_roots"](
+            config_path,
+            tmp_path / "missing-group-mappings.json",
+            tmp_path / "import-mount",
+        )
 
 
 def test_missing_storage_root_mapping_does_not_guess(tmp_path, pixel_identity):

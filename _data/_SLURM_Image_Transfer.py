@@ -91,9 +91,14 @@ logger = logging.getLogger(__name__)
 # Version constant for easy version management
 VERSION = "2.8.1"
 BIOMERO_CONFIG_FILE = os.getenv(
-    "BIOMERO_CONFIG_FILE",
-    "/opt/omero/server/biomero-config.json",
+    "OMERO_BIOMERO_CONFIG_FILE",
+    os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
 )
+GROUP_MAPPINGS_FILE = os.getenv(
+    "OMERO_BIOMERO_GROUP_MAPPINGS_FILE",
+    "/opt/omero/server/group-mappings.json",
+)
+IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 # keep track of log strings.
@@ -262,29 +267,76 @@ def canonical_inputs_from_sources(objects, object_type, sources):
     return tuple(inputs)
 
 
-def load_storage_roots(config_file=None):
-    """Load logical canonical storage roots from BIOMERO's shared config."""
+def load_group_storage_roots(
+    config_file=None,
+    group_mappings_file=None,
+    import_mount_path=None,
+):
+    """Derive group storage roots from runtime mappings and the import mount."""
     config_path = Path(config_file or BIOMERO_CONFIG_FILE)
-    if not config_path.is_file():
-        logger.info("No BIOMERO storage-root config at %s", config_path)
-        return {}
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"Could not load BIOMERO storage roots from {config_path}: {exc}"
-        ) from exc
-    configured_roots = config.get("storage_roots", {})
-    if not isinstance(configured_roots, dict):
-        raise ValueError("storage_roots must be a JSON object")
-    storage_roots = {}
-    for storage_id, root_value in configured_roots.items():
-        root = Path(root_value)
-        if not storage_id or not root.is_absolute():
+    mappings_path = Path(group_mappings_file or GROUP_MAPPINGS_FILE)
+    import_root = Path(import_mount_path or IMPORT_MOUNT_PATH)
+    if not import_root.is_absolute():
+        raise ValueError("IMPORT_MOUNT_PATH must be an absolute path")
+    import_root = import_root.resolve()
+
+    def load_json_object(path):
+        if not path.is_file():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(
-                "storage_roots must map non-empty IDs to absolute paths"
+                f"Could not load BIOMERO group mappings from {path}: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"BIOMERO group mappings in {path} must be an object")
+        return value
+
+    legacy_config = load_json_object(config_path)
+    legacy_mappings = legacy_config.get("group_mappings", {})
+    if not isinstance(legacy_mappings, dict):
+        raise ValueError("biomero-config.json group_mappings must be an object")
+    dedicated_mappings = load_json_object(mappings_path)
+    group_mappings = dict(legacy_mappings)
+    group_mappings.update(dedicated_mappings)
+
+    storage_roots = {}
+    for group_id, mapping in group_mappings.items():
+        try:
+            normalized_group_id = int(group_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid OMERO group ID in group mappings: {group_id!r}"
+            ) from exc
+        if normalized_group_id < 0 or not isinstance(mapping, dict):
+            raise ValueError(
+                f"Invalid BIOMERO group mapping for OMERO group {group_id}"
             )
-        storage_roots[str(storage_id)] = root.resolve()
+        folder = mapping.get("folder")
+        if not folder or folder in {".", "root"}:
+            storage_root = import_root
+        else:
+            folder_path = Path(str(folder))
+            if folder_path.is_absolute() or ".." in folder_path.parts:
+                raise ValueError(
+                    f"Group {group_id} folder must stay within IMPORT_MOUNT_PATH"
+                )
+            storage_root = (import_root / folder_path).resolve()
+            try:
+                storage_root.relative_to(import_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Group {group_id} folder must stay within IMPORT_MOUNT_PATH"
+                ) from exc
+        storage_roots[f"group-{normalized_group_id}-data"] = storage_root
+
+    logger.info(
+        "Derived %s managed storage root(s) from BIOMERO group mappings "
+        "beneath IMPORT_MOUNT_PATH=%s",
+        len(storage_roots),
+        import_root,
+    )
     return storage_roots
 
 
@@ -1223,7 +1275,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         images = objects
 
     if format == constants.transfer.FORMAT_OMEZARR:
-        storage_roots = load_storage_roots()
+        storage_roots = load_group_storage_roots()
         if data_type == constants.transfer.DATA_TYPE_PLATE:
             export_objects = objects
             canonical_object_type = "Plate"
