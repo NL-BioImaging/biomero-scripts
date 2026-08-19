@@ -54,6 +54,7 @@ License: GPL v2+ (see LICENSE.txt)
 import shutil
 import subprocess
 import shlex
+import json
 import omero.scripts as scripts
 from omero.gateway import BlitzGateway
 import omero.util.script_utils as script_utils
@@ -70,16 +71,1220 @@ try:
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
+from biomero.zarr_contracts import (
+    CANONICAL_PLATE_SOURCE_NAMESPACE,
+    CANONICAL_SOURCE_NAMESPACE,
+    SHALLOW_COLLECTION_NAMESPACE,
+    CanonicalInput,
+    CanonicalPlateImage,
+    CanonicalPlateSource,
+    CanonicalZarrSource,
+    ManagedZarrNode,
+    ShallowZarrReference,
+    ZarrLabelComponent,
+)
 import logging
 import sys
 
 logger = logging.getLogger(__name__)
 
+IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
+SHALLOW_ZARR_SUPPORT_AVAILABLE = True
+if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+    try:
+        from biomero_importer.utils.canonical_promotion import (
+            CanonicalPromotionService,
+        )
+        from biomero_importer.utils.canonical_store import CanonicalStore
+        from biomero_importer.utils.pixel_identity import (
+            IsccBioIdentityProvider,
+            pixel_identities_match,
+            read_zarr_v2_semantic_guard,
+        )
+        from biomero_importer.utils.result_zarr import (
+            discover_ngff_nodes,
+            materialize_shallow_zarr,
+        )
+    except ImportError as exc:
+        SHALLOW_ZARR_SUPPORT_AVAILABLE = False
+        logger.warning(
+            "BIOMERO_SHALLOW_ZARR is enabled but biomero-importer Zarr "
+            "support is unavailable; using normal Zarr export: %s",
+            exc,
+        )
+
 # Version constant for easy version management
 VERSION = "2.8.1"
+BIOMERO_CONFIG_FILE = os.getenv(
+    "OMERO_BIOMERO_CONFIG_FILE",
+    os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
+)
+GROUP_MAPPINGS_FILE = os.getenv(
+    "OMERO_BIOMERO_GROUP_MAPPINGS_FILE",
+    "/opt/omero/server/group-mappings.json",
+)
+IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
+IMPORT_MOUNT_STORAGE_ROOT = "import-mount-data"
+CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 # keep track of log strings.
 log_strings = []
+
+
+def is_shallow_zarr_storage_enabled(export_format):
+    """Keep importer-owned storage behavior off the legacy result route."""
+    return (
+        IMPORTER_ENABLED
+        and SHALLOW_ZARR_ENABLED
+        and SHALLOW_ZARR_SUPPORT_AVAILABLE
+        and export_format == constants.transfer.FORMAT_OMEZARR
+    )
+
+
+def _annotation_namespace(annotation):
+    """Return a MapAnnotation namespace without relying on wrapper ordering."""
+    namespace = annotation.getNs() if hasattr(annotation, "getNs") else None
+    if hasattr(namespace, "getValue"):
+        namespace = namespace.getValue()
+    return getattr(namespace, "val", namespace)
+
+
+def _annotation_values(annotation):
+    """Normalize gateway or model MapAnnotation entries to string values."""
+    values = {}
+    if hasattr(annotation, "getMapValue"):
+        entries = annotation.getMapValue()
+    elif hasattr(annotation, "getValue"):
+        entries = annotation.getValue()
+    else:
+        entries = ()
+    for entry in entries or []:
+        if hasattr(entry, "name"):
+            name, value = entry.name, entry.value
+        else:
+            name, value = entry
+        if hasattr(name, "getValue"):
+            name = name.getValue()
+        if hasattr(value, "getValue"):
+            value = value.getValue()
+        values[str(getattr(name, "val", name))] = str(
+            getattr(value, "val", value)
+        )
+    return values
+
+
+def get_shallow_reference(obj):
+    """Resolve one deterministic managed shallow reference from an OMERO Image."""
+    candidates = []
+    for annotation in obj.listAnnotations():
+        if _annotation_namespace(annotation) != SHALLOW_COLLECTION_NAMESPACE:
+            continue
+        try:
+            candidates.append(ShallowZarrReference.from_annotation_values(
+                _annotation_values(annotation)
+            ))
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid shallow Zarr annotation on Image %s: %s",
+                obj.getId(),
+                exc,
+            )
+    distinct = {
+        json.dumps(candidate.to_dict(), sort_keys=True)
+        for candidate in candidates
+    }
+    if len(distinct) > 1:
+        raise ValueError(
+            f"Shallow Zarr metadata is ambiguous for Image {obj.getId()}"
+        )
+    if not candidates:
+        return None
+    reference = candidates[0]
+    logger.info(
+        "Located shallow Zarr collection for Image %s: storage=%s:%s, "
+        "image=%s, labels=%s",
+        obj.getId(),
+        reference.storage_root,
+        reference.relative_path,
+        reference.image_node_path,
+        list(reference.label_node_paths),
+    )
+    return reference
+
+
+def get_canonical_source(obj, object_type):
+    """Resolve one deterministic canonical-source record from OMERO metadata."""
+    object_id = int(obj.getId())
+    candidates = []
+    for annotation in obj.listAnnotations():
+        if _annotation_namespace(annotation) != CANONICAL_SOURCE_NAMESPACE:
+            continue
+        try:
+            candidate = CanonicalZarrSource.from_annotation_values(
+                _annotation_values(annotation)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid canonical Zarr annotation on %s %s: %s",
+                object_type, object_id, exc,
+            )
+            continue
+        if (
+            candidate.source_object_type != object_type
+            or candidate.source_object_id != object_id
+        ):
+            logger.warning(
+                "Ignoring canonical Zarr annotation owned by %s %s on %s %s",
+                candidate.source_object_type,
+                candidate.source_object_id,
+                object_type,
+                object_id,
+            )
+            continue
+        candidates.append(candidate)
+
+    if not candidates:
+        logger.info(
+            "No BIOMERO canonical Zarr record found for %s %s",
+            object_type,
+            object_id,
+        )
+        return None
+    current_generation = max(
+        candidate.source_generation for candidate in candidates
+    )
+    current = [
+        candidate for candidate in candidates
+        if candidate.source_generation == current_generation
+    ]
+    distinct = {
+        json.dumps(candidate.to_dict(), sort_keys=True)
+        for candidate in current
+    }
+    if len(distinct) != 1:
+        raise ValueError(
+            f"Canonical source metadata is ambiguous for {object_type} "
+            f"{object_id} generation {current_generation}"
+        )
+    source = current[0]
+    logger.info(
+        "Located canonical Zarr for %s %s: generation=%s, "
+        "storage=%s:%s, node=%s, pixel ISCC=%s",
+        object_type,
+        object_id,
+        source.source_generation,
+        source.storage_root,
+        source.relative_path,
+        source.node_path,
+        source.pixel_identity.iscc_code,
+    )
+    return source
+
+
+def get_canonical_plate_source(plate):
+    """Resolve the latest deterministic per-image canonical Plate record."""
+    plate_id = int(plate.getId())
+    candidates = []
+    for annotation in plate.listAnnotations():
+        if _annotation_namespace(annotation) != CANONICAL_PLATE_SOURCE_NAMESPACE:
+            continue
+        try:
+            candidate = CanonicalPlateSource.from_annotation_values(
+                _annotation_values(annotation)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid canonical Plate Zarr annotation on Plate "
+                "%s: %s",
+                plate_id,
+                exc,
+            )
+            continue
+        if candidate.source_object_id != plate_id:
+            logger.warning(
+                "Ignoring canonical Plate Zarr annotation owned by Plate %s "
+                "on Plate %s",
+                candidate.source_object_id,
+                plate_id,
+            )
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        logger.info("No BIOMERO canonical Zarr record found for Plate %s", plate_id)
+        return None
+    generation = max(item.source_generation for item in candidates)
+    current = [
+        item for item in candidates if item.source_generation == generation
+    ]
+    distinct = {
+        json.dumps(item.to_dict(), sort_keys=True) for item in current
+    }
+    if len(distinct) != 1:
+        raise ValueError(
+            f"Canonical Plate metadata is ambiguous for Plate {plate_id} "
+            f"generation {generation}"
+        )
+    source = current[0]
+    logger.info(
+        "Located canonical Zarr for Plate %s: generation=%s, storage=%s:%s, "
+        "images=%s (cached ISCC-BIO identities; not recalculated)",
+        plate_id,
+        source.source_generation,
+        source.storage_root,
+        source.relative_path,
+        len(source.images),
+    )
+    return source
+
+
+def discover_canonical_inputs(objects, object_type):
+    """Return reusable sources and an all-or-nothing ordered input snapshot."""
+    sources = {}
+    canonical_inputs = []
+    complete = True
+    for ordinal, obj in enumerate(objects):
+        object_id = int(obj.getId())
+        source = (
+            get_canonical_plate_source(obj)
+            if object_type == "Plate"
+            else get_canonical_source(obj, object_type)
+        )
+        if source is None:
+            complete = False
+            continue
+        sources[object_id] = source
+        values = {
+            "ordinal": ordinal,
+            "selected_object_type": object_type,
+            "selected_object_id": object_id,
+        }
+        values["plate_source" if object_type == "Plate" else "source"] = source
+        canonical_inputs.append(CanonicalInput(**values))
+    if complete:
+        logger.info(
+            "Canonical discovery covered all %s selected %s object(s)",
+            len(canonical_inputs),
+            object_type,
+        )
+    else:
+        logger.info(
+            "Canonical discovery covered %s/%s selected %s object(s); "
+            "missing sources may be established during export",
+            len(canonical_inputs),
+            len(objects),
+            object_type,
+        )
+    return sources, tuple(canonical_inputs) if complete else ()
+
+
+def discover_canonical_label_components(
+    source,
+    storage_roots,
+    identity_provider=None,
+):
+    """Inventory and hash labels already present in one managed image Zarr."""
+    if source.source_object_type != "Image":
+        return ()
+    root = resolve_managed_source_path(source, storage_roots)
+    if root is None:
+        raise ValueError("Managed canonical Zarr is unavailable")
+    provider = identity_provider or IsccBioIdentityProvider()
+    components = []
+    for node in discover_ngff_nodes(root):
+        if (
+            node.role != "label"
+            or node.parent_image_node_path != source.node_path
+        ):
+            continue
+        guard = read_zarr_v2_semantic_guard(root, node.node_path)
+        identity = provider.generate(
+            root,
+            node_path=node.node_path,
+            role="label",
+            shape=guard.shape,
+            dtype=guard.dtype,
+            axes=guard.axes,
+            coordinate_transformations=guard.coordinate_transformations,
+        )
+        components.append(ZarrLabelComponent(
+            logical_node_path=node.node_path,
+            pixel_identity=identity,
+            source=ManagedZarrNode(
+                storage_root=source.storage_root,
+                relative_path=source.relative_path,
+                node_path=node.node_path,
+            ),
+        ))
+        logger.info(
+            "Indexed canonical label for %s %s: node=%s, pixel ISCC=%s",
+            source.source_object_type,
+            source.source_object_id,
+            node.node_path,
+            identity.iscc_code,
+        )
+    return tuple(components)
+
+
+def build_canonical_plate_source(
+    plate,
+    zarr_path,
+    storage_root_id,
+    relative_path,
+    *,
+    source_generation=1,
+    identity_provider=None,
+):
+    """Hash every declared Plate image and label node into one cache record."""
+    root = Path(zarr_path)
+    nodes = discover_ngff_nodes(root)
+    image_nodes = [node for node in nodes if node.role == "image"]
+    if not image_nodes:
+        raise ValueError(f"Canonical Plate Zarr has no image nodes: {root}")
+    provider = identity_provider or IsccBioIdentityProvider()
+    identities = {}
+    for node in nodes:
+        guard = read_zarr_v2_semantic_guard(root, node.node_path)
+        logger.info(
+            "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
+            plate.getId(),
+            node.role,
+            node.node_path,
+        )
+        identity = provider.generate(
+            root,
+            node_path=node.node_path,
+            role=node.role,
+            shape=guard.shape,
+            dtype=guard.dtype,
+            axes=guard.axes,
+            coordinate_transformations=guard.coordinate_transformations,
+        )
+        identities[node.node_path] = identity
+        logger.info(
+            "Calculated Plate %s %s identity: node=%s, ISCC=%s, "
+            "Data-Code=%s, Instance-Code=%s",
+            plate.getId(),
+            node.role,
+            node.node_path,
+            identity.iscc_code,
+            identity.data_code,
+            identity.instance_code,
+        )
+
+    relative_path = Path(relative_path).as_posix()
+    images = []
+    for image_node in image_nodes:
+        source = CanonicalZarrSource(
+            storage_root=storage_root_id,
+            relative_path=relative_path,
+            node_path=image_node.node_path,
+            source_object_type="Plate",
+            source_object_id=int(plate.getId()),
+            source_generation=source_generation,
+            interchange_profile="ngff-0.4-zarr-v2",
+            pixel_identity=identities[image_node.node_path],
+            pixel_identity_origin="canonical-bootstrap",
+            canonical_pixel_verified=False,
+        )
+        labels = tuple(
+            ZarrLabelComponent(
+                logical_node_path=node.node_path,
+                pixel_identity=identities[node.node_path],
+                source=ManagedZarrNode(
+                    storage_root=storage_root_id,
+                    relative_path=relative_path,
+                    node_path=node.node_path,
+                ),
+            )
+            for node in nodes
+            if (
+                node.role == "label"
+                and node.parent_image_node_path == image_node.node_path
+            )
+        )
+        images.append(CanonicalPlateImage(
+            image_node_path=image_node.node_path,
+            source=source,
+            labels=labels,
+        ))
+    return CanonicalPlateSource(
+        storage_root=storage_root_id,
+        relative_path=relative_path,
+        source_object_id=int(plate.getId()),
+        source_generation=source_generation,
+        interchange_profile="ngff-0.4-zarr-v2",
+        images=tuple(images),
+    )
+
+
+def canonical_inputs_from_sources(
+    objects,
+    object_type,
+    sources,
+    transfer_artifacts=None,
+    storage_roots=None,
+    label_components_by_object=None,
+):
+    """Build an ordered all-or-nothing snapshot after export-side promotion."""
+    transfer_artifacts = transfer_artifacts or {}
+    label_components_by_object = label_components_by_object or {}
+    inputs = []
+    missing_ids = []
+    for ordinal, obj in enumerate(objects):
+        object_id = int(obj.getId())
+        source = sources.get(object_id)
+        transfer_artifact = transfer_artifacts.get(object_id)
+        if source is None or transfer_artifact is None:
+            missing_ids.append(object_id)
+            continue
+        labels = label_components_by_object.get(object_id)
+        if (
+            object_type == "Image"
+            and labels is None
+            and storage_roots is not None
+        ):
+            try:
+                labels = discover_canonical_label_components(
+                    source,
+                    storage_roots,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Canonical label inventory failed for %s %s; disabling "
+                    "shallow result matching for this selection: %s",
+                    object_type,
+                    object_id,
+                    exc,
+                    exc_info=True,
+                )
+                missing_ids.append(object_id)
+                continue
+        if labels is None:
+            labels = ()
+        values = {
+            "ordinal": ordinal,
+            "selected_object_type": object_type,
+            "selected_object_id": object_id,
+            "transfer_artifact": transfer_artifact,
+        }
+        if object_type == "Plate":
+            values["plate_source"] = source
+        else:
+            values["source"] = source
+            values["labels"] = labels
+        inputs.append(CanonicalInput(**values))
+    if missing_ids:
+        logger.info(
+            "No complete canonical input snapshot for %s selection: "
+            "canonical records or transfer artifact names are missing for "
+            "IDs %s",
+            object_type,
+            missing_ids,
+        )
+        return ()
+    logger.info(
+        "Prepared canonical input snapshot for all %s selected %s object(s)",
+        len(inputs),
+        object_type,
+    )
+    return tuple(inputs)
+
+
+def load_group_storage_roots(
+    config_file=None,
+    group_mappings_file=None,
+    import_mount_path=None,
+):
+    """Derive group storage roots from runtime mappings and the import mount."""
+    config_path = Path(config_file or BIOMERO_CONFIG_FILE)
+    mappings_path = Path(group_mappings_file or GROUP_MAPPINGS_FILE)
+    import_root = Path(import_mount_path or IMPORT_MOUNT_PATH)
+    if not import_root.is_absolute():
+        raise ValueError("IMPORT_MOUNT_PATH must be an absolute path")
+    import_root = import_root.resolve()
+
+    def load_json_object(path):
+        if not path.is_file():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Could not load BIOMERO group mappings from {path}: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"BIOMERO group mappings in {path} must be an object")
+        return value
+
+    legacy_config = load_json_object(config_path)
+    legacy_mappings = legacy_config.get("group_mappings", {})
+    if not isinstance(legacy_mappings, dict):
+        raise ValueError("biomero-config.json group_mappings must be an object")
+    dedicated_mappings = load_json_object(mappings_path)
+    group_mappings = dict(legacy_mappings)
+    group_mappings.update(dedicated_mappings)
+
+    # The mount-wide root lets BIOMERO index an existing managed Zarr in place
+    # even when runtime group mappings have changed since it was imported.
+    storage_roots = {IMPORT_MOUNT_STORAGE_ROOT: import_root}
+    for group_id, mapping in group_mappings.items():
+        try:
+            normalized_group_id = int(group_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid OMERO group ID in group mappings: {group_id!r}"
+            ) from exc
+        if normalized_group_id < 0 or not isinstance(mapping, dict):
+            raise ValueError(
+                f"Invalid BIOMERO group mapping for OMERO group {group_id}"
+            )
+        folder = mapping.get("folder")
+        if not folder or folder in {".", "root"}:
+            storage_root = import_root
+        else:
+            folder_path = Path(str(folder))
+            if folder_path.is_absolute() or ".." in folder_path.parts:
+                raise ValueError(
+                    f"Group {group_id} folder must stay within IMPORT_MOUNT_PATH"
+                )
+            storage_root = (import_root / folder_path).resolve()
+            try:
+                storage_root.relative_to(import_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Group {group_id} folder must stay within IMPORT_MOUNT_PATH"
+                ) from exc
+        storage_roots[f"group-{normalized_group_id}-data"] = storage_root
+
+    logger.info(
+        "Derived %s managed storage root(s) from BIOMERO group mappings "
+        "beneath IMPORT_MOUNT_PATH=%s",
+        len(storage_roots),
+        import_root,
+    )
+    return storage_roots
+
+
+def locate_managed_zarr(zarr_path, storage_roots):
+    """Return the most specific managed root and relative path for a Zarr."""
+    resolved_path = Path(zarr_path).resolve()
+    candidates = []
+    for storage_id, root in storage_roots.items():
+        resolved_root = Path(root).resolve()
+        try:
+            relative_path = resolved_path.relative_to(resolved_root)
+        except ValueError:
+            continue
+        candidates.append((
+            len(resolved_root.parts),
+            storage_id.startswith("group-"),
+            storage_id,
+            resolved_root,
+            relative_path,
+        ))
+    if not candidates:
+        raise ValueError(
+            f"Existing Zarr is outside BIOMERO managed storage: {resolved_path}"
+        )
+    _, _, storage_id, storage_root, relative_path = max(candidates)
+    return storage_id, storage_root, relative_path
+
+
+def select_object_storage_root(obj, storage_roots):
+    """Select the configured managed root belonging to the object's OMERO group."""
+    try:
+        group_id = int(obj.getDetails().getGroup().getId())
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cannot determine the OMERO group for object {obj.getId()}"
+        ) from exc
+    storage_id = f"group-{group_id}-data"
+    storage_root = storage_roots.get(storage_id)
+    if storage_root is None:
+        raise ValueError(
+            f"No canonical storage root is configured for OMERO group {group_id}"
+        )
+    return storage_id, Path(storage_root).resolve()
+
+
+def derive_canonical_source_directory(obj, storage_root):
+    """Derive a managed source directory from ordered legacy provenance."""
+    storage_root = Path(storage_root).resolve()
+    candidates = {"Imported_from": set(), "Filepath": set()}
+    for annotation in obj.listAnnotations():
+        if not hasattr(annotation, "getMapValue"):
+            continue
+        for key, value in _annotation_values(annotation).items():
+            if key not in candidates:
+                continue
+            path = Path(value)
+            if not path.is_absolute():
+                continue
+            resolved = path.resolve()
+            directory = resolved.parent if resolved.suffix else resolved
+            try:
+                relative = directory.relative_to(storage_root)
+            except ValueError:
+                continue
+            candidates[key].add(relative.as_posix())
+
+    for key in ("Imported_from", "Filepath"):
+        if len(candidates[key]) > 1:
+            raise ValueError(
+                f"Managed {key} provenance is ambiguous for object {obj.getId()}"
+            )
+        if candidates[key]:
+            return Path(next(iter(candidates[key])))
+    return Path(".")
+
+
+def attach_canonical_source(
+    conn,
+    obj,
+    object_type,
+    source,
+    annotation_writer=None,
+):
+    """Attach one canonical record without creating same-generation ambiguity."""
+    existing = get_canonical_source(obj, object_type)
+    if existing == source:
+        return None
+    if (
+        existing is not None
+        and existing.source_generation >= source.source_generation
+    ):
+        raise ValueError(
+            f"Cannot replace canonical {object_type} {obj.getId()} generation "
+            f"{existing.source_generation} with generation "
+            f"{source.source_generation}"
+        )
+    if annotation_writer is None:
+        from ezomero import post_map_annotation
+
+        annotation_writer = post_map_annotation
+    return annotation_writer(
+        conn=conn,
+        object_type=object_type,
+        object_id=int(obj.getId()),
+        kv_dict=source.to_annotation_values(),
+        ns=CANONICAL_SOURCE_NAMESPACE,
+        across_groups=False,
+    )
+
+
+def attach_canonical_plate_source(
+    conn,
+    plate,
+    source,
+    annotation_writer=None,
+):
+    """Attach a per-image Plate cache record without generation ambiguity."""
+    existing = get_canonical_plate_source(plate)
+    if existing == source:
+        return None
+    if (
+        existing is not None
+        and existing.source_generation >= source.source_generation
+    ):
+        raise ValueError(
+            f"Cannot replace canonical Plate {plate.getId()} generation "
+            f"{existing.source_generation} with generation "
+            f"{source.source_generation}"
+        )
+    if annotation_writer is None:
+        from ezomero import post_map_annotation
+
+        annotation_writer = post_map_annotation
+    return annotation_writer(
+        conn=conn,
+        object_type="Plate",
+        object_id=int(plate.getId()),
+        kv_dict=source.to_annotation_values(),
+        ns=CANONICAL_PLATE_SOURCE_NAMESPACE,
+        across_groups=False,
+    )
+
+
+def validate_omero_image_semantics(image, guard):
+    """Require exported NGFF dimensions and dtype to match the OMERO Image."""
+    sizes = {
+        "t": int(image.getSizeT()),
+        "c": int(image.getSizeC()),
+        "z": int(image.getSizeZ()),
+        "y": int(image.getSizeY()),
+        "x": int(image.getSizeX()),
+    }
+    try:
+        expected_shape = tuple(sizes[axis.lower()] for axis in guard.axes)
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported NGFF axis for OMERO Image {image.getId()}: {exc.args[0]}"
+        ) from exc
+    if expected_shape != tuple(guard.shape):
+        raise ValueError(
+            f"Exported NGFF shape {guard.shape} does not match OMERO Image "
+            f"{image.getId()} shape {expected_shape}"
+        )
+
+    pixels_type = image.getPrimaryPixels().getPixelsType().getValue()
+    pixels_type = str(getattr(pixels_type, "val", pixels_type)).lower()
+    dtype_names = {
+        "bit": "bool",
+        "uint8": "uint8",
+        "int8": "int8",
+        "uint16": "uint16",
+        "int16": "int16",
+        "uint32": "uint32",
+        "int32": "int32",
+        "float": "float32",
+        "double": "float64",
+        "complex": "complex64",
+        "double-complex": "complex128",
+    }
+    expected_dtype = dtype_names.get(pixels_type)
+    if expected_dtype is None or expected_dtype != guard.dtype:
+        raise ValueError(
+            f"Exported NGFF pixel type {guard.dtype} does not match OMERO "
+            f"Image {image.getId()} pixel type {pixels_type}"
+        )
+
+
+def promote_exported_image_zarr(
+    conn,
+    image,
+    export_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    semantic_guard_reader=None,
+    promotion_service_factory=None,
+    annotation_writer=None,
+):
+    """Verify a fresh Image export, commit it, annotate it, and restore a task copy."""
+    storage_id, storage_root = select_object_storage_root(
+        image, storage_roots)
+    source_directory = derive_canonical_source_directory(image, storage_root)
+    semantic_guard_reader = (
+        semantic_guard_reader or read_zarr_v2_semantic_guard
+    )
+    guard = semantic_guard_reader(export_path, ".")
+    validate_omero_image_semantics(image, guard)
+    logger.info(
+        "Validated exported NGFF semantics for Image %s: axes=%s, "
+        "shape=%s, dtype=%s",
+        image.getId(),
+        tuple(guard.axes),
+        tuple(guard.shape),
+        guard.dtype,
+    )
+    guard_values = {
+        "node_path": ".",
+        "role": "image",
+        "shape": guard.shape,
+        "dtype": guard.dtype,
+        "axes": guard.axes,
+        "coordinate_transformations": guard.coordinate_transformations,
+    }
+    identity_provider = identity_provider or IsccBioIdentityProvider()
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from OMERO Pixels for Image %s",
+        image.getId(),
+    )
+    original_identity = identity_provider.generate_omero(
+        conn,
+        image_id=int(image.getId()),
+        **guard_values,
+    )
+    logger.info(
+        "Calculated OMERO pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        original_identity.iscc_code,
+        original_identity.data_code,
+        original_identity.instance_code,
+    )
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from exported Zarr for Image %s: %s",
+        image.getId(),
+        export_path,
+    )
+    exported_identity = identity_provider.generate(
+        Path(export_path),
+        **guard_values,
+    )
+    logger.info(
+        "Calculated exported Zarr pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        exported_identity.iscc_code,
+        exported_identity.data_code,
+        exported_identity.instance_code,
+    )
+
+    promotion_service_factory = (
+        promotion_service_factory or CanonicalPromotionService
+    )
+    promotion = promotion_service_factory(
+        storage_root_id=storage_id,
+        storage_root=storage_root,
+    )
+    result = promotion.promote(
+        export_path,
+        source_directory=source_directory,
+        source_object_type="Image",
+        source_object_id=int(image.getId()),
+        source_generation=source_generation,
+        node_path=".",
+        original_identity=original_identity,
+        exported_identity=exported_identity,
+        pixel_identity_origin="omero-pixels",
+    )
+    logger.info(
+        "ISCC-BIO verification matched OMERO Pixels and exported Zarr for "
+        "Image %s; committed canonical generation %s at %s",
+        image.getId(),
+        source_generation,
+        result.path,
+    )
+    attach_canonical_source(
+        conn,
+        image,
+        "Image",
+        result.source,
+        annotation_writer=annotation_writer,
+    )
+
+    export_path = Path(export_path)
+    if not export_path.exists():
+        shutil.copytree(
+            result.path,
+            export_path,
+            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+        )
+    log(
+        " Verified canonical Image %s generation %s at %s"
+        % (image.getId(), source_generation, result.path)
+    )
+    return result.source
+
+
+def index_existing_image_zarr(
+    conn,
+    image,
+    existing_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    semantic_guard_reader=None,
+    promotion_service_factory=None,
+    annotation_writer=None,
+):
+    """Verify and index an existing managed Zarr without copying its pixels."""
+    storage_id, storage_root, relative_path = locate_managed_zarr(
+        existing_path,
+        storage_roots,
+    )
+    semantic_guard_reader = (
+        semantic_guard_reader or read_zarr_v2_semantic_guard
+    )
+    guard = semantic_guard_reader(existing_path, ".")
+    validate_omero_image_semantics(image, guard)
+    guard_values = {
+        "node_path": ".",
+        "role": "image",
+        "shape": guard.shape,
+        "dtype": guard.dtype,
+        "axes": guard.axes,
+        "coordinate_transformations": guard.coordinate_transformations,
+    }
+    identity_provider = identity_provider or IsccBioIdentityProvider()
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from OMERO Pixels for existing "
+        "Zarr Image %s",
+        image.getId(),
+    )
+    original_identity = identity_provider.generate_omero(
+        conn,
+        image_id=int(image.getId()),
+        **guard_values,
+    )
+    logger.info(
+        "Calculated OMERO pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        original_identity.iscc_code,
+        original_identity.data_code,
+        original_identity.instance_code,
+    )
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from existing managed Zarr for "
+        "Image %s: %s",
+        image.getId(),
+        existing_path,
+    )
+    existing_identity = identity_provider.generate(
+        Path(existing_path),
+        **guard_values,
+    )
+    logger.info(
+        "Calculated existing Zarr pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        existing_identity.iscc_code,
+        existing_identity.data_code,
+        existing_identity.instance_code,
+    )
+    if not pixel_identities_match(original_identity, existing_identity):
+        raise ValueError(
+            f"Existing managed Zarr pixels do not match OMERO Image "
+            f"{image.getId()}"
+        )
+
+    promotion_service_factory = (
+        promotion_service_factory or CanonicalPromotionService
+    )
+    indexing = promotion_service_factory(
+        storage_root_id=storage_id,
+        storage_root=storage_root,
+    )
+    result = indexing.index_existing(
+        existing_path,
+        relative_path=relative_path,
+        source_object_type="Image",
+        source_object_id=int(image.getId()),
+        source_generation=source_generation,
+        node_path=".",
+        original_identity=original_identity,
+        existing_identity=existing_identity,
+        pixel_identity_origin="omero-pixels",
+    )
+    attach_canonical_source(
+        conn,
+        image,
+        "Image",
+        result.source,
+        annotation_writer=annotation_writer,
+    )
+    logger.info(
+        "ISCC-BIO verification matched OMERO Pixels and existing Zarr for "
+        "Image %s; indexed generation %s in place at %s:%s",
+        image.getId(),
+        source_generation,
+        storage_id,
+        relative_path.as_posix(),
+    )
+    return result.source
+
+
+def index_existing_plate_zarr(
+    conn,
+    plate,
+    existing_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    annotation_writer=None,
+):
+    """Index a managed Plate Zarr in place using per-image identities."""
+    storage_id, _storage_root, relative_path = locate_managed_zarr(
+        existing_path,
+        storage_roots,
+    )
+    source = build_canonical_plate_source(
+        plate,
+        existing_path,
+        storage_id,
+        relative_path,
+        source_generation=source_generation,
+        identity_provider=identity_provider,
+    )
+    attach_canonical_plate_source(
+        conn,
+        plate,
+        source,
+        annotation_writer=annotation_writer,
+    )
+    logger.info(
+        "Indexed canonical Plate %s generation %s in place at %s:%s with "
+        "%s image node(s)",
+        plate.getId(),
+        source_generation,
+        storage_id,
+        relative_path.as_posix(),
+        len(source.images),
+    )
+    log(
+        " Indexed canonical Plate %s with %s image-level ISCC identities"
+        % (plate.getId(), len(source.images))
+    )
+    return source
+
+
+def promote_exported_plate_zarr(
+    conn,
+    plate,
+    export_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    canonical_store_factory=None,
+    annotation_writer=None,
+):
+    """Atomically retain a fresh Plate export as its reusable canonical Zarr."""
+    storage_id, storage_root = select_object_storage_root(plate, storage_roots)
+    source_directory = derive_canonical_source_directory(plate, storage_root)
+    store_factory = canonical_store_factory or CanonicalStore
+    store = store_factory(storage_root)
+    relative_path = store.relative_path_for(
+        source_directory,
+        "Plate",
+        int(plate.getId()),
+        source_generation,
+    )
+    source = build_canonical_plate_source(
+        plate,
+        export_path,
+        storage_id,
+        relative_path,
+        source_generation=source_generation,
+        identity_provider=identity_provider,
+    )
+    committed = store.commit(export_path, source)
+    attach_canonical_plate_source(
+        conn,
+        plate,
+        source,
+        annotation_writer=annotation_writer,
+    )
+    export_path = Path(export_path)
+    if not export_path.exists():
+        shutil.copytree(
+            committed,
+            export_path,
+            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+        )
+    logger.info(
+        "Promoted canonical Plate %s generation %s to %s with %s image "
+        "node(s)",
+        plate.getId(),
+        source_generation,
+        committed,
+        len(source.images),
+    )
+    log(
+        " Cached canonical Plate %s generation %s at %s"
+        % (plate.getId(), source_generation, committed)
+    )
+    return source
+
+
+def resolve_managed_source_path(source, storage_roots):
+    """Resolve an existing canonical root without escaping its configured root."""
+    root = storage_roots.get(source.storage_root)
+    if root is None:
+        return None
+    root = Path(root).resolve()
+    candidate = (root / Path(source.relative_path)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Canonical source escapes storage root {source.storage_root}"
+        ) from exc
+    if not candidate.is_dir():
+        logger.warning("Canonical Zarr path is unavailable: %s", candidate)
+        return None
+    return candidate
+
+
+def get_legacy_zarr_path(obj):
+    """Resolve legacy Zarr annotations with explicit, stable precedence."""
+    candidates = {"Imported_from": set(), "Filepath": set()}
+    for annotation in obj.listAnnotations():
+        if not hasattr(annotation, "getMapValue"):
+            continue
+        for key, value in _annotation_values(annotation).items():
+            if key not in candidates:
+                continue
+            path = Path(value)
+            if value.lower().endswith(".zarr") and path.is_dir():
+                candidates[key].add(str(path.resolve()))
+    for key in ("Imported_from", "Filepath"):
+        if len(candidates[key]) > 1:
+            raise ValueError(f"Legacy {key} Zarr metadata is ambiguous")
+        if candidates[key]:
+            return Path(next(iter(candidates[key])))
+    return None
+
+
+def select_zarr_source_path(obj, canonical_source, storage_roots):
+    """Select a reusable root, never silently bypassing canonical metadata."""
+    if canonical_source is not None:
+        if (
+            isinstance(canonical_source, CanonicalZarrSource)
+            and canonical_source.node_path != "."
+        ):
+            logger.info(
+                "Canonical source for %s %s uses nested node %s; exporting "
+                "a standalone Zarr until node materialization is available",
+                canonical_source.source_object_type,
+                canonical_source.source_object_id,
+                canonical_source.node_path,
+            )
+            return None
+        source_path = resolve_managed_source_path(
+            canonical_source, storage_roots)
+        if source_path is None:
+            source_type = (
+                "Plate"
+                if isinstance(canonical_source, CanonicalPlateSource)
+                else canonical_source.source_object_type
+            )
+            logger.warning(
+                "Canonical Zarr record for %s %s could not be resolved at "
+                "%s:%s; a fresh export is required",
+                source_type,
+                canonical_source.source_object_id,
+                canonical_source.storage_root,
+                canonical_source.relative_path,
+            )
+            return None
+        if isinstance(canonical_source, CanonicalPlateSource):
+            logger.info(
+                "Reusing canonical Zarr for Plate %s: generation=%s, path=%s, "
+                "%s cached image ISCC identities (not recalculated)",
+                canonical_source.source_object_id,
+                canonical_source.source_generation,
+                source_path,
+                len(canonical_source.images),
+            )
+        else:
+            logger.info(
+                "Reusing canonical Zarr for %s %s: generation=%s, path=%s, "
+                "pixel ISCC=%s (cached; ISCC-BIO was not recalculated)",
+                canonical_source.source_object_type,
+                canonical_source.source_object_id,
+                canonical_source.source_generation,
+                source_path,
+                canonical_source.pixel_identity.iscc_code,
+            )
+        return source_path
+    legacy_path = get_legacy_zarr_path(obj)
+    if legacy_path is not None:
+        logger.info(
+            "Reusing legacy Zarr path for OMERO object %s: %s "
+            "(not yet a BIOMERO canonical; no cached ISCC)",
+            obj.getId(),
+            legacy_path,
+        )
+    return legacy_path
 
 
 def log(text):
@@ -236,7 +1441,17 @@ def save_as_ome_tiff(conn, image, folder_name=None):
             f.write(piece)
 
 
-def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None, ome_zarr_version=None):
+def save_plate_as_zarr(
+    conn,
+    suuid,
+    plate,
+    folder_name=None,
+    client=None,
+    ome_zarr_version=None,
+    canonical_source=None,
+    storage_roots=None,
+    shallow_zarr_storage=False,
+):
     """Export plate as ZARR format using omero-cli-zarr.
     
     Args:
@@ -251,12 +1466,29 @@ def save_plate_as_zarr(conn, suuid, plate, folder_name=None, client=None, ome_za
     # (1) find out the plate's file
     # (2) (a) if not zarr: subprocess raw on that file
     # (2) (b) if zarr: copy/scp directly
-    save_as_zarr(conn, suuid, plate, folder_name,
-                 constants.transfer.DATA_TYPE_PLATE,
-                 ome_zarr_version)
+    return save_as_zarr(
+        conn,
+        suuid,
+        plate,
+        folder_name,
+        constants.transfer.DATA_TYPE_PLATE,
+        ome_zarr_version,
+        canonical_source,
+        storage_roots,
+        shallow_zarr_storage,
+    )
 
 
-def save_image_as_zarr(conn, suuid, image, folder_name=None, ome_zarr_version=None):
+def save_image_as_zarr(
+    conn,
+    suuid,
+    image,
+    folder_name=None,
+    ome_zarr_version=None,
+    canonical_source=None,
+    storage_roots=None,
+    shallow_zarr_storage=False,
+):
     """Export image as ZARR format using omero-cli-zarr.
     
     Args:
@@ -266,9 +1498,17 @@ def save_image_as_zarr(conn, suuid, image, folder_name=None, ome_zarr_version=No
         folder_name (str, optional): Target folder for export.
         ome_zarr_version (str, optional): OMERO version for export.
     """
-    save_as_zarr(conn, suuid, image, folder_name,
-                 constants.transfer.DATA_TYPE_IMAGE,
-                 ome_zarr_version)
+    return save_as_zarr(
+        conn,
+        suuid,
+        image,
+        folder_name,
+        constants.transfer.DATA_TYPE_IMAGE,
+        ome_zarr_version,
+        canonical_source,
+        storage_roots,
+        shallow_zarr_storage,
+    )
     
 
 def build_zarr_export_error(object, data_type, stderr):
@@ -298,7 +1538,17 @@ def build_zarr_export_error(object, data_type, stderr):
     return " ".join(context)
 
 
-def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr_version=None):
+def save_as_zarr(
+    conn,
+    suuid,
+    object,
+    folder_name=None,
+    data_type=None,
+    ome_zarr_version=None,
+    canonical_source=None,
+    storage_roots=None,
+    shallow_zarr_storage=False,
+):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
     Args:
@@ -324,18 +1574,93 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
         img_name = "%s_(%d).%s" % (path_name, i, extension)
         i += 1
 
-    filepath = None
-    annotations = object.listAnnotations()
-    for annotation in annotations:
-        if annotation.OMERO_TYPE == omero.model.MapAnnotationI:
-            for ann in annotation.getMapValue():
-                if ann.name in ['Filepath', 'Imported_from']:
-                    filepath = ann.value
+    shallow_reference = None
+    if shallow_zarr_storage and data_type == constants.transfer.DATA_TYPE_IMAGE:
+        shallow_reference = get_shallow_reference(object)
+    if shallow_reference is not None:
+        materialized = materialize_shallow_zarr(
+            shallow_reference,
+            img_name,
+            storage_roots or {},
+        )
+        logger.info(
+            "Reconstructed shallow Image %s as full workflow input %s with "
+            "%s label layer(s)",
+            object.getId(),
+            img_name,
+            len(materialized.labels),
+        )
+        log(
+            " Reconstructed original pixels and %s managed label layer(s)"
+            % len(materialized.labels)
+        )
+        return (
+            shallow_reference.source,
+            os.path.basename(img_name),
+            materialized.labels,
+        )
 
-    if filepath and filepath.lower().endswith('.zarr') and os.path.exists(filepath):
+    source_path = select_zarr_source_path(
+        object, canonical_source, storage_roots or {})
+    if source_path is not None:
+        if shallow_zarr_storage and canonical_source is None:
+            try:
+                if data_type == constants.transfer.DATA_TYPE_PLATE:
+                    canonical_source = index_existing_plate_zarr(
+                        conn,
+                        object,
+                        source_path,
+                        storage_roots or {},
+                    )
+                elif data_type == constants.transfer.DATA_TYPE_IMAGE:
+                    canonical_source = index_existing_image_zarr(
+                        conn,
+                        object,
+                        source_path,
+                        storage_roots or {},
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Existing Zarr indexing failed for %s %s; retaining "
+                    "normal legacy reuse and disabling shallow result "
+                    "matching for this selection: %s",
+                    data_type,
+                    object.getId(),
+                    exc,
+                    exc_info=True,
+                )
         log(" Copying file as: %s" % img_name)
-        shutil.copytree(filepath, img_name, dirs_exist_ok=True)
+        shutil.copytree(
+            source_path,
+            img_name,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+        )
     else:
+        if canonical_source is None:
+            if data_type == constants.transfer.DATA_TYPE_IMAGE:
+                if shallow_zarr_storage:
+                    logger.info(
+                        "No reusable canonical or legacy Zarr found for %s "
+                        "%s; exporting NGFF for importer-enabled result "
+                        "processing",
+                        data_type,
+                        object.getId(),
+                    )
+                else:
+                    logger.info(
+                        "No reusable Zarr found for %s %s; exporting a fresh "
+                        "NGFF store on the standard Get Results route",
+                        data_type,
+                        object.getId(),
+                    )
+            else:
+                logger.info(
+                    "No reusable canonical or legacy Zarr found for %s %s; "
+                    "exporting a fresh NGFF store",
+                    data_type,
+                    object.getId(),
+                )
         log("  Saving file as: %s" % img_name)
         curr_dir = os.getcwd()
         exp_dir = os.path.join(curr_dir, folder_name)
@@ -394,7 +1719,37 @@ def save_as_zarr(conn, suuid, object, folder_name=None, data_type=None, ome_zarr
             )
             logger.error(f"Critical error: {error_msg}")
             raise Exception(error_msg)
-    return  # shortcut
+        if shallow_zarr_storage and canonical_source is None:
+            try:
+                if data_type == constants.transfer.DATA_TYPE_PLATE:
+                    canonical_source = promote_exported_plate_zarr(
+                        conn,
+                        object,
+                        img_name,
+                        storage_roots or {},
+                    )
+                elif data_type == constants.transfer.DATA_TYPE_IMAGE:
+                    canonical_source = promote_exported_image_zarr(
+                        conn,
+                        object,
+                        img_name,
+                        storage_roots or {},
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Canonical Zarr promotion failed for %s %s; retaining "
+                    "the normal exported input and disabling shallow result "
+                    "matching for this selection: %s",
+                    data_type,
+                    object.getId(),
+                    exc,
+                    exc_info=True,
+                )
+                log(
+                    " Canonical caching unavailable for %s %s; using normal "
+                    "export" % (data_type, object.getId())
+                )
+    return canonical_source, os.path.basename(img_name), ()
 
 
 def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
@@ -514,10 +1869,17 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     ome_zarr_version = script_params[constants.transfer.OME_VERSION]
     project_z = constants.transfer.Z in script_params and \
         script_params[constants.transfer.Z] == constants.transfer.Z_MAXPROJ
+    message = ""
+    canonical_inputs = ()
+    canonical_sources = {}
+    transfer_artifacts = {}
+    label_components_by_object = {}
+    storage_roots = {}
+    shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
 
     if (not split_cs) and (not merged_cs):
         log("Not chosen to save Individual Channels OR Merged Image")
-        return
+        return None, "No channel export mode selected", canonical_inputs
 
     # check if we have these params
     channel_names = []
@@ -581,11 +1943,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         return t_range
 
     # Get the images or datasets
-    message = ""
     objects, log_message = script_utils.get_objects(conn, script_params)
     message += log_message
     if not objects:
-        return None, message
+        return None, message, canonical_inputs
 
     # Attach figure to the first image
     parent = objects[0]
@@ -596,7 +1957,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             images.extend(list(ds.listChildren()))
         if not images:
             message += "No image found in dataset(s)"
-            return None, message
+            return None, message, canonical_inputs
     elif data_type == constants.transfer.DATA_TYPE_PLATE:
         if format == constants.transfer.FORMAT_OMEZARR:
             log("Processing %s Plates to ZARR, not individual images." % len(objects))         
@@ -614,9 +1975,33 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                     images.append(image)
             if not images:
                 message += "No image found in plate(s)"
-                return None, message
+                return None, message, canonical_inputs
     else:
         images = objects
+
+    if shallow_zarr_storage:
+        try:
+            storage_roots = load_group_storage_roots()
+            if data_type == constants.transfer.DATA_TYPE_PLATE:
+                export_objects = objects
+                canonical_object_type = "Plate"
+            else:
+                export_objects = images
+                canonical_object_type = "Image"
+            canonical_sources, canonical_inputs = discover_canonical_inputs(
+                export_objects, canonical_object_type)
+        except Exception as exc:
+            logger.warning(
+                "Canonical Zarr setup failed; using normal Zarr export and "
+                "disabling shallow result matching for this selection: %s",
+                exc,
+                exc_info=True,
+            )
+            log(" Canonical caching unavailable; using normal Zarr export")
+            shallow_zarr_storage = False
+            canonical_inputs = ()
+            canonical_sources = {}
+            storage_roots = {}
 
     log("Processing %s images" % len(images))
 
@@ -637,7 +2022,22 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     if format == constants.transfer.FORMAT_OMEZARR and data_type == constants.transfer.DATA_TYPE_PLATE:
         for plate in objects:
             log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
-            save_plate_as_zarr(conn, suuid, plate, folder_name, client, ome_zarr_version=ome_zarr_version)
+            promoted_source, transfer_artifact, label_components = save_plate_as_zarr(
+                conn,
+                suuid,
+                plate,
+                folder_name,
+                client,
+                ome_zarr_version=ome_zarr_version,
+                canonical_source=canonical_sources.get(int(plate.getId())),
+                storage_roots=storage_roots,
+                shallow_zarr_storage=shallow_zarr_storage,
+            )
+            object_id = int(plate.getId())
+            transfer_artifacts[object_id] = transfer_artifact
+            label_components_by_object[object_id] = label_components
+            if promoted_source is not None:
+                canonical_sources[object_id] = promoted_source
             write_logfile(exp_dir)
             
     for img in images:
@@ -651,12 +2051,30 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             if img._prepareRE().requiresPixelsPyramid():
                 log("  ** Can't export a 'Big' image to OME-TIFF. **")
                 if len(images) == 1:
-                    return None, "Can't export a 'Big' image to %s." % format
+                    return (
+                        None,
+                        "Can't export a 'Big' image to %s." % format,
+                        canonical_inputs,
+                    )
                 continue
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_OMEZARR:
-            save_image_as_zarr(conn, suuid, img, folder_name, ome_zarr_version=ome_zarr_version)
+            promoted_source, transfer_artifact, label_components = save_image_as_zarr(
+                conn,
+                suuid,
+                img,
+                folder_name,
+                ome_zarr_version=ome_zarr_version,
+                canonical_source=canonical_sources.get(int(img.getId())),
+                storage_roots=storage_roots,
+                shallow_zarr_storage=shallow_zarr_storage,
+            )
+            object_id = int(img.getId())
+            transfer_artifacts[object_id] = transfer_artifact
+            label_components_by_object[object_id] = label_components
+            if promoted_source is not None:
+                canonical_sources[object_id] = promoted_source
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -665,7 +2083,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                       "See 'omero.client.download_as.max_size'" % size
                 log("  ** %s. **" % msg)
                 if len(images) == 1:
-                    return None, msg
+                    return None, msg, canonical_inputs
                 continue
             else:
                 log("Exporting image as %s: %s" % (format, img.getName()))
@@ -715,6 +2133,16 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
 
         # write log for exported images (not needed for ome-tiff)
         write_logfile(exp_dir)
+
+    if shallow_zarr_storage:
+        canonical_inputs = canonical_inputs_from_sources(
+            export_objects,
+            canonical_object_type,
+            canonical_sources,
+            transfer_artifacts,
+            storage_roots,
+            label_components_by_object,
+        )
 
     if len(os.listdir(exp_dir)) == 0:
         error_msg = "No files exported. Check export settings and data availability."
@@ -796,7 +2224,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                     "You can download the zip/ZARR from the attachments.\n")
         logger.info(f"File annotation {file_annotation.id} preserved for download")
 
-    return file_annotation, message
+    return file_annotation, message, canonical_inputs
 
 
 def write_logfile(exp_dir):
@@ -990,7 +2418,7 @@ def run_script():
                 log("%s:%s" % (key, value))
 
             # call the main script - returns a file annotation wrapper
-            file_annotation, message = batch_image_export(
+            file_annotation, message, canonical_inputs = batch_image_export(
                 conn, script_params, slurmClient, suuid, client)
 
             stop_time = datetime.now()
@@ -998,6 +2426,12 @@ def run_script():
 
             # return this fileAnnotation to the client.
             client.setOutput("Message", rstring(message))
+            client.setOutput(
+                CANONICAL_INPUTS_OUTPUT,
+                rstring(json.dumps([
+                    item.to_dict() for item in canonical_inputs
+                ], separators=(",", ":"), sort_keys=True)),
+            )
             if file_annotation is not None:
                 client.setOutput("File_Annotation",
                                  robject(file_annotation._obj))

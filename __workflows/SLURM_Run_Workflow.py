@@ -55,7 +55,8 @@ License:
 from __future__ import print_function
 import sys
 import os
-from uuid import UUID
+import json
+from uuid import UUID, uuid4
 import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rbool, rlist, robject, wrap
@@ -65,6 +66,7 @@ from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
+from biomero.zarr_contracts import CanonicalInput
 import logging
 import os
 import time as timesleep
@@ -74,6 +76,9 @@ logger = logging.getLogger(__name__)
 
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -97,6 +102,70 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 VERSION = "2.9.0"
+CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
+
+
+def ensure_tracking_uuid(value):
+    """Keep tracker UUIDs or create one for tracking-disabled deployments."""
+    if value is None:
+        return uuid4()
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
+def parse_canonical_inputs_output(results):
+    """Validate canonical input records returned by Image Transfer."""
+    if not results or CANONICAL_INPUTS_OUTPUT not in results:
+        return ()
+    raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
+    if not raw_value:
+        return ()
+    payload = json.loads(raw_value)
+    if not isinstance(payload, list):
+        raise ValueError("Canonical_Inputs must contain a JSON list")
+    return tuple(CanonicalInput.from_dict(item) for item in payload)
+
+
+def record_canonical_input_snapshot(
+    slurm_client,
+    workflow_id,
+    export_task_id,
+    canonical_inputs,
+):
+    """Record the immutable canonical input snapshot in workflow tracking."""
+    if not canonical_inputs:
+        logger.info(
+            "Image Transfer returned no complete canonical input snapshot "
+            "for workflow %s; result processing will use returned pixel "
+            "identity matching instead of task-lineage candidates",
+            workflow_id,
+        )
+        return False
+    if not slurm_client.track_workflows:
+        logger.info(
+            "Workflow tracking is disabled for %s; the canonical input "
+            "snapshot is not recorded and result processing will use returned "
+            "pixel identity matching",
+            workflow_id,
+        )
+        return False
+    logger.info(
+        "Image Transfer returned %s canonical input record(s) for workflow %s; "
+        "persisting the immutable task snapshot",
+        len(canonical_inputs),
+        workflow_id,
+    )
+    slurm_client.workflowTracker.record_canonical_inputs(
+        workflow_id,
+        export_task_id,
+        tuple(canonical_inputs),
+    )
+    logger.info(
+        "Recorded canonical input snapshot in the workflow event store for %s",
+        workflow_id,
+    )
+    return True
 
 def get_roi_script_capability(conn: BlitzGateway) -> dict:
     """Ask OMERO whether its optional Labels2Rois script is installed."""
@@ -664,11 +733,13 @@ def runScript():
                 logger.warning(roi_warning)
                 UI_messages += roi_warning + " "
             # Start tracking the workflow on a unique ID
-            wf_id = slurmClient.workflowTracker.initiate_workflow(
-                params.name,
-                "\n".join([params.description, VERSION]),
-                user,
-                group
+            wf_id = ensure_tracking_uuid(
+                slurmClient.workflowTracker.initiate_workflow(
+                    params.name,
+                    "\n".join([params.description, VERSION]),
+                    user,
+                    group
+                )
             )
             wf_failed = False  # wf state
 
@@ -1427,12 +1498,14 @@ def exportImageToSLURM(client: omscripts.client,
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
     try:
-        task_id = slurmClient.workflowTracker.add_task_to_workflow(
-            wf_id,
-            script_name,
-            VERSION,
-            persist_dict[constants.transfer.IDS],
-            persist_dict
+        task_id = ensure_tracking_uuid(
+            slurmClient.workflowTracker.add_task_to_workflow(
+                wf_id,
+                script_name,
+                VERSION,
+                persist_dict[constants.transfer.IDS],
+                persist_dict
+            )
         )
         slurmClient.workflowTracker.start_task(task_id)
     except Exception as db_e:
@@ -1503,6 +1576,15 @@ def exportImageToSLURM(client: omscripts.client,
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+
+        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+            canonical_inputs = parse_canonical_inputs_output(rv)
+            record_canonical_input_snapshot(
+                slurmClient,
+                wf_id,
+                task_id,
+                canonical_inputs,
+            )
 
         try:
             slurmClient.workflowTracker.complete_task(task_id, msg)
