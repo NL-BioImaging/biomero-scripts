@@ -279,6 +279,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         from biomero_importer.utils.result_zarr import (
             evaluate_returned_zarr,
             find_returned_zarr_stores,
+            normalize_returned_zarr,
         )
         RETURNED_ZARR_SUPPORT_AVAILABLE = True
     except ImportError as exc:
@@ -374,6 +375,39 @@ def inspect_returned_zarrs(results_path, canonical_inputs):
         )
         return ()
     return tuple(decisions)
+
+
+def normalize_eligible_returned_zarrs(decisions, workflow_id, results_path):
+    """Commit eligible shallow stores, retaining full data on every failure."""
+    normalized = []
+    results_root = Path(results_path).resolve()
+    for decision in decisions or ():
+        if not decision.eligible:
+            continue
+        try:
+            decision.store_path.resolve().relative_to(results_root)
+            result = normalize_returned_zarr(decision, workflow_id)
+            normalized.append(result)
+            saved = max(0, result.bytes_before - result.bytes_after)
+            logger.info(
+                "Shallow Zarr committed: %s retained %s label node(s), "
+                "omitted verified duplicate image chunks, and reduced this "
+                "result from %s to %s bytes (saved %s bytes)",
+                result.store_path,
+                len(result.collection.images[0].label_node_paths),
+                result.bytes_before,
+                result.bytes_after,
+                saved,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Shallow Zarr normalization failed for %s; retaining the "
+                "full result when available: %s",
+                decision.store_path,
+                exc,
+                exc_info=True,
+            )
+    return tuple(normalized)
 
 
 def get_images_by_ids(conn, image_ids):
@@ -2402,7 +2436,8 @@ def create_upload_orders_for_results(
     destination_id: int,
     results_path: str,
     wf_id: UUID,
-    client: Any = None
+    client: Any = None,
+    shallow_decisions=(),
 ) -> List[Dict[str, Any]]:
     """Create upload orders for SLURM results (images and optionally label zarrs).
 
@@ -2447,6 +2482,22 @@ def create_upload_orders_for_results(
     if import_label_zarrs and import_only_labels and len(label_zarr_files) == 0:
         logger.warning("Import_Only_Labels=true but no label zarr directories found. Falling back to main image import to avoid empty import.")
         skip_main_images = False
+
+    # Current OMERO PixelBuffer support registers each retained label node as
+    # its own ordinary image. Only normalize when the main returned image is
+    # intentionally excluded from this import order; otherwise keep it fully
+    # self-contained for the established importer path.
+    if skip_main_images and shallow_decisions:
+        normalize_eligible_returned_zarrs(
+            shallow_decisions,
+            wf_id,
+            results_path,
+        )
+    elif shallow_decisions:
+        logger.info(
+            "Shallow Zarr normalization skipped because the main returned "
+            "images are required by this importer order"
+        )
 
     # Create order for image files if any exist (unless we're only importing labels)
     if image_files and not skip_main_images:
@@ -3198,6 +3249,7 @@ def process_importer_workflow(
     task_id: Optional[UUID] = None,
     input_images: Optional[List[Any]] = None,
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
+    shallow_decisions=(),
 
 ) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
@@ -3320,7 +3372,7 @@ def process_importer_workflow(
     logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
         group_name, username, destination_type, destination_id,
-        permanent_storage_path, wf_id, client)
+        permanent_storage_path, wf_id, client, shallow_decisions)
 
     if orders:
         message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
@@ -4426,6 +4478,7 @@ def runScript() -> None:
                 None, None, None, None)
             _bulk_zip_perm: Optional[str] = None  # set once after extraction; used for skip-list and cleanup
             extraction_error = None
+            shallow_zarr_decisions = ()
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_slurm_results_zip(
                     slurmClient, slurm_job_id, local_tmp_storage, group_name, wf_id, message)
@@ -4455,7 +4508,7 @@ def runScript() -> None:
                         "tracking for result processing",
                         len(canonical_input_manifest.inputs),
                     )
-                inspect_returned_zarrs(
+                shallow_zarr_decisions = inspect_returned_zarrs(
                     permanent_storage_path,
                     canonical_input_manifest,
                 )
@@ -4583,7 +4636,8 @@ def runScript() -> None:
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
                     permanent_storage_path, wf_id, task_id,
-                    input_images=input_images, roi_pairs=roi_pairs)
+                    input_images=input_images, roi_pairs=roi_pairs,
+                    shallow_decisions=shallow_zarr_decisions)
                 message += importer_message
 
             if unwrap(client.getInput(constants.results.OUTPUT_CREATE_ROIS)):

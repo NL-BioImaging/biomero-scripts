@@ -38,6 +38,23 @@ def _load_inspector(*, finder, evaluator, available=True):
     return namespace["inspect_returned_zarrs"], logger
 
 
+def _load_normalizer(normalize):
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name == "normalize_eligible_returned_zarrs"
+    )
+    logger = RecordingLogger()
+    namespace = {
+        "Path": Path,
+        "normalize_returned_zarr": normalize,
+        "logger": logger,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(SCRIPT_PATH), "exec"), namespace)
+    return namespace["normalize_eligible_returned_zarrs"], logger
+
+
 def test_keep_mode_logs_eligible_result_without_mutating_it(tmp_path):
     store = tmp_path / "input.zarr"
     decision = SimpleNamespace(
@@ -80,3 +97,58 @@ def test_return_inspection_requires_importer_and_feature_flag():
     assert "from biomero_importer.utils.result_zarr import (" in script
     assert "IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED" in script
     assert "inspect_returned_zarrs(" in script
+
+
+def test_normalizes_only_eligible_results_inside_results_root(tmp_path):
+    inside = SimpleNamespace(
+        eligible=True,
+        store_path=tmp_path / "result.zarr",
+    )
+    keep = SimpleNamespace(
+        eligible=False,
+        store_path=tmp_path / "keep.zarr",
+    )
+    outside = SimpleNamespace(
+        eligible=True,
+        store_path=tmp_path.parent / "outside.zarr",
+    )
+    committed = SimpleNamespace(
+        store_path=inside.store_path,
+        bytes_before=100,
+        bytes_after=10,
+        collection=SimpleNamespace(images=(SimpleNamespace(
+            label_node_paths=("labels/cells",),
+        ),)),
+    )
+    calls = []
+
+    def normalize(decision, workflow_id):
+        calls.append((decision, workflow_id))
+        return committed
+
+    normalizer, logger = _load_normalizer(normalize)
+
+    results = normalizer((inside, keep, outside), "workflow-id", tmp_path)
+
+    assert results == (committed,)
+    assert calls == [(inside, "workflow-id")]
+    assert "saved %s bytes" in logger.info_calls[-1][0][0]
+    assert "retaining the full result" in logger.warning_calls[-1][0][0]
+
+
+def test_normalization_occurs_after_label_path_compatibility_renames():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    function = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name == "create_upload_orders_for_results"
+    )
+    calls = [
+        item.func.id
+        for item in ast.walk(function)
+        if isinstance(item, ast.Call) and isinstance(item.func, ast.Name)
+    ]
+
+    assert calls.index("find_label_zarr_paths") < calls.index(
+        "normalize_eligible_returned_zarrs"
+    )
