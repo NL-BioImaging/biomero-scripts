@@ -1,5 +1,5 @@
 import ast
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 
@@ -53,6 +53,24 @@ def _load_normalizer(normalize):
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(SCRIPT_PATH), "exec"), namespace)
     return namespace["normalize_eligible_returned_zarrs"], logger
+
+
+def _load_plate_label_selector():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    nodes = [
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name in {
+            "is_shallow_plate_collection",
+            "select_common_plate_label",
+        }
+    ]
+    namespace = {"PurePosixPath": PurePosixPath}
+    exec(
+        compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH), "exec"),
+        namespace,
+    )
+    return namespace["select_common_plate_label"]
 
 
 def test_keep_mode_logs_eligible_result_without_mutating_it(tmp_path):
@@ -161,5 +179,33 @@ def test_shallow_mode_automates_primary_and_label_import_selection():
     assert "import_label_zarrs = True" in source
     assert "import_only_labels = False" in source
     assert "unchanged_passthrough" in source
-    assert "shallow_primary_paths" in source
+    assert "shallow_image_primary_paths" in source
+    assert "shallow_plate_paths" in source
+    assert '"platePixelSource": "label"' in source
     assert "Automatic shallow result selection prepared" in source
+
+
+def test_plate_label_preview_requires_one_common_label():
+    select = _load_plate_label_selector()
+
+    def image(path, labels):
+        return SimpleNamespace(
+            image_node_path=path,
+            source=SimpleNamespace(source_object_type="Plate"),
+            label_node_paths=tuple(
+                f"{path}/labels/{label}" for label in labels
+            ),
+        )
+
+    collection = SimpleNamespace(images=(
+        image("A/1/0", ("nuclei", "cells")),
+        image("B/1/0", ("nuclei", "cells")),
+    ))
+
+    assert select(collection, "cells") == ("cells", None)
+    selected, reason = select(collection, "")
+    assert selected is None
+    assert "multiple common Plate labels" in reason
+    selected, reason = select(collection, "foci")
+    assert selected is None
+    assert "not declared on every Plate image" in reason

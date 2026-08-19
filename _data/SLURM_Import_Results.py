@@ -84,7 +84,7 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
@@ -446,6 +446,48 @@ def normalize_eligible_returned_zarrs(decisions, workflow_id, results_path):
                 exc_info=True,
             )
     return tuple(normalized)
+
+
+def is_shallow_plate_collection(collection) -> bool:
+    """Return whether every omitted image belongs to one Plate source."""
+    images = tuple(getattr(collection, "images", ()))
+    return bool(images) and all(
+        image.source.source_object_type == "Plate" for image in images
+    )
+
+
+def select_common_plate_label(collection, requested_name=""):
+    """Select one exact image-level label shared by every Plate image."""
+    if not is_shallow_plate_collection(collection):
+        return None, "result is not a shallow Plate"
+    labels_per_image = []
+    for image in collection.images:
+        prefix = PurePosixPath(image.image_node_path) / "labels"
+        names = set()
+        for logical_path in image.label_node_paths:
+            try:
+                relative = PurePosixPath(logical_path).relative_to(prefix)
+            except ValueError:
+                continue
+            if len(relative.parts) == 1:
+                names.add(relative.name)
+        labels_per_image.append(names)
+    common = set.intersection(*labels_per_image)
+    requested_name = (requested_name or "").strip()
+    if requested_name:
+        if requested_name in common:
+            return requested_name, None
+        return None, (
+            f"label {requested_name!r} is not declared on every Plate image"
+        )
+    if len(common) == 1:
+        return next(iter(common)), None
+    if not common:
+        return None, "no label name is declared on every Plate image"
+    return None, (
+        "multiple common Plate labels require Plate_Label_Preview_Name: "
+        + ", ".join(sorted(common))
+    )
 
 
 def get_images_by_ids(conn, image_ids):
@@ -2505,6 +2547,12 @@ def create_upload_orders_for_results(
     # registered automatically.
     import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
     import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
+    import_plate_label_preview = bool(unwrap(client.getInput(
+        constants.results.IMPORT_PLATE_LABEL_PREVIEW
+    ))) if client else False
+    plate_label_preview_name = (unwrap(client.getInput(
+        constants.results.PLATE_LABEL_PREVIEW_NAME
+    )) or "").strip() if client else ""
     automatic_shallow_import = (
         SHALLOW_ZARR_ENABLED
         and RETURNED_ZARR_SUPPORT_AVAILABLE
@@ -2542,23 +2590,41 @@ def create_upload_orders_for_results(
             for decision in shallow_decisions
             if getattr(decision, "unchanged_passthrough", False)
         }
-        shallow_primary_paths = {
+        shallow_plate_results = tuple(
+            result for result in normalized_results
+            if is_shallow_plate_collection(result.collection)
+        )
+        shallow_plate_paths = {
+            str(Path(result.store_path).resolve())
+            for result in shallow_plate_results
+        }
+        shallow_image_primary_paths = {
             str(Path(result.store_path).resolve())
             for result in normalized_results
+            if not is_shallow_plate_collection(result.collection)
         }
+        label_zarr_files = [
+            path for path in label_zarr_files
+            if not any(
+                Path(path).resolve().is_relative_to(Path(plate_path))
+                for plate_path in shallow_plate_paths
+            )
+        ]
         image_files = [
             path for path in all_image_files
             if str(Path(path).resolve()) not in label_paths
             and str(Path(path).resolve()) not in passthrough_paths
-            and str(Path(path).resolve()) not in shallow_primary_paths
+            and str(Path(path).resolve()) not in shallow_image_primary_paths
         ]
         logger.info(
-            "Automatic shallow result selection prepared %s primary image "
-            "path(s), %s label projection(s), skipped %s shallow top-image "
-            "duplicate(s), and skipped %s unchanged pass-through store(s)",
+            "Automatic shallow result selection prepared %s primary image/Plate "
+            "path(s), %s Image label projection(s), %s shallow Plate(s), "
+            "skipped %s shallow Image duplicate(s), and skipped %s unchanged "
+            "pass-through store(s)",
             len(image_files),
             len(label_zarr_files),
-            len(shallow_primary_paths),
+            len(shallow_plate_paths),
+            len(shallow_image_primary_paths),
             len(passthrough_paths),
         )
     else:
@@ -2610,6 +2676,43 @@ def create_upload_orders_for_results(
         logger.info(f"Created image upload order for {len(image_files)} files")
     elif image_files and skip_main_images:
         logger.info(f"Skipping main image import for {len(image_files)} files (Import_Only_Labels=true, {len(label_zarr_files)} label zarr directories found)")
+
+    if automatic_shallow_import and import_plate_label_preview:
+        for result in shallow_plate_results:
+            label_name, reason = select_common_plate_label(
+                result.collection,
+                plate_label_preview_name,
+            )
+            if label_name is None:
+                logger.warning(
+                    "Skipping optional label-backed Plate preview for %s: %s",
+                    result.store_path,
+                    reason,
+                )
+                continue
+            preview_order = {
+                "Group": group_name,
+                "Username": username,
+                "DestinationID": destination_id,
+                "DestinationType": destination_type,
+                "UUID": str(uuid.uuid4()),
+                "Files": [str(result.store_path)],
+                "ImportOptions": {
+                    "schema": 1,
+                    "platePixelSource": "label",
+                    "plateLabelName": label_name,
+                },
+                "wf_id": wf_id,
+                "source": "SLURM_Results_Plate_Label_Preview",
+            }
+            create_upload_order(preview_order)
+            orders.append(preview_order)
+            logger.info(
+                "Created optional label-backed Plate upload order for %s "
+                "using label %s",
+                result.store_path,
+                label_name,
+            )
             
     # Create orders for label zarr directories if enabled and found
     if import_label_zarrs and label_zarr_files:
@@ -4258,6 +4361,16 @@ def runScript() -> None:
                          grouping="07.1",
                          description="Import ONLY label zarr directories (requires Import_Label_Zarrs=true). Skips main image import.",
                          default=True),
+            scripts.Bool(constants.results.IMPORT_PLATE_LABEL_PREVIEW,
+                         optional=True,
+                         grouping="07.2",
+                         description="Also create one Plate view whose WellSample pixels use a common image-level label. Off by default and only applies to shallow Plate results.",
+                         default=False),
+            scripts.String(constants.results.PLATE_LABEL_PREVIEW_NAME,
+                           optional=True,
+                           grouping="07.3",
+                           description="Exact common NGFF label name for the optional label-backed Plate. Leave empty only when exactly one label name exists on every Plate image.",
+                           default=""),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE,
                          optional=False,
                          grouping="08",
