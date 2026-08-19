@@ -273,6 +273,21 @@ if not IMPORTER_ENABLED:
     logger.warning(
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
+RETURNED_ZARR_SUPPORT_AVAILABLE = False
+if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+    try:
+        from biomero_importer.utils.result_zarr import (
+            evaluate_returned_zarr,
+            find_returned_zarr_stores,
+        )
+        RETURNED_ZARR_SUPPORT_AVAILABLE = True
+    except ImportError as exc:
+        logger.warning(
+            "BIOMERO_SHALLOW_ZARR is enabled, but returned-Zarr processing "
+            "is unavailable; full results will be retained: %s",
+            exc,
+        )
+
 # Version constant for easy version management
 VERSION = "2.9.0"
 
@@ -299,6 +314,66 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
             exc,
         )
         return None
+
+
+def inspect_returned_zarrs(results_path, canonical_inputs):
+    """Log keep-only shallow eligibility without modifying result data."""
+    if not RETURNED_ZARR_SUPPORT_AVAILABLE:
+        logger.info(
+            "Shallow Zarr return inspection skipped: processing support is "
+            "not available"
+        )
+        return ()
+
+    decisions = []
+    try:
+        stores = find_returned_zarr_stores(results_path)
+        if not stores:
+            logger.info(
+                "Shallow Zarr return inspection found no *.zarr stores in %s",
+                results_path,
+            )
+            return ()
+        logger.info(
+            "Shallow Zarr return inspection found %s outermost store(s) in %s",
+            len(stores),
+            results_path,
+        )
+        for store in stores:
+            decision = evaluate_returned_zarr(store, canonical_inputs)
+            decisions.append(decision)
+            if decision.eligible:
+                matched = decision.matched_inputs[0]
+                identity = decision.image_identities[0]
+                logger.info(
+                    "Shallow Zarr decision [KEEP MODE]: %s is eligible; "
+                    "returned image pixels match transferred %s %s "
+                    "(artifact=%s, identity=%s, labels=%s). The full result "
+                    "store is retained and no files were changed.",
+                    store,
+                    matched.selected_object_type,
+                    matched.selected_object_id,
+                    matched.transfer_artifact,
+                    identity.iscc_code,
+                    list(decision.label_node_paths),
+                )
+            else:
+                logger.info(
+                    "Shallow Zarr decision [KEEP MODE]: retaining full store "
+                    "%s (reason=%s, labels=%s). No files were changed.",
+                    store,
+                    decision.reason,
+                    list(decision.label_node_paths),
+                )
+    except Exception as exc:
+        logger.warning(
+            "Shallow Zarr return inspection failed; retaining every full "
+            "result store: %s",
+            exc,
+            exc_info=True,
+        )
+        return ()
+    return tuple(decisions)
 
 
 def get_images_by_ids(conn, image_ids):
@@ -4366,7 +4441,7 @@ def runScript() -> None:
                 extraction_error = e  # defer raise so log is still uploaded below
 
             if (
-                SHALLOW_ZARR_ENABLED
+                IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
                 and not extraction_error
                 and permanent_storage_path
             ):
@@ -4380,6 +4455,10 @@ def runScript() -> None:
                         "tracking for result processing",
                         len(canonical_input_manifest.inputs),
                     )
+                inspect_returned_zarrs(
+                    permanent_storage_path,
+                    canonical_input_manifest,
+                )
 
             # Copy log to permanent storage (only possible when extraction succeeded),
             # then upload from the best available path so the in-place symlink stays valid.
