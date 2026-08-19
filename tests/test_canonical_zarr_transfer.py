@@ -9,11 +9,16 @@ from types import SimpleNamespace
 import pytest
 
 from biomero_schema.zarr import (
+    CANONICAL_PLATE_IMAGE_NAMESPACE,
+    CANONICAL_PLATE_LABEL_NAMESPACE,
     CANONICAL_PLATE_SOURCE_NAMESPACE,
     CANONICAL_SOURCE_NAMESPACE,
     SHALLOW_COLLECTION_NAMESPACE,
     CanonicalInput,
     CanonicalPlateImage,
+    CanonicalPlateImageRecord,
+    CanonicalPlateIndex,
+    CanonicalPlateLabelRecord,
     CanonicalPlateSource,
     CanonicalZarrSource,
     ManagedZarrNode,
@@ -61,11 +66,16 @@ def _load_canonical_functions():
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     namespace = {
+        "CANONICAL_PLATE_IMAGE_NAMESPACE": CANONICAL_PLATE_IMAGE_NAMESPACE,
+        "CANONICAL_PLATE_LABEL_NAMESPACE": CANONICAL_PLATE_LABEL_NAMESPACE,
         "CANONICAL_PLATE_SOURCE_NAMESPACE": CANONICAL_PLATE_SOURCE_NAMESPACE,
         "CANONICAL_SOURCE_NAMESPACE": CANONICAL_SOURCE_NAMESPACE,
         "SHALLOW_COLLECTION_NAMESPACE": SHALLOW_COLLECTION_NAMESPACE,
         "CanonicalInput": CanonicalInput,
         "CanonicalPlateImage": CanonicalPlateImage,
+        "CanonicalPlateImageRecord": CanonicalPlateImageRecord,
+        "CanonicalPlateIndex": CanonicalPlateIndex,
+        "CanonicalPlateLabelRecord": CanonicalPlateLabelRecord,
         "CanonicalPlateSource": CanonicalPlateSource,
         "CanonicalZarrSource": CanonicalZarrSource,
         "ManagedZarrNode": ManagedZarrNode,
@@ -379,6 +389,47 @@ def test_resolves_latest_canonical_plate_source(pixel_identity):
     ))
 
     assert restored == current
+
+
+def test_split_canonical_plate_annotations_round_trip(pixel_identity):
+    ns = _load_canonical_functions()
+    canonical = plate_source(pixel_identity)
+    writes = []
+    plate = Object(9, [])
+
+    result = ns["attach_canonical_plate_source"](
+        "connection",
+        plate,
+        canonical,
+        annotation_writer=lambda **kwargs: writes.append(kwargs) or len(writes),
+    )
+    plate.annotations.extend(
+        Annotation(write["ns"], write["kv_dict"]) for write in writes
+    )
+
+    assert result == (1, 2)
+    assert [write["ns"] for write in writes] == [
+        CANONICAL_PLATE_IMAGE_NAMESPACE,
+        CANONICAL_PLATE_SOURCE_NAMESPACE,
+    ]
+    assert "images" not in writes[-1]["kv_dict"]
+    assert ns["get_canonical_plate_source"](plate) == canonical
+
+
+def test_incomplete_split_plate_index_is_ignored(pixel_identity, caplog):
+    ns = _load_canonical_functions()
+    canonical = plate_source(pixel_identity)
+    index = CanonicalPlateIndex.from_source(canonical)
+    plate = Object(9, [Annotation(
+        CANONICAL_PLATE_SOURCE_NAMESPACE,
+        index.to_annotation_values(),
+    )])
+
+    with caplog.at_level(logging.WARNING):
+        restored = ns["get_canonical_plate_source"](plate)
+
+    assert restored is None
+    assert "incomplete split canonical Plate" in caplog.text
 
 
 def test_plate_discovery_builds_plate_input(pixel_identity):

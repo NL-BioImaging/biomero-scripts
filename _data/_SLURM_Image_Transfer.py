@@ -72,11 +72,16 @@ except ImportError:
     import Image
 from biomero import SlurmClient, constants
 from biomero.zarr_contracts import (
+    CANONICAL_PLATE_IMAGE_NAMESPACE,
+    CANONICAL_PLATE_LABEL_NAMESPACE,
     CANONICAL_PLATE_SOURCE_NAMESPACE,
     CANONICAL_SOURCE_NAMESPACE,
     SHALLOW_COLLECTION_NAMESPACE,
     CanonicalInput,
     CanonicalPlateImage,
+    CanonicalPlateImageRecord,
+    CanonicalPlateIndex,
+    CanonicalPlateLabelRecord,
     CanonicalPlateSource,
     CanonicalZarrSource,
     ManagedZarrNode,
@@ -285,33 +290,137 @@ def get_canonical_source(obj, object_type):
 
 
 def get_canonical_plate_source(plate):
-    """Resolve the latest deterministic per-image canonical Plate record."""
+    """Resolve old monolithic or new bounded canonical Plate annotations."""
     plate_id = int(plate.getId())
     candidates = []
+    indexes = []
+    image_records = []
+    label_records = []
     for annotation in plate.listAnnotations():
-        if _annotation_namespace(annotation) != CANONICAL_PLATE_SOURCE_NAMESPACE:
+        namespace = _annotation_namespace(annotation)
+        if namespace not in {
+            CANONICAL_PLATE_SOURCE_NAMESPACE,
+            CANONICAL_PLATE_IMAGE_NAMESPACE,
+            CANONICAL_PLATE_LABEL_NAMESPACE,
+        }:
             continue
+        values = _annotation_values(annotation)
         try:
-            candidate = CanonicalPlateSource.from_annotation_values(
-                _annotation_values(annotation)
-            )
+            if namespace == CANONICAL_PLATE_SOURCE_NAMESPACE:
+                if "images" in values:
+                    candidate = CanonicalPlateSource.from_annotation_values(values)
+                    if candidate.source_object_id == plate_id:
+                        candidates.append(candidate)
+                else:
+                    index = CanonicalPlateIndex.from_annotation_values(values)
+                    if index.source_object_id == plate_id:
+                        indexes.append(index)
+            elif namespace == CANONICAL_PLATE_IMAGE_NAMESPACE:
+                record = CanonicalPlateImageRecord.from_annotation_values(values)
+                if record.source_object_id == plate_id:
+                    image_records.append(record)
+            elif namespace == CANONICAL_PLATE_LABEL_NAMESPACE:
+                record = CanonicalPlateLabelRecord.from_annotation_values(values)
+                if record.source_object_id == plate_id:
+                    label_records.append(record)
         except Exception as exc:
             logger.warning(
                 "Ignoring invalid canonical Plate Zarr annotation on Plate "
-                "%s: %s",
+                "%s in namespace %s: %s",
+                plate_id,
+                namespace,
+                exc,
+            )
+
+    for index in indexes:
+        generation_images = [
+            record for record in image_records
+            if record.source_generation == index.source_generation
+        ]
+        generation_labels = [
+            record for record in label_records
+            if record.source_generation == index.source_generation
+        ]
+        images_by_path = {}
+        ambiguous = False
+        for record in generation_images:
+            path = record.image.image_node_path
+            previous = images_by_path.get(path)
+            if previous is not None and previous != record.image:
+                ambiguous = True
+                break
+            images_by_path[path] = record.image
+        labels_by_image = {}
+        label_keys = set()
+        for record in generation_labels:
+            key = (record.image_node_path, record.label.logical_node_path)
+            if key in label_keys:
+                previous = next(
+                    item.label for item in generation_labels
+                    if (
+                        item.image_node_path,
+                        item.label.logical_node_path,
+                    ) == key
+                )
+                if previous != record.label:
+                    ambiguous = True
+                    break
+                continue
+            label_keys.add(key)
+            labels_by_image.setdefault(record.image_node_path, []).append(
+                record.label
+            )
+        if ambiguous:
+            logger.warning(
+                "Ignoring ambiguous split canonical Plate generation %s on "
+                "Plate %s",
+                index.source_generation,
+                plate_id,
+            )
+            continue
+        if (
+            len(images_by_path) != index.image_count
+            or len(label_keys) != index.label_count
+            or any(path not in images_by_path for path in labels_by_image)
+        ):
+            logger.warning(
+                "Ignoring incomplete split canonical Plate generation %s on "
+                "Plate %s: expected %s image/%s label records, found %s/%s",
+                index.source_generation,
+                plate_id,
+                index.image_count,
+                index.label_count,
+                len(images_by_path),
+                len(label_keys),
+            )
+            continue
+        images = tuple(
+            images_by_path[path].model_copy(update={
+                "labels": tuple(sorted(
+                    labels_by_image.get(path, ()),
+                    key=lambda item: item.logical_node_path,
+                )),
+            })
+            for path in sorted(images_by_path)
+        )
+        try:
+            candidates.append(CanonicalPlateSource(
+                storage_root=index.storage_root,
+                relative_path=index.relative_path,
+                source_object_id=index.source_object_id,
+                source_generation=index.source_generation,
+                interchange_profile=index.interchange_profile,
+                images=images,
+                store_identity=index.store_identity,
+            ))
+        except Exception as exc:
+            logger.warning(
+                "Ignoring inconsistent split canonical Plate generation %s "
+                "on Plate %s: %s",
+                index.source_generation,
                 plate_id,
                 exc,
             )
-            continue
-        if candidate.source_object_id != plate_id:
-            logger.warning(
-                "Ignoring canonical Plate Zarr annotation owned by Plate %s "
-                "on Plate %s",
-                candidate.source_object_id,
-                plate_id,
-            )
-            continue
-        candidates.append(candidate)
     if not candidates:
         logger.info("No BIOMERO canonical Zarr record found for Plate %s", plate_id)
         return None
@@ -781,7 +890,7 @@ def attach_canonical_plate_source(
     source,
     annotation_writer=None,
 ):
-    """Attach a per-image Plate cache record without generation ambiguity."""
+    """Attach bounded node records, then the compact Plate index as commit."""
     existing = get_canonical_plate_source(plate)
     if existing == source:
         return None
@@ -798,14 +907,46 @@ def attach_canonical_plate_source(
         from ezomero import post_map_annotation
 
         annotation_writer = post_map_annotation
-    return annotation_writer(
+    writes = []
+    for image in source.images:
+        image_record = CanonicalPlateImageRecord(
+            source_object_id=source.source_object_id,
+            source_generation=source.source_generation,
+            image=image.model_copy(update={"labels": ()}),
+        )
+        writes.append(annotation_writer(
+            conn=conn,
+            object_type="Plate",
+            object_id=int(plate.getId()),
+            kv_dict=image_record.to_annotation_values(),
+            ns=CANONICAL_PLATE_IMAGE_NAMESPACE,
+            across_groups=False,
+        ))
+        for label in image.labels:
+            label_record = CanonicalPlateLabelRecord(
+                source_object_id=source.source_object_id,
+                source_generation=source.source_generation,
+                image_node_path=image.image_node_path,
+                label=label,
+            )
+            writes.append(annotation_writer(
+                conn=conn,
+                object_type="Plate",
+                object_id=int(plate.getId()),
+                kv_dict=label_record.to_annotation_values(),
+                ns=CANONICAL_PLATE_LABEL_NAMESPACE,
+                across_groups=False,
+            ))
+    index = CanonicalPlateIndex.from_source(source)
+    writes.append(annotation_writer(
         conn=conn,
         object_type="Plate",
         object_id=int(plate.getId()),
-        kv_dict=source.to_annotation_values(),
+        kv_dict=index.to_annotation_values(),
         ns=CANONICAL_PLATE_SOURCE_NAMESPACE,
         across_groups=False,
-    )
+    ))
+    return tuple(writes)
 
 
 def validate_omero_image_semantics(image, guard):

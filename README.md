@@ -180,6 +180,11 @@ rebuild.
   Results may replace an unchanged returned image copy with a shallow
   source-and-label collection.
 
+Canonical Plate identities are indexed in OMERO as one compact Plate record
+plus bounded image- and label-node records. This keeps large Plate metadata
+below OMERO/PostgreSQL MapAnnotation value limits; existing monolithic records
+remain readable.
+
 Eligible Image results expose their labels as ordinary OMERO Image projections
 until label-aware viewers are generally available. Eligible HCS results remain
 one derived OMERO Plate: its WellSample pixels are served from the canonical
