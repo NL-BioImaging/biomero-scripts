@@ -358,6 +358,23 @@ def inspect_returned_zarrs(results_path, canonical_inputs):
                     identity.iscc_code,
                     list(decision.label_node_paths),
                 )
+                for component in getattr(decision, "label_components", ()):
+                    logger.info(
+                        "Returned Zarr label identity: store=%s, node=%s, "
+                        "pixel ISCC=%s, classification=%s%s",
+                        store,
+                        component.logical_node_path,
+                        component.pixel_identity.iscc_code,
+                        "inherited" if component.source is not None else "local",
+                        (
+                            " from %s:%s#%s" % (
+                                component.source.storage_root,
+                                component.source.relative_path,
+                                component.source.node_path,
+                            )
+                            if component.source is not None else ""
+                        ),
+                    )
             elif getattr(decision, "unchanged_passthrough", False):
                 matched = decision.matched_inputs[0]
                 logger.info(
@@ -409,6 +426,17 @@ def normalize_eligible_returned_zarrs(decisions, workflow_id, results_path):
                 result.bytes_before,
                 result.bytes_after,
                 saved,
+            )
+            inherited = sum(
+                component.source is not None
+                for component in result.collection.images[0].label_components
+            )
+            logger.info(
+                "Shallow Zarr label manifest: %s local/new-or-changed, %s "
+                "inherited (inherited bytes remain local until recursive "
+                "materialization is enabled)",
+                len(result.collection.images[0].label_components) - inherited,
+                inherited,
             )
         except Exception as exc:
             logger.warning(
