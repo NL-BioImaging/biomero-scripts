@@ -152,3 +152,13 @@ def test_normalization_occurs_after_label_path_compatibility_renames():
     assert calls.index("find_label_zarr_paths") < calls.index(
         "normalize_eligible_returned_zarrs"
     )
+
+
+def test_shallow_mode_automates_primary_and_label_import_selection():
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "automatic_shallow_import = (" in source
+    assert "import_label_zarrs = True" in source
+    assert "import_only_labels = False" in source
+    assert "unchanged_passthrough" in source
+    assert "Automatic shallow result selection prepared" in source

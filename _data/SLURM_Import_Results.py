@@ -358,6 +358,17 @@ def inspect_returned_zarrs(results_path, canonical_inputs):
                     identity.iscc_code,
                     list(decision.label_node_paths),
                 )
+            elif getattr(decision, "unchanged_passthrough", False):
+                matched = decision.matched_inputs[0]
+                logger.info(
+                    "Shallow Zarr decision [KEEP MODE]: %s is an unchanged "
+                    "input pass-through with no returned labels; it will not "
+                    "be imported as a duplicate result (artifact=%s, %s %s)",
+                    store,
+                    matched.transfer_artifact,
+                    matched.selected_object_type,
+                    matched.selected_object_id,
+                )
             else:
                 logger.info(
                     "Shallow Zarr decision [KEEP MODE]: retaining full store "
@@ -2459,22 +2470,68 @@ def create_upload_orders_for_results(
             "Cannot create upload orders: biomero-importer not available")
         return []
 
-    # Find only image files (CSV tables handled by zip workflow)
-    image_files = find_supported_image_paths(results_path)
+    orders = []
 
-    if not image_files:
+    # Legacy result controls remain effective when shallow handling is off.
+    # With shallow handling on, the returned NGFF structure determines imports:
+    # the primary logical result and every declared label projection are both
+    # registered automatically.
+    import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
+    import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
+    automatic_shallow_import = (
+        SHALLOW_ZARR_ENABLED
+        and RETURNED_ZARR_SUPPORT_AVAILABLE
+        and bool(shallow_decisions)
+    )
+    if automatic_shallow_import:
+        if not import_label_zarrs or import_only_labels:
+            logger.info(
+                "Ignoring legacy label-only result options because shallow "
+                "Zarr result registration is automatic"
+            )
+        import_label_zarrs = True
+        import_only_labels = False
+
+    # Rename label nodes for current importer compatibility before shallow
+    # normalization writes their final paths into the collection manifest.
+    label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
+
+    if automatic_shallow_import:
+        normalize_eligible_returned_zarrs(
+            shallow_decisions,
+            wf_id,
+            results_path,
+        )
+        # Re-scan after label compatibility renames and normalization. Nested
+        # labels receive their own order and must not also enter the primary
+        # image order. Exact unchanged/no-label input artifacts are omitted.
+        all_image_files = find_supported_image_paths(results_path)
+        label_paths = {str(Path(path).resolve()) for path in label_zarr_files}
+        passthrough_paths = {
+            str(Path(decision.store_path).resolve())
+            for decision in shallow_decisions
+            if getattr(decision, "unchanged_passthrough", False)
+        }
+        image_files = [
+            path for path in all_image_files
+            if str(Path(path).resolve()) not in label_paths
+            and str(Path(path).resolve()) not in passthrough_paths
+        ]
+        logger.info(
+            "Automatic shallow result selection prepared %s primary image "
+            "path(s), %s label projection(s), and skipped %s unchanged "
+            "pass-through store(s)",
+            len(image_files),
+            len(label_zarr_files),
+            len(passthrough_paths),
+        )
+    else:
+        image_files = find_supported_image_paths(results_path)
+
+    if not image_files and not label_zarr_files:
         logger.warning(
             f"No image files matched extensions {SUPPORTED_IMAGE_EXTENSIONS}")
 
-    orders = []
-
-    # Check if label zarr import is enabled
-    import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
-    import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
-    
-    # First check if there are actually label zarr files available
-    label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
-    
     # Determine if we should skip main image import (only when both label options are true AND labels exist)
     skip_main_images = import_label_zarrs and import_only_labels and len(label_zarr_files) > 0
     
@@ -2487,13 +2544,13 @@ def create_upload_orders_for_results(
     # its own ordinary image. Only normalize when the main returned image is
     # intentionally excluded from this import order; otherwise keep it fully
     # self-contained for the established importer path.
-    if skip_main_images and shallow_decisions:
+    if skip_main_images and shallow_decisions and not automatic_shallow_import:
         normalize_eligible_returned_zarrs(
             shallow_decisions,
             wf_id,
             results_path,
         )
-    elif shallow_decisions:
+    elif shallow_decisions and not automatic_shallow_import:
         logger.info(
             "Shallow Zarr normalization skipped because the main returned "
             "images are required by this importer order"
