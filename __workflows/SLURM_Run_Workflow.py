@@ -474,6 +474,27 @@ def runScript():
                              grouping="02.5.1",
                              description="Name for the new screen w/ result images",
                              default=constants.workflow.NO),
+            omscripts.Bool(
+                constants.results.IMPORT_PLATE_LABEL_PREVIEW,
+                optional=True,
+                grouping="02.5.2",
+                description=(
+                    "For Plate workflows imported into a Screen, also register "
+                    "a separate Plate whose pixels show one common result label "
+                    "at every image position. Requires importer-backed shallow "
+                    "Zarr storage."
+                ),
+                default=False),
+            omscripts.String(
+                constants.results.PLATE_LABEL_PREVIEW_NAME,
+                optional=True,
+                grouping="02.5.3",
+                description=(
+                    "Optional exact OME-Zarr label name for the Plate preview. "
+                    "Leave empty to use the only label common to every image; "
+                    "ambiguous results skip the optional preview."
+                ),
+                default=""),
             omscripts.Bool(constants.workflow.OUTPUT_DUPLICATES,
                            optional=True,
                            grouping="02.6",
@@ -1889,6 +1910,36 @@ def importResultsToOmero(client: omscripts.client,
     else:
         inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN] = rbool(
             False)
+
+    # A label-backed Plate is an optional additional view of the authoritative
+    # shallow result Plate. Keep this importer-specific contract away from the
+    # legacy Get Results script, and enforce its valid context even when a
+    # caller submits stale or hand-crafted parameters.
+    if IMPORTER_ENABLED:
+        requested_plate_preview = bool(unwrap(client.getInput(
+            constants.results.IMPORT_PLATE_LABEL_PREVIEW)))
+        plate_preview_enabled = bool(
+            requested_plate_preview
+            and SHALLOW_ZARR_ENABLED
+            and data_type == constants.transfer.DATA_TYPE_PLATE
+            and selected_output[constants.workflow.OUTPUT_NEW_SCREEN]
+        )
+        inputs[constants.results.IMPORT_PLATE_LABEL_PREVIEW] = rbool(
+            plate_preview_enabled)
+        if plate_preview_enabled:
+            requested_label_name = (unwrap(client.getInput(
+                constants.results.PLATE_LABEL_PREVIEW_NAME)) or "").strip()
+            inputs[constants.results.PLATE_LABEL_PREVIEW_NAME] = rstring(
+                requested_label_name)
+            logger.info(
+                "Plate label preview requested%s",
+                (f" for exact label '{requested_label_name}'"
+                 if requested_label_name else " with automatic label selection"),
+            )
+        elif requested_plate_preview:
+            logger.warning(
+                "Ignoring Plate label preview outside importer-backed shallow "
+                "Plate-to-Screen result import")
 
     if selected_output[constants.workflow.OUTPUT_ATTACH]:
         inputs[
