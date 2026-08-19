@@ -93,6 +93,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
         from biomero_importer.utils.pixel_identity import (
             IsccBioIdentityProvider,
+            pixel_identities_match,
             read_zarr_v2_semantic_guard,
         )
     except ImportError as exc:
@@ -114,6 +115,7 @@ GROUP_MAPPINGS_FILE = os.getenv(
     "/opt/omero/server/group-mappings.json",
 )
 IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
+IMPORT_MOUNT_STORAGE_ROOT = "import-mount-data"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 # keep track of log strings.
@@ -326,7 +328,9 @@ def load_group_storage_roots(
     group_mappings = dict(legacy_mappings)
     group_mappings.update(dedicated_mappings)
 
-    storage_roots = {}
+    # The mount-wide root lets BIOMERO index an existing managed Zarr in place
+    # even when runtime group mappings have changed since it was imported.
+    storage_roots = {IMPORT_MOUNT_STORAGE_ROOT: import_root}
     for group_id, mapping in group_mappings.items():
         try:
             normalized_group_id = int(group_id)
@@ -363,6 +367,31 @@ def load_group_storage_roots(
         import_root,
     )
     return storage_roots
+
+
+def locate_managed_zarr(zarr_path, storage_roots):
+    """Return the most specific managed root and relative path for a Zarr."""
+    resolved_path = Path(zarr_path).resolve()
+    candidates = []
+    for storage_id, root in storage_roots.items():
+        resolved_root = Path(root).resolve()
+        try:
+            relative_path = resolved_path.relative_to(resolved_root)
+        except ValueError:
+            continue
+        candidates.append((
+            len(resolved_root.parts),
+            storage_id.startswith("group-"),
+            storage_id,
+            resolved_root,
+            relative_path,
+        ))
+    if not candidates:
+        raise ValueError(
+            f"Existing Zarr is outside BIOMERO managed storage: {resolved_path}"
+        )
+    _, _, storage_id, storage_root, relative_path = max(candidates)
+    return storage_id, storage_root, relative_path
 
 
 def select_object_storage_root(obj, storage_roots):
@@ -607,6 +636,115 @@ def promote_exported_image_zarr(
     log(
         " Verified canonical Image %s generation %s at %s"
         % (image.getId(), source_generation, result.path)
+    )
+    return result.source
+
+
+def index_existing_image_zarr(
+    conn,
+    image,
+    existing_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    semantic_guard_reader=None,
+    promotion_service_factory=None,
+    annotation_writer=None,
+):
+    """Verify and index an existing managed Zarr without copying its pixels."""
+    storage_id, storage_root, relative_path = locate_managed_zarr(
+        existing_path,
+        storage_roots,
+    )
+    semantic_guard_reader = (
+        semantic_guard_reader or read_zarr_v2_semantic_guard
+    )
+    guard = semantic_guard_reader(existing_path, ".")
+    validate_omero_image_semantics(image, guard)
+    guard_values = {
+        "node_path": ".",
+        "role": "image",
+        "shape": guard.shape,
+        "dtype": guard.dtype,
+        "axes": guard.axes,
+        "coordinate_transformations": guard.coordinate_transformations,
+    }
+    identity_provider = identity_provider or IsccBioIdentityProvider()
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from OMERO Pixels for existing "
+        "Zarr Image %s",
+        image.getId(),
+    )
+    original_identity = identity_provider.generate_omero(
+        conn,
+        image_id=int(image.getId()),
+        **guard_values,
+    )
+    logger.info(
+        "Calculated OMERO pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        original_identity.iscc_code,
+        original_identity.data_code,
+        original_identity.instance_code,
+    )
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from existing managed Zarr for "
+        "Image %s: %s",
+        image.getId(),
+        existing_path,
+    )
+    existing_identity = identity_provider.generate(
+        Path(existing_path),
+        **guard_values,
+    )
+    logger.info(
+        "Calculated existing Zarr pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        existing_identity.iscc_code,
+        existing_identity.data_code,
+        existing_identity.instance_code,
+    )
+    if not pixel_identities_match(original_identity, existing_identity):
+        raise ValueError(
+            f"Existing managed Zarr pixels do not match OMERO Image "
+            f"{image.getId()}"
+        )
+
+    promotion_service_factory = (
+        promotion_service_factory or CanonicalPromotionService
+    )
+    indexing = promotion_service_factory(
+        storage_root_id=storage_id,
+        storage_root=storage_root,
+    )
+    result = indexing.index_existing(
+        existing_path,
+        relative_path=relative_path,
+        source_object_type="Image",
+        source_object_id=int(image.getId()),
+        source_generation=source_generation,
+        node_path=".",
+        original_identity=original_identity,
+        existing_identity=existing_identity,
+        pixel_identity_origin="omero-pixels",
+    )
+    attach_canonical_source(
+        conn,
+        image,
+        "Image",
+        result.source,
+        annotation_writer=annotation_writer,
+    )
+    logger.info(
+        "ISCC-BIO verification matched OMERO Pixels and existing Zarr for "
+        "Image %s; indexed generation %s in place at %s:%s",
+        image.getId(),
+        source_generation,
+        storage_id,
+        relative_path.as_posix(),
     )
     return result.source
 
@@ -985,6 +1123,28 @@ def save_as_zarr(
     source_path = select_zarr_source_path(
         object, canonical_source, storage_roots or {})
     if source_path is not None:
+        if (
+            shallow_zarr_storage
+            and data_type == constants.transfer.DATA_TYPE_IMAGE
+            and canonical_source is None
+        ):
+            try:
+                canonical_source = index_existing_image_zarr(
+                    conn,
+                    object,
+                    source_path,
+                    storage_roots or {},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Existing Zarr indexing failed for %s %s; retaining "
+                    "normal legacy reuse and disabling shallow result "
+                    "matching for this selection: %s",
+                    data_type,
+                    object.getId(),
+                    exc,
+                    exc_info=True,
+                )
         log(" Copying file as: %s" % img_name)
         shutil.copytree(
             source_path,

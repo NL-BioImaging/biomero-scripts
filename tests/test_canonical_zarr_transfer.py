@@ -29,6 +29,7 @@ def _load_canonical_functions():
         "get_canonical_source",
         "discover_canonical_inputs",
         "load_group_storage_roots",
+        "locate_managed_zarr",
         "resolve_managed_source_path",
         "get_legacy_zarr_path",
         "select_zarr_source_path",
@@ -36,6 +37,7 @@ def _load_canonical_functions():
         "derive_canonical_source_directory",
         "attach_canonical_source",
         "promote_exported_image_zarr",
+        "index_existing_image_zarr",
         "canonical_inputs_from_sources",
         "validate_omero_image_semantics",
         "is_shallow_zarr_storage_enabled",
@@ -53,11 +55,13 @@ def _load_canonical_functions():
         "logging": logging,
         "logger": logging.getLogger(__name__),
         "log": lambda text: None,
+        "pixel_identities_match": lambda left, right: left == right,
         "os": os,
         "shutil": shutil,
         "BIOMERO_CONFIG_FILE": "/missing/biomero-config.json",
         "GROUP_MAPPINGS_FILE": "/missing/group-mappings.json",
         "IMPORT_MOUNT_PATH": "/data",
+        "IMPORT_MOUNT_STORAGE_ROOT": "import-mount-data",
         "IMPORTER_ENABLED": False,
         "SHALLOW_ZARR_ENABLED": False,
         "SHALLOW_ZARR_SUPPORT_AVAILABLE": True,
@@ -353,6 +357,7 @@ def test_dedicated_group_mapping_overrides_legacy_config(tmp_path):
     )
 
     assert roots == {
+        "import-mount-data": import_mount.resolve(),
         "group-3-data": (import_mount / "Current Project").resolve()
     }
 
@@ -525,6 +530,26 @@ def test_attaches_canonical_source_annotation_once(pixel_identity):
     ) is None
 
 
+def test_managed_zarr_location_uses_most_specific_root(tmp_path):
+    ns = _load_canonical_functions()
+    import_root = tmp_path / "import"
+    group_root = import_root / "Project A"
+    zarr_path = group_root / ".analyzed/workflow/image.zarr"
+    zarr_path.mkdir(parents=True)
+
+    storage_id, root, relative = ns["locate_managed_zarr"](
+        zarr_path,
+        {
+            "import-mount-data": import_root,
+            "group-3-data": group_root,
+        },
+    )
+
+    assert storage_id == "group-3-data"
+    assert root == group_root.resolve()
+    assert relative == Path(".analyzed/workflow/image.zarr")
+
+
 def test_promotes_verified_image_and_restores_task_copy(
     tmp_path, pixel_identity, caplog
 ):
@@ -585,6 +610,56 @@ def test_promotes_verified_image_and_restores_task_copy(
     assert "ISCC=ISCC:KPIXEL" in caplog.text
     assert "Calculating ISCC-BIO pixel identity from exported Zarr" in caplog.text
     assert "ISCC-BIO verification matched" in caplog.text
+
+
+def test_indexes_verified_existing_image_without_copying(
+    tmp_path, pixel_identity, caplog
+):
+    ns = _load_canonical_functions()
+    root = tmp_path / "managed"
+    existing = root / ".analyzed/workflow/image.zarr"
+    existing.mkdir(parents=True)
+    writes = []
+
+    class Provider:
+        def generate(self, path, **guard):
+            return pixel_identity
+
+        def generate_omero(self, conn, **guard):
+            return pixel_identity
+
+    class Indexing:
+        def index_existing(self, path, **kwargs):
+            assert Path(path).resolve() == existing.resolve()
+            assert kwargs["relative_path"] == Path(
+                ".analyzed/workflow/image.zarr"
+            )
+            indexed = source(pixel_identity).model_copy(update={
+                "relative_path": ".analyzed/workflow/image.zarr",
+            })
+            return SimpleNamespace(source=indexed, path=existing)
+
+    with caplog.at_level(logging.INFO):
+        indexed = ns["index_existing_image_zarr"](
+            "connection",
+            Object(7, []),
+            existing,
+            {"group-3-data": root},
+            identity_provider=Provider(),
+            semantic_guard_reader=lambda path, node: SimpleNamespace(
+                shape=(1, 1, 1, 16, 16),
+                dtype="uint16",
+                axes=("t", "c", "z", "y", "x"),
+                coordinate_transformations=(),
+            ),
+            promotion_service_factory=lambda **kwargs: Indexing(),
+            annotation_writer=lambda **kwargs: writes.append(kwargs) or 99,
+        )
+
+    assert indexed.relative_path == ".analyzed/workflow/image.zarr"
+    assert existing.is_dir()
+    assert writes[0]["ns"] == CANONICAL_SOURCE_NAMESPACE
+    assert "indexed generation 1 in place" in caplog.text
 
 
 def test_rejects_ngff_shape_or_dtype_that_disagrees_with_omero():
