@@ -10,10 +10,12 @@ import pytest
 
 from biomero_schema.zarr import (
     CANONICAL_SOURCE_NAMESPACE,
+    SHALLOW_COLLECTION_NAMESPACE,
     CanonicalInput,
     CanonicalZarrSource,
     ManagedZarrNode,
     PixelIdentity,
+    ShallowZarrReference,
     ZarrLabelComponent,
 )
 
@@ -29,6 +31,7 @@ def _load_canonical_functions():
         "_annotation_namespace",
         "_annotation_values",
         "get_canonical_source",
+        "get_shallow_reference",
         "discover_canonical_inputs",
         "load_group_storage_roots",
         "locate_managed_zarr",
@@ -51,9 +54,11 @@ def _load_canonical_functions():
     ]
     namespace = {
         "CANONICAL_SOURCE_NAMESPACE": CANONICAL_SOURCE_NAMESPACE,
+        "SHALLOW_COLLECTION_NAMESPACE": SHALLOW_COLLECTION_NAMESPACE,
         "CanonicalInput": CanonicalInput,
         "CanonicalZarrSource": CanonicalZarrSource,
         "ManagedZarrNode": ManagedZarrNode,
+        "ShallowZarrReference": ShallowZarrReference,
         "ZarrLabelComponent": ZarrLabelComponent,
         "Path": Path,
         "json": json,
@@ -259,6 +264,29 @@ def annotation_for(source_record):
         CANONICAL_SOURCE_NAMESPACE,
         source_record.to_annotation_values(),
     )
+
+
+def test_resolves_shallow_projection_reference(pixel_identity):
+    ns = _load_canonical_functions()
+    canonical = source(pixel_identity)
+    reference = ShallowZarrReference(
+        storage_root="import-mount-data",
+        relative_path="Project A/.analyzed/run/result.zarr",
+        workflow_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        transfer_artifact="result.zarr",
+        image_node_path=".",
+        label_node_paths=("labels/nuclei", "labels/cells"),
+        source=canonical,
+        interchange_profile="ngff-0.4-zarr-v2",
+    )
+    annotation = Annotation(
+        SHALLOW_COLLECTION_NAMESPACE,
+        reference.to_annotation_values(),
+    )
+
+    restored = ns["get_shallow_reference"](Object(99, [annotation]))
+
+    assert restored == reference
 
 
 def test_canonical_source_selection_is_independent_of_annotation_order(
@@ -801,6 +829,10 @@ def test_fresh_image_exports_feed_promotion_and_final_snapshot():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert "canonical_source = promote_exported_image_zarr(" in script
-    assert "promoted_source, transfer_artifact = save_image_as_zarr(" in script
+    assert (
+        "promoted_source, transfer_artifact, label_components = "
+        "save_image_as_zarr(" in script
+    )
     assert "canonical_inputs = canonical_inputs_from_sources(" in script
     assert "transfer_artifacts," in script
+    assert "materialize_shallow_zarr(" in script

@@ -73,9 +73,11 @@ except ImportError:
 from biomero import SlurmClient, constants
 from biomero.zarr_contracts import (
     CANONICAL_SOURCE_NAMESPACE,
+    SHALLOW_COLLECTION_NAMESPACE,
     CanonicalInput,
     CanonicalZarrSource,
     ManagedZarrNode,
+    ShallowZarrReference,
     ZarrLabelComponent,
 )
 import logging
@@ -98,7 +100,10 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
             pixel_identities_match,
             read_zarr_v2_semantic_guard,
         )
-        from biomero_importer.utils.result_zarr import discover_ngff_nodes
+        from biomero_importer.utils.result_zarr import (
+            discover_ngff_nodes,
+            materialize_shallow_zarr,
+        )
     except ImportError as exc:
         SHALLOW_ZARR_SUPPORT_AVAILABLE = False
         logger.warning(
@@ -146,7 +151,13 @@ def _annotation_namespace(annotation):
 def _annotation_values(annotation):
     """Normalize gateway or model MapAnnotation entries to string values."""
     values = {}
-    for entry in annotation.getMapValue() or []:
+    if hasattr(annotation, "getMapValue"):
+        entries = annotation.getMapValue()
+    elif hasattr(annotation, "getValue"):
+        entries = annotation.getValue()
+    else:
+        entries = ()
+    for entry in entries or []:
         if hasattr(entry, "name"):
             name, value = entry.name, entry.value
         else:
@@ -159,6 +170,45 @@ def _annotation_values(annotation):
             getattr(value, "val", value)
         )
     return values
+
+
+def get_shallow_reference(obj):
+    """Resolve one deterministic managed shallow reference from an OMERO Image."""
+    candidates = []
+    for annotation in obj.listAnnotations():
+        if _annotation_namespace(annotation) != SHALLOW_COLLECTION_NAMESPACE:
+            continue
+        try:
+            candidates.append(ShallowZarrReference.from_annotation_values(
+                _annotation_values(annotation)
+            ))
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid shallow Zarr annotation on Image %s: %s",
+                obj.getId(),
+                exc,
+            )
+    distinct = {
+        json.dumps(candidate.to_dict(), sort_keys=True)
+        for candidate in candidates
+    }
+    if len(distinct) > 1:
+        raise ValueError(
+            f"Shallow Zarr metadata is ambiguous for Image {obj.getId()}"
+        )
+    if not candidates:
+        return None
+    reference = candidates[0]
+    logger.info(
+        "Located shallow Zarr collection for Image %s: storage=%s:%s, "
+        "image=%s, labels=%s",
+        obj.getId(),
+        reference.storage_root,
+        reference.relative_path,
+        reference.image_node_path,
+        list(reference.label_node_paths),
+    )
+    return reference
 
 
 def get_canonical_source(obj, object_type):
@@ -319,9 +369,11 @@ def canonical_inputs_from_sources(
     sources,
     transfer_artifacts=None,
     storage_roots=None,
+    label_components_by_object=None,
 ):
     """Build an ordered all-or-nothing snapshot after export-side promotion."""
     transfer_artifacts = transfer_artifacts or {}
+    label_components_by_object = label_components_by_object or {}
     inputs = []
     missing_ids = []
     for ordinal, obj in enumerate(objects):
@@ -331,8 +383,8 @@ def canonical_inputs_from_sources(
         if source is None or transfer_artifact is None:
             missing_ids.append(object_id)
             continue
-        labels = ()
-        if storage_roots is not None:
+        labels = label_components_by_object.get(object_id)
+        if labels is None and storage_roots is not None:
             try:
                 labels = discover_canonical_label_components(
                     source,
@@ -349,6 +401,8 @@ def canonical_inputs_from_sources(
                 )
                 missing_ids.append(object_id)
                 continue
+        if labels is None:
+            labels = ()
         inputs.append(CanonicalInput(
             ordinal=ordinal,
             selected_object_type=object_type,
@@ -1200,6 +1254,32 @@ def save_as_zarr(
         img_name = "%s_(%d).%s" % (path_name, i, extension)
         i += 1
 
+    shallow_reference = None
+    if shallow_zarr_storage and data_type == constants.transfer.DATA_TYPE_IMAGE:
+        shallow_reference = get_shallow_reference(object)
+    if shallow_reference is not None:
+        materialized = materialize_shallow_zarr(
+            shallow_reference,
+            img_name,
+            storage_roots or {},
+        )
+        logger.info(
+            "Reconstructed shallow Image %s as full workflow input %s with "
+            "%s label layer(s)",
+            object.getId(),
+            img_name,
+            len(materialized.labels),
+        )
+        log(
+            " Reconstructed original pixels and %s managed label layer(s)"
+            % len(materialized.labels)
+        )
+        return (
+            shallow_reference.source,
+            os.path.basename(img_name),
+            materialized.labels,
+        )
+
     source_path = select_zarr_source_path(
         object, canonical_source, storage_roots or {})
     if source_path is not None:
@@ -1341,7 +1421,7 @@ def save_as_zarr(
                     " Canonical caching unavailable for %s %s; using normal "
                     "export" % (data_type, object.getId())
                 )
-    return canonical_source, os.path.basename(img_name)
+    return canonical_source, os.path.basename(img_name), ()
 
 
 def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
@@ -1465,6 +1545,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     canonical_inputs = ()
     canonical_sources = {}
     transfer_artifacts = {}
+    label_components_by_object = {}
     storage_roots = {}
     shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
 
@@ -1613,7 +1694,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     if format == constants.transfer.FORMAT_OMEZARR and data_type == constants.transfer.DATA_TYPE_PLATE:
         for plate in objects:
             log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
-            promoted_source, transfer_artifact = save_plate_as_zarr(
+            promoted_source, transfer_artifact, label_components = save_plate_as_zarr(
                 conn,
                 suuid,
                 plate,
@@ -1626,6 +1707,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             )
             object_id = int(plate.getId())
             transfer_artifacts[object_id] = transfer_artifact
+            label_components_by_object[object_id] = label_components
             if promoted_source is not None:
                 canonical_sources[object_id] = promoted_source
             write_logfile(exp_dir)
@@ -1650,7 +1732,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_OMEZARR:
-            promoted_source, transfer_artifact = save_image_as_zarr(
+            promoted_source, transfer_artifact, label_components = save_image_as_zarr(
                 conn,
                 suuid,
                 img,
@@ -1662,6 +1744,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             )
             object_id = int(img.getId())
             transfer_artifacts[object_id] = transfer_artifact
+            label_components_by_object[object_id] = label_components
             if promoted_source is not None:
                 canonical_sources[object_id] = promoted_source
         else:
@@ -1730,6 +1813,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             canonical_sources,
             transfer_artifacts,
             storage_roots,
+            label_components_by_object,
         )
 
     if len(os.listdir(exp_dir)) == 0:
