@@ -76,6 +76,9 @@ logger = logging.getLogger(__name__)
 
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -1574,13 +1577,14 @@ def exportImageToSLURM(client: omscripts.client,
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        canonical_inputs = parse_canonical_inputs_output(rv)
-        record_canonical_input_snapshot(
-            slurmClient,
-            wf_id,
-            task_id,
-            canonical_inputs,
-        )
+        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+            canonical_inputs = parse_canonical_inputs_output(rv)
+            record_canonical_input_snapshot(
+                slurmClient,
+                wf_id,
+                task_id,
+                canonical_inputs,
+            )
 
         try:
             slurmClient.workflowTracker.complete_task(task_id, msg)

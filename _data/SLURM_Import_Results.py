@@ -240,6 +240,9 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
 
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
 UUID_PATTERN = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 try:
@@ -4351,7 +4354,11 @@ def runScript() -> None:
                 message += f"\nFailed to extract SLURM results: {e}"
                 extraction_error = e  # defer raise so log is still uploaded below
 
-            if not extraction_error and permanent_storage_path:
+            if (
+                SHALLOW_ZARR_ENABLED
+                and not extraction_error
+                and permanent_storage_path
+            ):
                 canonical_input_manifest = load_canonical_input_snapshot(
                     slurmClient,
                     wf_id,

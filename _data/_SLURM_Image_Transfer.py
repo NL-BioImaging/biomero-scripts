@@ -76,17 +76,32 @@ from biomero.zarr_contracts import (
     CanonicalInput,
     CanonicalZarrSource,
 )
-from biomero_importer.utils.canonical_promotion import (
-    CanonicalPromotionService,
-)
-from biomero_importer.utils.pixel_identity import (
-    IsccBioIdentityProvider,
-    read_zarr_v2_semantic_guard,
-)
 import logging
 import sys
 
 logger = logging.getLogger(__name__)
+
+IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
+SHALLOW_ZARR_SUPPORT_AVAILABLE = True
+if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+    try:
+        from biomero_importer.utils.canonical_promotion import (
+            CanonicalPromotionService,
+        )
+        from biomero_importer.utils.pixel_identity import (
+            IsccBioIdentityProvider,
+            read_zarr_v2_semantic_guard,
+        )
+    except ImportError as exc:
+        SHALLOW_ZARR_SUPPORT_AVAILABLE = False
+        logger.warning(
+            "BIOMERO_SHALLOW_ZARR is enabled but biomero-importer Zarr "
+            "support is unavailable; using normal Zarr export: %s",
+            exc,
+        )
 
 # Version constant for easy version management
 VERSION = "2.8.1"
@@ -103,6 +118,16 @@ CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 # keep track of log strings.
 log_strings = []
+
+
+def is_shallow_zarr_storage_enabled(export_format):
+    """Keep importer-owned storage behavior off the legacy result route."""
+    return (
+        IMPORTER_ENABLED
+        and SHALLOW_ZARR_ENABLED
+        and SHALLOW_ZARR_SUPPORT_AVAILABLE
+        and export_format == constants.transfer.FORMAT_OMEZARR
+    )
 
 
 def _annotation_namespace(annotation):
@@ -833,6 +858,7 @@ def save_plate_as_zarr(
     ome_zarr_version=None,
     canonical_source=None,
     storage_roots=None,
+    shallow_zarr_storage=False,
 ):
     """Export plate as ZARR format using omero-cli-zarr.
     
@@ -857,6 +883,7 @@ def save_plate_as_zarr(
         ome_zarr_version,
         canonical_source,
         storage_roots,
+        shallow_zarr_storage,
     )
 
 
@@ -868,6 +895,7 @@ def save_image_as_zarr(
     ome_zarr_version=None,
     canonical_source=None,
     storage_roots=None,
+    shallow_zarr_storage=False,
 ):
     """Export image as ZARR format using omero-cli-zarr.
     
@@ -887,6 +915,7 @@ def save_image_as_zarr(
         ome_zarr_version,
         canonical_source,
         storage_roots,
+        shallow_zarr_storage,
     )
     
 
@@ -926,6 +955,7 @@ def save_as_zarr(
     ome_zarr_version=None,
     canonical_source=None,
     storage_roots=None,
+    shallow_zarr_storage=False,
 ):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
@@ -965,13 +995,21 @@ def save_as_zarr(
     else:
         if canonical_source is None:
             if data_type == constants.transfer.DATA_TYPE_IMAGE:
-                logger.info(
-                    "No reusable canonical or legacy Zarr found for %s %s; "
-                    "exporting NGFF and calculating ISCC-BIO for canonical "
-                    "promotion",
-                    data_type,
-                    object.getId(),
-                )
+                if shallow_zarr_storage:
+                    logger.info(
+                        "No reusable canonical or legacy Zarr found for %s "
+                        "%s; exporting NGFF for importer-enabled result "
+                        "processing",
+                        data_type,
+                        object.getId(),
+                    )
+                else:
+                    logger.info(
+                        "No reusable Zarr found for %s %s; exporting a fresh "
+                        "NGFF store on the standard Get Results route",
+                        data_type,
+                        object.getId(),
+                    )
             else:
                 logger.info(
                     "No reusable canonical or legacy Zarr found for %s %s; "
@@ -1038,15 +1076,31 @@ def save_as_zarr(
             logger.error(f"Critical error: {error_msg}")
             raise Exception(error_msg)
         if (
-            data_type == constants.transfer.DATA_TYPE_IMAGE
+            shallow_zarr_storage
+            and data_type == constants.transfer.DATA_TYPE_IMAGE
             and canonical_source is None
         ):
-            canonical_source = promote_exported_image_zarr(
-                conn,
-                object,
-                img_name,
-                storage_roots or {},
-            )
+            try:
+                canonical_source = promote_exported_image_zarr(
+                    conn,
+                    object,
+                    img_name,
+                    storage_roots or {},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Canonical Zarr promotion failed for %s %s; retaining "
+                    "the normal exported input and disabling shallow result "
+                    "matching for this selection: %s",
+                    data_type,
+                    object.getId(),
+                    exc,
+                    exc_info=True,
+                )
+                log(
+                    " Canonical caching unavailable for %s %s; using normal "
+                    "export" % (data_type, object.getId())
+                )
     return canonical_source
 
 
@@ -1171,6 +1225,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     canonical_inputs = ()
     canonical_sources = {}
     storage_roots = {}
+    shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
 
     if (not split_cs) and (not merged_cs):
         log("Not chosen to save Individual Channels OR Merged Image")
@@ -1274,16 +1329,29 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     else:
         images = objects
 
-    if format == constants.transfer.FORMAT_OMEZARR:
-        storage_roots = load_group_storage_roots()
-        if data_type == constants.transfer.DATA_TYPE_PLATE:
-            export_objects = objects
-            canonical_object_type = "Plate"
-        else:
-            export_objects = images
-            canonical_object_type = "Image"
-        canonical_sources, canonical_inputs = discover_canonical_inputs(
-            export_objects, canonical_object_type)
+    if shallow_zarr_storage:
+        try:
+            storage_roots = load_group_storage_roots()
+            if data_type == constants.transfer.DATA_TYPE_PLATE:
+                export_objects = objects
+                canonical_object_type = "Plate"
+            else:
+                export_objects = images
+                canonical_object_type = "Image"
+            canonical_sources, canonical_inputs = discover_canonical_inputs(
+                export_objects, canonical_object_type)
+        except Exception as exc:
+            logger.warning(
+                "Canonical Zarr setup failed; using normal Zarr export and "
+                "disabling shallow result matching for this selection: %s",
+                exc,
+                exc_info=True,
+            )
+            log(" Canonical caching unavailable; using normal Zarr export")
+            shallow_zarr_storage = False
+            canonical_inputs = ()
+            canonical_sources = {}
+            storage_roots = {}
 
     log("Processing %s images" % len(images))
 
@@ -1313,6 +1381,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 ome_zarr_version=ome_zarr_version,
                 canonical_source=canonical_sources.get(int(plate.getId())),
                 storage_roots=storage_roots,
+                shallow_zarr_storage=shallow_zarr_storage,
             )
             write_logfile(exp_dir)
             
@@ -1344,6 +1413,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 ome_zarr_version=ome_zarr_version,
                 canonical_source=canonical_sources.get(int(img.getId())),
                 storage_roots=storage_roots,
+                shallow_zarr_storage=shallow_zarr_storage,
             )
             if promoted_source is not None:
                 canonical_sources[int(img.getId())] = promoted_source
@@ -1406,7 +1476,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         # write log for exported images (not needed for ome-tiff)
         write_logfile(exp_dir)
 
-    if format == constants.transfer.FORMAT_OMEZARR:
+    if shallow_zarr_storage:
         canonical_inputs = canonical_inputs_from_sources(
             export_objects,
             canonical_object_type,

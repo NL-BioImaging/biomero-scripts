@@ -152,7 +152,7 @@ Always start with initiating the Slurm environment at least once, for example us
 
 ### Shared group folder mappings
 
-`SLURM_Import_Results.py` and `_SLURM_Image_Transfer.py` support both the legacy
+`SLURM_Import_Results.py` supports both the legacy
 `/opt/omero/server/biomero-config.json["group_mappings"]` configuration and an
 optional dedicated `/opt/omero/server/group-mappings.json` file. Mappings are
 merged by group key. Entries found only in either source are retained, and the
@@ -162,12 +162,28 @@ Override the default paths with `OMERO_BIOMERO_CONFIG_FILE` and
 `OMERO_BIOMERO_GROUP_MAPPINGS_FILE`. Deployments that do not mount the dedicated
 file continue using the legacy configuration unchanged.
 
-Image Transfer derives each group's managed storage root at runtime as
-`IMPORT_MOUNT_PATH / mapping.folder`. There is no separate `storage_roots`
+When `BIOMERO_SHALLOW_ZARR=true`, Image Transfer also derives each group's
+managed storage root at runtime as `IMPORT_MOUNT_PATH / mapping.folder` for
+canonical Zarr promotion and reuse. There is no separate `storage_roots`
 configuration. The processor worker must receive the same read-only mapping
 files that OMERO.biomero edits and the same shared-storage mount; mappings are
 read for each script execution, so runtime changes do not require an image
 rebuild.
+
+### Optional shallow Zarr storage
+
+`BIOMERO_SHALLOW_ZARR` defaults to `false`. It is effective only together with
+`IMPORTER_ENABLED=true`:
+
+- false: Image Transfer exports normally and Import Results imports normally;
+- true: Image Transfer may promote/reuse a verified canonical Zarr, and Import
+  Results may replace an unchanged returned image copy with a shallow
+  source-and-label collection.
+
+Importer-disabled deployments continue to use `SLURM_Get_Results.py` and do not
+load BIOMERO.importer Zarr helpers. The worker processor must forward this
+environment variable to downloaded scripts; current NL-BIOMERO deployments do
+that dynamically through `biomero.constants.slurm_env`.
 
 ### Optional ROI postprocessing
 

@@ -38,6 +38,7 @@ def _load_canonical_functions():
         "promote_exported_image_zarr",
         "canonical_inputs_from_sources",
         "validate_omero_image_semantics",
+        "is_shallow_zarr_storage_enabled",
     }
     nodes = [
         node for node in tree.body
@@ -57,12 +58,65 @@ def _load_canonical_functions():
         "BIOMERO_CONFIG_FILE": "/missing/biomero-config.json",
         "GROUP_MAPPINGS_FILE": "/missing/group-mappings.json",
         "IMPORT_MOUNT_PATH": "/data",
+        "IMPORTER_ENABLED": False,
+        "SHALLOW_ZARR_ENABLED": False,
+        "SHALLOW_ZARR_SUPPORT_AVAILABLE": True,
+        "constants": SimpleNamespace(
+            transfer=SimpleNamespace(FORMAT_OMEZARR="OME-ZARR")
+        ),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
                  "exec"), namespace)
     missing = wanted.difference(namespace)
     assert not missing, f"Missing canonical helper functions: {sorted(missing)}"
     return namespace
+
+
+def test_shallow_zarr_storage_requires_importer_capability():
+    ns = _load_canonical_functions()
+
+    assert ns["is_shallow_zarr_storage_enabled"]("OME-ZARR") is False
+
+    ns["IMPORTER_ENABLED"] = True
+    assert ns["is_shallow_zarr_storage_enabled"]("OME-ZARR") is False
+
+    ns["SHALLOW_ZARR_ENABLED"] = True
+    assert ns["is_shallow_zarr_storage_enabled"]("OME-ZARR") is True
+
+    ns["SHALLOW_ZARR_SUPPORT_AVAILABLE"] = False
+    assert ns["is_shallow_zarr_storage_enabled"]("OME-ZARR") is False
+    assert ns["is_shallow_zarr_storage_enabled"]("OME-TIFF") is False
+
+
+def test_importer_dependencies_are_only_imported_behind_capability_guard():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    top_level_imports = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    assert not any(
+        getattr(node, "module", "") == "biomero_importer"
+        or getattr(node, "module", "").startswith("biomero_importer.")
+        for node in top_level_imports
+    )
+
+    guarded_imports = [
+        node
+        for conditional in tree.body
+        if (
+            isinstance(conditional, ast.If)
+            and "IMPORTER_ENABLED" in ast.unparse(conditional.test)
+            and "SHALLOW_ZARR_ENABLED" in ast.unparse(conditional.test)
+        )
+        for node in ast.walk(conditional)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.module.startswith("biomero_importer.")
+        )
+    ]
+    assert len(guarded_imports) == 2
 
 
 class NamedValue:
