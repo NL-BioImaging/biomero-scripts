@@ -180,6 +180,19 @@ rebuild.
   Results may replace an unchanged returned image copy with a shallow
   source-and-label collection.
 
+Eligible Image results expose their labels as ordinary OMERO Image projections
+until label-aware viewers are generally available. Eligible HCS results remain
+one derived OMERO Plate: its WellSample pixels are served from the canonical
+source Plate while the in-place shallow collection retains the image-level
+labels. This avoids flattening a large Plate into thousands of loose mask
+Images.
+
+**Import Plate label preview** is an optional result setting, disabled by
+default. It creates one additional Plate whose WellSample pixels point directly
+at one common image-level label. Supply **Plate label preview name**, or leave it
+empty only when exactly one label name occurs on every Plate image. The preview
+creates OMERO objects and PixelBuffer links but does not copy label arrays.
+
 Importer-disabled deployments continue to use `SLURM_Get_Results.py` and do not
 load BIOMERO.importer Zarr helpers. The worker processor must forward this
 environment variable to downloaded scripts; current NL-BIOMERO deployments do
