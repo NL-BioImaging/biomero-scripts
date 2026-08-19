@@ -136,7 +136,18 @@ def persist_canonical_input_snapshot(
 ):
     """Record the event snapshot and its task-side recovery manifest."""
     if not canonical_inputs:
+        logger.info(
+            "Image Transfer returned no complete canonical input snapshot "
+            "for workflow %s; result-side canonical comparison is unavailable",
+            workflow_id,
+        )
         return None
+    logger.info(
+        "Image Transfer returned %s canonical input record(s) for workflow %s; "
+        "persisting the immutable task snapshot",
+        len(canonical_inputs),
+        workflow_id,
+    )
     manifest = CanonicalInputManifest(
         workflow_id=workflow_id,
         export_task_id=export_task_id,

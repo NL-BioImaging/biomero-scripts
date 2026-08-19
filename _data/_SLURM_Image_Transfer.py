@@ -158,6 +158,11 @@ def get_canonical_source(obj, object_type):
         candidates.append(candidate)
 
     if not candidates:
+        logger.info(
+            "No BIOMERO canonical Zarr record found for %s %s",
+            object_type,
+            object_id,
+        )
         return None
     current_generation = max(
         candidate.source_generation for candidate in candidates
@@ -175,7 +180,19 @@ def get_canonical_source(obj, object_type):
             f"Canonical source metadata is ambiguous for {object_type} "
             f"{object_id} generation {current_generation}"
         )
-    return current[0]
+    source = current[0]
+    logger.info(
+        "Located canonical Zarr for %s %s: generation=%s, "
+        "storage=%s:%s, node=%s, pixel ISCC=%s",
+        object_type,
+        object_id,
+        source.source_generation,
+        source.storage_root,
+        source.relative_path,
+        source.node_path,
+        source.pixel_identity.iscc_code,
+    )
+    return source
 
 
 def discover_canonical_inputs(objects, object_type):
@@ -196,23 +213,52 @@ def discover_canonical_inputs(objects, object_type):
             selected_object_id=object_id,
             source=source,
         ))
+    if complete:
+        logger.info(
+            "Canonical discovery covered all %s selected %s object(s)",
+            len(canonical_inputs),
+            object_type,
+        )
+    else:
+        logger.info(
+            "Canonical discovery covered %s/%s selected %s object(s); "
+            "missing sources may be established during export",
+            len(canonical_inputs),
+            len(objects),
+            object_type,
+        )
     return sources, tuple(canonical_inputs) if complete else ()
 
 
 def canonical_inputs_from_sources(objects, object_type, sources):
     """Build an ordered all-or-nothing snapshot after export-side promotion."""
     inputs = []
+    missing_ids = []
     for ordinal, obj in enumerate(objects):
         object_id = int(obj.getId())
         source = sources.get(object_id)
         if source is None:
-            return ()
+            missing_ids.append(object_id)
+            continue
         inputs.append(CanonicalInput(
             ordinal=ordinal,
             selected_object_type=object_type,
             selected_object_id=object_id,
             source=source,
         ))
+    if missing_ids:
+        logger.info(
+            "No complete canonical input snapshot for %s selection: "
+            "canonical records are missing for IDs %s",
+            object_type,
+            missing_ids,
+        )
+        return ()
+    logger.info(
+        "Prepared canonical input snapshot for all %s selected %s object(s)",
+        len(inputs),
+        object_type,
+    )
     return tuple(inputs)
 
 
@@ -389,6 +435,14 @@ def promote_exported_image_zarr(
     )
     guard = semantic_guard_reader(export_path, ".")
     validate_omero_image_semantics(image, guard)
+    logger.info(
+        "Validated exported NGFF semantics for Image %s: axes=%s, "
+        "shape=%s, dtype=%s",
+        image.getId(),
+        tuple(guard.axes),
+        tuple(guard.shape),
+        guard.dtype,
+    )
     guard_values = {
         "node_path": ".",
         "role": "image",
@@ -398,14 +452,39 @@ def promote_exported_image_zarr(
         "coordinate_transformations": guard.coordinate_transformations,
     }
     identity_provider = identity_provider or IsccBioIdentityProvider()
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from OMERO Pixels for Image %s",
+        image.getId(),
+    )
     original_identity = identity_provider.generate_omero(
         conn,
         image_id=int(image.getId()),
         **guard_values,
     )
+    logger.info(
+        "Calculated OMERO pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        original_identity.iscc_code,
+        original_identity.data_code,
+        original_identity.instance_code,
+    )
+    logger.info(
+        "Calculating ISCC-BIO pixel identity from exported Zarr for Image %s: %s",
+        image.getId(),
+        export_path,
+    )
     exported_identity = identity_provider.generate(
         Path(export_path),
         **guard_values,
+    )
+    logger.info(
+        "Calculated exported Zarr pixel identity for Image %s: ISCC=%s, "
+        "Data-Code=%s, Instance-Code=%s",
+        image.getId(),
+        exported_identity.iscc_code,
+        exported_identity.data_code,
+        exported_identity.instance_code,
     )
 
     promotion_service_factory = (
@@ -425,6 +504,13 @@ def promote_exported_image_zarr(
         original_identity=original_identity,
         exported_identity=exported_identity,
         pixel_identity_origin="omero-pixels",
+    )
+    logger.info(
+        "ISCC-BIO verification matched OMERO Pixels and exported Zarr for "
+        "Image %s; committed canonical generation %s at %s",
+        image.getId(),
+        source_generation,
+        result.path,
     )
     attach_canonical_source(
         conn,
@@ -499,8 +585,37 @@ def select_zarr_source_path(obj, canonical_source, storage_roots):
                 canonical_source.node_path,
             )
             return None
-        return resolve_managed_source_path(canonical_source, storage_roots)
-    return get_legacy_zarr_path(obj)
+        source_path = resolve_managed_source_path(
+            canonical_source, storage_roots)
+        if source_path is None:
+            logger.warning(
+                "Canonical Zarr record for %s %s could not be resolved at "
+                "%s:%s; a fresh export is required",
+                canonical_source.source_object_type,
+                canonical_source.source_object_id,
+                canonical_source.storage_root,
+                canonical_source.relative_path,
+            )
+            return None
+        logger.info(
+            "Reusing canonical Zarr for %s %s: generation=%s, path=%s, "
+            "pixel ISCC=%s (cached; ISCC-BIO was not recalculated)",
+            canonical_source.source_object_type,
+            canonical_source.source_object_id,
+            canonical_source.source_generation,
+            source_path,
+            canonical_source.pixel_identity.iscc_code,
+        )
+        return source_path
+    legacy_path = get_legacy_zarr_path(obj)
+    if legacy_path is not None:
+        logger.info(
+            "Reusing legacy Zarr path for OMERO object %s: %s "
+            "(not yet a BIOMERO canonical; no cached ISCC)",
+            obj.getId(),
+            legacy_path,
+        )
+    return legacy_path
 
 
 def log(text):
@@ -796,6 +911,22 @@ def save_as_zarr(
             ignore=shutil.ignore_patterns(".biomero-canonical.json"),
         )
     else:
+        if canonical_source is None:
+            if data_type == constants.transfer.DATA_TYPE_IMAGE:
+                logger.info(
+                    "No reusable canonical or legacy Zarr found for %s %s; "
+                    "exporting NGFF and calculating ISCC-BIO for canonical "
+                    "promotion",
+                    data_type,
+                    object.getId(),
+                )
+            else:
+                logger.info(
+                    "No reusable canonical or legacy Zarr found for %s %s; "
+                    "exporting a fresh NGFF store",
+                    data_type,
+                    object.getId(),
+                )
         log("  Saving file as: %s" % img_name)
         curr_dir = os.getcwd()
         exp_dir = os.path.join(curr_dir, folder_name)

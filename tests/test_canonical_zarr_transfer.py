@@ -277,7 +277,7 @@ def test_missing_storage_root_mapping_does_not_guess(tmp_path, pixel_identity):
 
 
 def test_canonical_source_precedes_legacy_annotation(
-    tmp_path, pixel_identity
+    tmp_path, pixel_identity, caplog
 ):
     ns = _load_canonical_functions()
     managed_root = tmp_path / "managed"
@@ -290,13 +290,35 @@ def test_canonical_source_precedes_legacy_annotation(
         "Imported_from": str(legacy_path),
     })])
 
-    selected = ns["select_zarr_source_path"](
-        obj,
-        source(pixel_identity),
-        {"group-3-data": managed_root},
-    )
+    with caplog.at_level(logging.INFO):
+        selected = ns["select_zarr_source_path"](
+            obj,
+            source(pixel_identity),
+            {"group-3-data": managed_root},
+        )
 
     assert selected == canonical_path.resolve()
+    assert "Reusing canonical Zarr for Image 7" in caplog.text
+    assert "pixel ISCC=ISCC:KPIXEL" in caplog.text
+    assert "ISCC-BIO was not recalculated" in caplog.text
+
+
+def test_legacy_zarr_reuse_logs_missing_cached_identity(
+    tmp_path, pixel_identity, caplog
+):
+    ns = _load_canonical_functions()
+    legacy_path = tmp_path / "legacy.zarr"
+    legacy_path.mkdir()
+    obj = Object(8, [Annotation("legacy", {
+        "Imported_from": str(legacy_path),
+    })])
+
+    with caplog.at_level(logging.INFO):
+        selected = ns["select_zarr_source_path"](obj, None, {})
+
+    assert selected == legacy_path.resolve()
+    assert "Reusing legacy Zarr path for OMERO object 8" in caplog.text
+    assert "not yet a BIOMERO canonical; no cached ISCC" in caplog.text
 
 
 def test_nested_canonical_source_falls_back_to_fresh_export(
@@ -400,7 +422,7 @@ def test_attaches_canonical_source_annotation_once(pixel_identity):
 
 
 def test_promotes_verified_image_and_restores_task_copy(
-    tmp_path, pixel_identity
+    tmp_path, pixel_identity, caplog
 ):
     ns = _load_canonical_functions()
     root = tmp_path / "managed"
@@ -430,21 +452,22 @@ def test_promotes_verified_image_and_restores_task_copy(
             )
             return SimpleNamespace(source=canonical, path=canonical_path)
 
-    result = ns["promote_exported_image_zarr"](
-        "connection",
-        Object(7, []),
-        export,
-        {"group-3-data": root},
-        identity_provider=Provider(),
-        semantic_guard_reader=lambda path, node: SimpleNamespace(
-            shape=(1, 1, 1, 16, 16),
-            dtype="uint16",
-            axes=("t", "c", "z", "y", "x"),
-            coordinate_transformations=(),
-        ),
-        promotion_service_factory=lambda **kwargs: Promotion(),
-        annotation_writer=lambda **kwargs: writes.append(kwargs) or 99,
-    )
+    with caplog.at_level(logging.INFO):
+        result = ns["promote_exported_image_zarr"](
+            "connection",
+            Object(7, []),
+            export,
+            {"group-3-data": root},
+            identity_provider=Provider(),
+            semantic_guard_reader=lambda path, node: SimpleNamespace(
+                shape=(1, 1, 1, 16, 16),
+                dtype="uint16",
+                axes=("t", "c", "z", "y", "x"),
+                coordinate_transformations=(),
+            ),
+            promotion_service_factory=lambda **kwargs: Promotion(),
+            annotation_writer=lambda **kwargs: writes.append(kwargs) or 99,
+        )
 
     assert result == canonical
     assert canonical_path.is_dir()
@@ -453,6 +476,11 @@ def test_promotes_verified_image_and_restores_task_copy(
     assert not (export / ".biomero-canonical.json").exists()
     assert [item[0] for item in identities] == ["omero", "zarr"]
     assert writes[0]["ns"] == CANONICAL_SOURCE_NAMESPACE
+    assert "Calculating ISCC-BIO pixel identity from OMERO Pixels" in caplog.text
+    assert "Calculated OMERO pixel identity" in caplog.text
+    assert "ISCC=ISCC:KPIXEL" in caplog.text
+    assert "Calculating ISCC-BIO pixel identity from exported Zarr" in caplog.text
+    assert "ISCC-BIO verification matched" in caplog.text
 
 
 def test_rejects_ngff_shape_or_dtype_that_disagrees_with_omero():
