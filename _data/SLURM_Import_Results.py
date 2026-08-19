@@ -301,6 +301,17 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         return None
 
 
+def get_images_by_ids(conn, image_ids):
+    """Load OMERO Images without issuing an invalid empty ``IN`` query."""
+    normalized_ids = [int(image_id) for image_id in (image_ids or [])]
+    if not normalized_ids:
+        return []
+    return [
+        image for image in conn.getObjects("Image", ids=normalized_ids)
+        if image
+    ]
+
+
 def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
     """Load legacy and dedicated group mappings with dedicated values winning.
 
@@ -4436,11 +4447,7 @@ def runScript() -> None:
             # and attachment matching (scenarios 1-3 + 4 with rename).
             _roi_target_ids = unwrap(client.getInput(
                 constants.results.ROI_TARGET_IMAGE_IDS)) or []
-            input_images = [
-                img for img in conn.getObjects(
-                    "Image", ids=[int(i) for i in _roi_target_ids])
-                if img
-            ]
+            input_images = get_images_by_ids(conn, _roi_target_ids)
             _lookup_task_id = task_id
             if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
                 try:
@@ -4482,11 +4489,7 @@ def runScript() -> None:
                         except Exception as _we:
                             logger.debug(f"Could not walk workflow tasks for image IDs: {_we}")
                     if _image_ids:
-                        input_images = [
-                            img for img in conn.getObjects(
-                                "Image", ids=[int(i) for i in _image_ids])
-                            if img
-                        ]
+                        input_images = get_images_by_ids(conn, _image_ids)
                         logger.info(
                             f"Loaded {len(input_images)} input images for matching: "
                             f"{[img.getId() for img in input_images]}")
