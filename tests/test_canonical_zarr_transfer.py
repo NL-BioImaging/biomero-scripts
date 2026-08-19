@@ -23,6 +23,7 @@ from biomero_schema.zarr import (
     CanonicalZarrSource,
     ManagedZarrNode,
     PixelIdentity,
+    ShallowPlateReference,
     ShallowZarrReference,
     ZarrLabelComponent,
 )
@@ -41,6 +42,8 @@ def _load_canonical_functions():
         "get_canonical_source",
         "get_canonical_plate_source",
         "get_shallow_reference",
+        "get_shallow_plate_reference",
+        "canonical_plate_source_from_collection",
         "discover_canonical_inputs",
         "load_group_storage_roots",
         "locate_managed_zarr",
@@ -79,6 +82,7 @@ def _load_canonical_functions():
         "CanonicalPlateSource": CanonicalPlateSource,
         "CanonicalZarrSource": CanonicalZarrSource,
         "ManagedZarrNode": ManagedZarrNode,
+        "ShallowPlateReference": ShallowPlateReference,
         "ShallowZarrReference": ShallowZarrReference,
         "ZarrLabelComponent": ZarrLabelComponent,
         "Path": Path,
@@ -345,6 +349,60 @@ def test_resolves_shallow_projection_reference(pixel_identity):
     restored = ns["get_shallow_reference"](Object(99, [annotation]))
 
     assert restored == reference
+
+
+def test_resolves_shallow_plate_reference():
+    ns = _load_canonical_functions()
+    reference = ShallowPlateReference(
+        storage_root="import-mount-data",
+        relative_path="Project A/.analyzed/run/plate.zarr",
+        workflow_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        transfer_artifact="plate.zarr",
+        source_object_id=9,
+        source_generation=1,
+        image_node_count=2,
+        interchange_profile="ngff-0.4-zarr-v2",
+    )
+    plate = Object(99, [Annotation(
+        SHALLOW_COLLECTION_NAMESPACE,
+        reference.to_annotation_values(),
+    )])
+
+    assert ns["get_shallow_plate_reference"](plate) == reference
+
+
+def test_rebuilds_plate_snapshot_from_materialized_managed_labels(
+    pixel_identity,
+):
+    ns = _load_canonical_functions()
+    canonical = plate_source(pixel_identity)
+    image = canonical.images[0]
+    label_path = "A/1/0/labels/cells"
+    label = ZarrLabelComponent(
+        logical_node_path=label_path,
+        pixel_identity=pixel_identity.model_copy(update={
+            "node_path": label_path,
+            "role": "label",
+        }),
+        source=ManagedZarrNode(
+            storage_root="import-mount-data",
+            relative_path="results/plate.zarr",
+            node_path=label_path,
+        ),
+    )
+    collection = SimpleNamespace(images=(SimpleNamespace(
+        image_node_path=image.image_node_path,
+        source=image.source,
+        label_node_paths=(label_path,),
+    ),))
+
+    restored = ns["canonical_plate_source_from_collection"](
+        collection,
+        (label,),
+    )
+
+    assert restored.source_object_id == canonical.source_object_id
+    assert restored.images[0].labels == (label,)
 
 
 def test_canonical_source_selection_is_independent_of_annotation_order(

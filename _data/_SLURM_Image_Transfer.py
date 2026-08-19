@@ -85,6 +85,7 @@ from biomero.zarr_contracts import (
     CanonicalPlateSource,
     CanonicalZarrSource,
     ManagedZarrNode,
+    ShallowPlateReference,
     ShallowZarrReference,
     ZarrLabelComponent,
 )
@@ -218,6 +219,84 @@ def get_shallow_reference(obj):
         list(reference.label_node_paths),
     )
     return reference
+
+
+def get_shallow_plate_reference(plate):
+    """Resolve one deterministic managed shallow collection from an OMERO Plate."""
+    candidates = []
+    for annotation in plate.listAnnotations():
+        if _annotation_namespace(annotation) != SHALLOW_COLLECTION_NAMESPACE:
+            continue
+        try:
+            candidates.append(ShallowPlateReference.from_annotation_values(
+                _annotation_values(annotation)
+            ))
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid shallow Zarr annotation on Plate %s: %s",
+                plate.getId(),
+                exc,
+            )
+    distinct = {
+        json.dumps(candidate.to_dict(), sort_keys=True)
+        for candidate in candidates
+    }
+    if len(distinct) > 1:
+        raise ValueError(
+            f"Shallow Zarr metadata is ambiguous for Plate {plate.getId()}"
+        )
+    if not candidates:
+        return None
+    reference = candidates[0]
+    logger.info(
+        "Located shallow Zarr collection for Plate %s: storage=%s:%s, "
+        "source Plate=%s generation=%s, images=%s",
+        plate.getId(),
+        reference.storage_root,
+        reference.relative_path,
+        reference.source_object_id,
+        reference.source_generation,
+        reference.image_node_count,
+    )
+    return reference
+
+
+def canonical_plate_source_from_collection(collection, managed_labels):
+    """Restore one Plate snapshot using managed labels from materialization."""
+    managed_labels = tuple(managed_labels)
+    labels_by_path = {
+        label.logical_node_path: label for label in managed_labels
+    }
+    if len(labels_by_path) != len(managed_labels):
+        raise ValueError("Materialized Plate label paths are ambiguous")
+    images = []
+    expected_paths = set()
+    for image in collection.images:
+        expected_paths.update(image.label_node_paths)
+        labels = tuple(
+            labels_by_path[path] for path in image.label_node_paths
+            if path in labels_by_path
+        )
+        if len(labels) != len(image.label_node_paths):
+            raise ValueError(
+                f"Materialized Plate lost labels for image {image.image_node_path}"
+            )
+        images.append(CanonicalPlateImage(
+            image_node_path=image.image_node_path,
+            source=image.source,
+            labels=labels,
+        ))
+    if set(labels_by_path) != expected_paths:
+        raise ValueError("Materialized Plate has labels outside its collection")
+    first = images[0].source
+    return CanonicalPlateSource(
+        storage_root=first.storage_root,
+        relative_path=first.relative_path,
+        source_object_id=first.source_object_id,
+        source_generation=first.source_generation,
+        interchange_profile=first.interchange_profile,
+        images=tuple(images),
+    )
 
 
 def get_canonical_source(obj, object_type):
@@ -1716,27 +1795,45 @@ def save_as_zarr(
         i += 1
 
     shallow_reference = None
-    if shallow_zarr_storage and data_type == constants.transfer.DATA_TYPE_IMAGE:
-        shallow_reference = get_shallow_reference(object)
+    if shallow_zarr_storage:
+        if data_type == constants.transfer.DATA_TYPE_IMAGE:
+            shallow_reference = get_shallow_reference(object)
+        elif data_type == constants.transfer.DATA_TYPE_PLATE:
+            shallow_reference = get_shallow_plate_reference(object)
     if shallow_reference is not None:
         materialized = materialize_shallow_zarr(
             shallow_reference,
             img_name,
             storage_roots or {},
         )
-        logger.info(
-            "Reconstructed shallow Image %s as full workflow input %s with "
-            "%s label layer(s)",
-            object.getId(),
-            img_name,
-            len(materialized.labels),
-        )
+        if isinstance(shallow_reference, ShallowPlateReference):
+            canonical_source = canonical_plate_source_from_collection(
+                materialized.collection,
+                materialized.labels,
+            )
+            logger.info(
+                "Reconstructed shallow Plate %s as full workflow input %s "
+                "with %s image node(s) and %s label layer(s)",
+                object.getId(),
+                img_name,
+                len(canonical_source.images),
+                len(materialized.labels),
+            )
+        else:
+            canonical_source = shallow_reference.source
+            logger.info(
+                "Reconstructed shallow Image %s as full workflow input %s "
+                "with %s label layer(s)",
+                object.getId(),
+                img_name,
+                len(materialized.labels),
+            )
         log(
             " Reconstructed original pixels and %s managed label layer(s)"
             % len(materialized.labels)
         )
         return (
-            shallow_reference.source,
+            canonical_source,
             os.path.basename(img_name),
             materialized.labels,
         )
