@@ -9,9 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from biomero_schema.zarr import (
+    CANONICAL_PLATE_SOURCE_NAMESPACE,
     CANONICAL_SOURCE_NAMESPACE,
     SHALLOW_COLLECTION_NAMESPACE,
     CanonicalInput,
+    CanonicalPlateImage,
+    CanonicalPlateSource,
     CanonicalZarrSource,
     ManagedZarrNode,
     PixelIdentity,
@@ -31,6 +34,7 @@ def _load_canonical_functions():
         "_annotation_namespace",
         "_annotation_values",
         "get_canonical_source",
+        "get_canonical_plate_source",
         "get_shallow_reference",
         "discover_canonical_inputs",
         "load_group_storage_roots",
@@ -41,10 +45,14 @@ def _load_canonical_functions():
         "select_object_storage_root",
         "derive_canonical_source_directory",
         "attach_canonical_source",
+        "attach_canonical_plate_source",
         "promote_exported_image_zarr",
         "index_existing_image_zarr",
+        "index_existing_plate_zarr",
+        "promote_exported_plate_zarr",
         "canonical_inputs_from_sources",
         "discover_canonical_label_components",
+        "build_canonical_plate_source",
         "validate_omero_image_semantics",
         "is_shallow_zarr_storage_enabled",
     }
@@ -53,9 +61,12 @@ def _load_canonical_functions():
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     namespace = {
+        "CANONICAL_PLATE_SOURCE_NAMESPACE": CANONICAL_PLATE_SOURCE_NAMESPACE,
         "CANONICAL_SOURCE_NAMESPACE": CANONICAL_SOURCE_NAMESPACE,
         "SHALLOW_COLLECTION_NAMESPACE": SHALLOW_COLLECTION_NAMESPACE,
         "CanonicalInput": CanonicalInput,
+        "CanonicalPlateImage": CanonicalPlateImage,
+        "CanonicalPlateSource": CanonicalPlateSource,
         "CanonicalZarrSource": CanonicalZarrSource,
         "ManagedZarrNode": ManagedZarrNode,
         "ShallowZarrReference": ShallowZarrReference,
@@ -130,7 +141,7 @@ def test_importer_dependencies_are_only_imported_behind_capability_guard():
             and node.module.startswith("biomero_importer.")
         )
     ]
-    assert len(guarded_imports) == 3
+    assert len(guarded_imports) == 4
 
 
 class NamedValue:
@@ -266,6 +277,43 @@ def annotation_for(source_record):
     )
 
 
+def plate_source(pixel_identity, generation=1):
+    relative = f".processed/Plate-9.g{generation}.ome.zarr"
+    image_identity = pixel_identity.model_copy(update={
+        "node_path": "A/1/0",
+    })
+    image_source = CanonicalZarrSource(
+        storage_root="group-3-data",
+        relative_path=relative,
+        node_path="A/1/0",
+        source_object_type="Plate",
+        source_object_id=9,
+        source_generation=generation,
+        interchange_profile="ngff-0.4-zarr-v2",
+        pixel_identity=image_identity,
+        pixel_identity_origin="canonical-bootstrap",
+        canonical_pixel_verified=False,
+    )
+    return CanonicalPlateSource(
+        storage_root="group-3-data",
+        relative_path=relative,
+        source_object_id=9,
+        source_generation=generation,
+        interchange_profile="ngff-0.4-zarr-v2",
+        images=(CanonicalPlateImage(
+            image_node_path="A/1/0",
+            source=image_source,
+        ),),
+    )
+
+
+def plate_annotation_for(source_record):
+    return Annotation(
+        CANONICAL_PLATE_SOURCE_NAMESPACE,
+        source_record.to_annotation_values(),
+    )
+
+
 def test_resolves_shallow_projection_reference(pixel_identity):
     ns = _load_canonical_functions()
     canonical = source(pixel_identity)
@@ -318,6 +366,79 @@ def test_canonical_source_rejects_ambiguous_current_generation(pixel_identity):
             Object(7, [annotation_for(first), annotation_for(second)]),
             "Image",
         )
+
+
+def test_resolves_latest_canonical_plate_source(pixel_identity):
+    ns = _load_canonical_functions()
+    old = plate_source(pixel_identity, generation=1)
+    current = plate_source(pixel_identity, generation=2)
+
+    restored = ns["get_canonical_plate_source"](Object(
+        9,
+        [plate_annotation_for(current), plate_annotation_for(old)],
+    ))
+
+    assert restored == current
+
+
+def test_plate_discovery_builds_plate_input(pixel_identity):
+    ns = _load_canonical_functions()
+    canonical = plate_source(pixel_identity)
+    sources, inputs = ns["discover_canonical_inputs"](
+        [Object(9, [plate_annotation_for(canonical)])],
+        "Plate",
+    )
+
+    assert sources == {9: canonical}
+    assert inputs[0].source is None
+    assert inputs[0].plate_source == canonical
+
+
+def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity):
+    ns = _load_canonical_functions()
+    nodes = (
+        SimpleNamespace(
+            node_path="A/1/0",
+            role="image",
+            parent_image_node_path=None,
+        ),
+        SimpleNamespace(
+            node_path="A/1/0/labels/cells",
+            role="label",
+            parent_image_node_path="A/1/0",
+        ),
+    )
+    guard = SimpleNamespace(
+        shape=(1, 1, 1, 16, 16),
+        dtype="uint16",
+        axes=("t", "c", "z", "y", "x"),
+        coordinate_transformations=(),
+    )
+
+    class Provider:
+        def generate(self, _root, **values):
+            return pixel_identity.model_copy(update={
+                "node_path": values["node_path"],
+                "role": values["role"],
+            })
+
+    ns["discover_ngff_nodes"] = lambda _root: nodes
+    ns["read_zarr_v2_semantic_guard"] = lambda _root, _node: guard
+    result = ns["build_canonical_plate_source"](
+        Object(9, []),
+        tmp_path / "plate.zarr",
+        "group-3-data",
+        ".processed/Plate-9.g1.ome.zarr",
+        identity_provider=Provider(),
+    )
+
+    assert result.images[0].source.pixel_identity.node_path == "A/1/0"
+    assert result.images[0].labels[0].logical_node_path == (
+        "A/1/0/labels/cells"
+    )
+    assert result.images[0].labels[0].source.node_path == (
+        "A/1/0/labels/cells"
+    )
 
 
 def test_discovery_only_returns_snapshot_when_every_object_has_source(
@@ -764,6 +885,23 @@ def test_builds_snapshot_from_promoted_and_existing_sources(pixel_identity):
     ) == ()
 
 
+def test_builds_snapshot_from_canonical_plate_source(pixel_identity):
+    ns = _load_canonical_functions()
+    canonical = plate_source(pixel_identity)
+
+    inputs = ns["canonical_inputs_from_sources"](
+        [Object(9, [])],
+        "Plate",
+        {9: canonical},
+        {9: "plate.zarr"},
+    )
+
+    assert len(inputs) == 1
+    assert inputs[0].plate_source == canonical
+    assert inputs[0].source is None
+    assert inputs[0].transfer_artifact == "plate.zarr"
+
+
 def test_snapshot_hashes_labels_already_in_canonical_zarr(
     tmp_path,
     pixel_identity,
@@ -817,6 +955,8 @@ def test_snapshot_hashes_labels_already_in_canonical_zarr(
             node_path="labels/nuclei",
         ),
     ),)
+
+
 def test_image_transfer_publishes_canonical_inputs_output():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
@@ -836,3 +976,10 @@ def test_fresh_image_exports_feed_promotion_and_final_snapshot():
     assert "canonical_inputs = canonical_inputs_from_sources(" in script
     assert "transfer_artifacts," in script
     assert "materialize_shallow_zarr(" in script
+
+
+def test_plate_exports_are_indexed_or_promoted_for_final_snapshot():
+    script = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "canonical_source = index_existing_plate_zarr(" in script
+    assert "canonical_source = promote_exported_plate_zarr(" in script

@@ -72,9 +72,12 @@ except ImportError:
     import Image
 from biomero import SlurmClient, constants
 from biomero.zarr_contracts import (
+    CANONICAL_PLATE_SOURCE_NAMESPACE,
     CANONICAL_SOURCE_NAMESPACE,
     SHALLOW_COLLECTION_NAMESPACE,
     CanonicalInput,
+    CanonicalPlateImage,
+    CanonicalPlateSource,
     CanonicalZarrSource,
     ManagedZarrNode,
     ShallowZarrReference,
@@ -95,6 +98,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         from biomero_importer.utils.canonical_promotion import (
             CanonicalPromotionService,
         )
+        from biomero_importer.utils.canonical_store import CanonicalStore
         from biomero_importer.utils.pixel_identity import (
             IsccBioIdentityProvider,
             pixel_identities_match,
@@ -280,6 +284,62 @@ def get_canonical_source(obj, object_type):
     return source
 
 
+def get_canonical_plate_source(plate):
+    """Resolve the latest deterministic per-image canonical Plate record."""
+    plate_id = int(plate.getId())
+    candidates = []
+    for annotation in plate.listAnnotations():
+        if _annotation_namespace(annotation) != CANONICAL_PLATE_SOURCE_NAMESPACE:
+            continue
+        try:
+            candidate = CanonicalPlateSource.from_annotation_values(
+                _annotation_values(annotation)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid canonical Plate Zarr annotation on Plate "
+                "%s: %s",
+                plate_id,
+                exc,
+            )
+            continue
+        if candidate.source_object_id != plate_id:
+            logger.warning(
+                "Ignoring canonical Plate Zarr annotation owned by Plate %s "
+                "on Plate %s",
+                candidate.source_object_id,
+                plate_id,
+            )
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        logger.info("No BIOMERO canonical Zarr record found for Plate %s", plate_id)
+        return None
+    generation = max(item.source_generation for item in candidates)
+    current = [
+        item for item in candidates if item.source_generation == generation
+    ]
+    distinct = {
+        json.dumps(item.to_dict(), sort_keys=True) for item in current
+    }
+    if len(distinct) != 1:
+        raise ValueError(
+            f"Canonical Plate metadata is ambiguous for Plate {plate_id} "
+            f"generation {generation}"
+        )
+    source = current[0]
+    logger.info(
+        "Located canonical Zarr for Plate %s: generation=%s, storage=%s:%s, "
+        "images=%s (cached ISCC-BIO identities; not recalculated)",
+        plate_id,
+        source.source_generation,
+        source.storage_root,
+        source.relative_path,
+        len(source.images),
+    )
+    return source
+
+
 def discover_canonical_inputs(objects, object_type):
     """Return reusable sources and an all-or-nothing ordered input snapshot."""
     sources = {}
@@ -287,17 +347,22 @@ def discover_canonical_inputs(objects, object_type):
     complete = True
     for ordinal, obj in enumerate(objects):
         object_id = int(obj.getId())
-        source = get_canonical_source(obj, object_type)
+        source = (
+            get_canonical_plate_source(obj)
+            if object_type == "Plate"
+            else get_canonical_source(obj, object_type)
+        )
         if source is None:
             complete = False
             continue
         sources[object_id] = source
-        canonical_inputs.append(CanonicalInput(
-            ordinal=ordinal,
-            selected_object_type=object_type,
-            selected_object_id=object_id,
-            source=source,
-        ))
+        values = {
+            "ordinal": ordinal,
+            "selected_object_type": object_type,
+            "selected_object_id": object_id,
+        }
+        values["plate_source" if object_type == "Plate" else "source"] = source
+        canonical_inputs.append(CanonicalInput(**values))
     if complete:
         logger.info(
             "Canonical discovery covered all %s selected %s object(s)",
@@ -363,6 +428,98 @@ def discover_canonical_label_components(
     return tuple(components)
 
 
+def build_canonical_plate_source(
+    plate,
+    zarr_path,
+    storage_root_id,
+    relative_path,
+    *,
+    source_generation=1,
+    identity_provider=None,
+):
+    """Hash every declared Plate image and label node into one cache record."""
+    root = Path(zarr_path)
+    nodes = discover_ngff_nodes(root)
+    image_nodes = [node for node in nodes if node.role == "image"]
+    if not image_nodes:
+        raise ValueError(f"Canonical Plate Zarr has no image nodes: {root}")
+    provider = identity_provider or IsccBioIdentityProvider()
+    identities = {}
+    for node in nodes:
+        guard = read_zarr_v2_semantic_guard(root, node.node_path)
+        logger.info(
+            "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
+            plate.getId(),
+            node.role,
+            node.node_path,
+        )
+        identity = provider.generate(
+            root,
+            node_path=node.node_path,
+            role=node.role,
+            shape=guard.shape,
+            dtype=guard.dtype,
+            axes=guard.axes,
+            coordinate_transformations=guard.coordinate_transformations,
+        )
+        identities[node.node_path] = identity
+        logger.info(
+            "Calculated Plate %s %s identity: node=%s, ISCC=%s, "
+            "Data-Code=%s, Instance-Code=%s",
+            plate.getId(),
+            node.role,
+            node.node_path,
+            identity.iscc_code,
+            identity.data_code,
+            identity.instance_code,
+        )
+
+    relative_path = Path(relative_path).as_posix()
+    images = []
+    for image_node in image_nodes:
+        source = CanonicalZarrSource(
+            storage_root=storage_root_id,
+            relative_path=relative_path,
+            node_path=image_node.node_path,
+            source_object_type="Plate",
+            source_object_id=int(plate.getId()),
+            source_generation=source_generation,
+            interchange_profile="ngff-0.4-zarr-v2",
+            pixel_identity=identities[image_node.node_path],
+            pixel_identity_origin="canonical-bootstrap",
+            canonical_pixel_verified=False,
+        )
+        labels = tuple(
+            ZarrLabelComponent(
+                logical_node_path=node.node_path,
+                pixel_identity=identities[node.node_path],
+                source=ManagedZarrNode(
+                    storage_root=storage_root_id,
+                    relative_path=relative_path,
+                    node_path=node.node_path,
+                ),
+            )
+            for node in nodes
+            if (
+                node.role == "label"
+                and node.parent_image_node_path == image_node.node_path
+            )
+        )
+        images.append(CanonicalPlateImage(
+            image_node_path=image_node.node_path,
+            source=source,
+            labels=labels,
+        ))
+    return CanonicalPlateSource(
+        storage_root=storage_root_id,
+        relative_path=relative_path,
+        source_object_id=int(plate.getId()),
+        source_generation=source_generation,
+        interchange_profile="ngff-0.4-zarr-v2",
+        images=tuple(images),
+    )
+
+
 def canonical_inputs_from_sources(
     objects,
     object_type,
@@ -384,7 +541,11 @@ def canonical_inputs_from_sources(
             missing_ids.append(object_id)
             continue
         labels = label_components_by_object.get(object_id)
-        if labels is None and storage_roots is not None:
+        if (
+            object_type == "Image"
+            and labels is None
+            and storage_roots is not None
+        ):
             try:
                 labels = discover_canonical_label_components(
                     source,
@@ -403,14 +564,18 @@ def canonical_inputs_from_sources(
                 continue
         if labels is None:
             labels = ()
-        inputs.append(CanonicalInput(
-            ordinal=ordinal,
-            selected_object_type=object_type,
-            selected_object_id=object_id,
-            transfer_artifact=transfer_artifact,
-            source=source,
-            labels=labels,
-        ))
+        values = {
+            "ordinal": ordinal,
+            "selected_object_type": object_type,
+            "selected_object_id": object_id,
+            "transfer_artifact": transfer_artifact,
+        }
+        if object_type == "Plate":
+            values["plate_source"] = source
+        else:
+            values["source"] = source
+            values["labels"] = labels
+        inputs.append(CanonicalInput(**values))
     if missing_ids:
         logger.info(
             "No complete canonical input snapshot for %s selection: "
@@ -606,6 +771,39 @@ def attach_canonical_source(
         object_id=int(obj.getId()),
         kv_dict=source.to_annotation_values(),
         ns=CANONICAL_SOURCE_NAMESPACE,
+        across_groups=False,
+    )
+
+
+def attach_canonical_plate_source(
+    conn,
+    plate,
+    source,
+    annotation_writer=None,
+):
+    """Attach a per-image Plate cache record without generation ambiguity."""
+    existing = get_canonical_plate_source(plate)
+    if existing == source:
+        return None
+    if (
+        existing is not None
+        and existing.source_generation >= source.source_generation
+    ):
+        raise ValueError(
+            f"Cannot replace canonical Plate {plate.getId()} generation "
+            f"{existing.source_generation} with generation "
+            f"{source.source_generation}"
+        )
+    if annotation_writer is None:
+        from ezomero import post_map_annotation
+
+        annotation_writer = post_map_annotation
+    return annotation_writer(
+        conn=conn,
+        object_type="Plate",
+        object_id=int(plate.getId()),
+        kv_dict=source.to_annotation_values(),
+        ns=CANONICAL_PLATE_SOURCE_NAMESPACE,
         across_groups=False,
     )
 
@@ -883,6 +1081,110 @@ def index_existing_image_zarr(
     return result.source
 
 
+def index_existing_plate_zarr(
+    conn,
+    plate,
+    existing_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    annotation_writer=None,
+):
+    """Index a managed Plate Zarr in place using per-image identities."""
+    storage_id, _storage_root, relative_path = locate_managed_zarr(
+        existing_path,
+        storage_roots,
+    )
+    source = build_canonical_plate_source(
+        plate,
+        existing_path,
+        storage_id,
+        relative_path,
+        source_generation=source_generation,
+        identity_provider=identity_provider,
+    )
+    attach_canonical_plate_source(
+        conn,
+        plate,
+        source,
+        annotation_writer=annotation_writer,
+    )
+    logger.info(
+        "Indexed canonical Plate %s generation %s in place at %s:%s with "
+        "%s image node(s)",
+        plate.getId(),
+        source_generation,
+        storage_id,
+        relative_path.as_posix(),
+        len(source.images),
+    )
+    log(
+        " Indexed canonical Plate %s with %s image-level ISCC identities"
+        % (plate.getId(), len(source.images))
+    )
+    return source
+
+
+def promote_exported_plate_zarr(
+    conn,
+    plate,
+    export_path,
+    storage_roots,
+    *,
+    source_generation=1,
+    identity_provider=None,
+    canonical_store_factory=None,
+    annotation_writer=None,
+):
+    """Atomically retain a fresh Plate export as its reusable canonical Zarr."""
+    storage_id, storage_root = select_object_storage_root(plate, storage_roots)
+    source_directory = derive_canonical_source_directory(plate, storage_root)
+    store_factory = canonical_store_factory or CanonicalStore
+    store = store_factory(storage_root)
+    relative_path = store.relative_path_for(
+        source_directory,
+        "Plate",
+        int(plate.getId()),
+        source_generation,
+    )
+    source = build_canonical_plate_source(
+        plate,
+        export_path,
+        storage_id,
+        relative_path,
+        source_generation=source_generation,
+        identity_provider=identity_provider,
+    )
+    committed = store.commit(export_path, source)
+    attach_canonical_plate_source(
+        conn,
+        plate,
+        source,
+        annotation_writer=annotation_writer,
+    )
+    export_path = Path(export_path)
+    if not export_path.exists():
+        shutil.copytree(
+            committed,
+            export_path,
+            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+        )
+    logger.info(
+        "Promoted canonical Plate %s generation %s to %s with %s image "
+        "node(s)",
+        plate.getId(),
+        source_generation,
+        committed,
+        len(source.images),
+    )
+    log(
+        " Cached canonical Plate %s generation %s at %s"
+        % (plate.getId(), source_generation, committed)
+    )
+    return source
+
+
 def resolve_managed_source_path(source, storage_roots):
     """Resolve an existing canonical root without escaping its configured root."""
     root = storage_roots.get(source.storage_root)
@@ -925,7 +1227,10 @@ def get_legacy_zarr_path(obj):
 def select_zarr_source_path(obj, canonical_source, storage_roots):
     """Select a reusable root, never silently bypassing canonical metadata."""
     if canonical_source is not None:
-        if canonical_source.node_path != ".":
+        if (
+            isinstance(canonical_source, CanonicalZarrSource)
+            and canonical_source.node_path != "."
+        ):
             logger.info(
                 "Canonical source for %s %s uses nested node %s; exporting "
                 "a standalone Zarr until node materialization is available",
@@ -937,24 +1242,39 @@ def select_zarr_source_path(obj, canonical_source, storage_roots):
         source_path = resolve_managed_source_path(
             canonical_source, storage_roots)
         if source_path is None:
+            source_type = (
+                "Plate"
+                if isinstance(canonical_source, CanonicalPlateSource)
+                else canonical_source.source_object_type
+            )
             logger.warning(
                 "Canonical Zarr record for %s %s could not be resolved at "
                 "%s:%s; a fresh export is required",
-                canonical_source.source_object_type,
+                source_type,
                 canonical_source.source_object_id,
                 canonical_source.storage_root,
                 canonical_source.relative_path,
             )
             return None
-        logger.info(
-            "Reusing canonical Zarr for %s %s: generation=%s, path=%s, "
-            "pixel ISCC=%s (cached; ISCC-BIO was not recalculated)",
-            canonical_source.source_object_type,
-            canonical_source.source_object_id,
-            canonical_source.source_generation,
-            source_path,
-            canonical_source.pixel_identity.iscc_code,
-        )
+        if isinstance(canonical_source, CanonicalPlateSource):
+            logger.info(
+                "Reusing canonical Zarr for Plate %s: generation=%s, path=%s, "
+                "%s cached image ISCC identities (not recalculated)",
+                canonical_source.source_object_id,
+                canonical_source.source_generation,
+                source_path,
+                len(canonical_source.images),
+            )
+        else:
+            logger.info(
+                "Reusing canonical Zarr for %s %s: generation=%s, path=%s, "
+                "pixel ISCC=%s (cached; ISCC-BIO was not recalculated)",
+                canonical_source.source_object_type,
+                canonical_source.source_object_id,
+                canonical_source.source_generation,
+                source_path,
+                canonical_source.pixel_identity.iscc_code,
+            )
         return source_path
     legacy_path = get_legacy_zarr_path(obj)
     if legacy_path is not None:
@@ -1283,18 +1603,22 @@ def save_as_zarr(
     source_path = select_zarr_source_path(
         object, canonical_source, storage_roots or {})
     if source_path is not None:
-        if (
-            shallow_zarr_storage
-            and data_type == constants.transfer.DATA_TYPE_IMAGE
-            and canonical_source is None
-        ):
+        if shallow_zarr_storage and canonical_source is None:
             try:
-                canonical_source = index_existing_image_zarr(
-                    conn,
-                    object,
-                    source_path,
-                    storage_roots or {},
-                )
+                if data_type == constants.transfer.DATA_TYPE_PLATE:
+                    canonical_source = index_existing_plate_zarr(
+                        conn,
+                        object,
+                        source_path,
+                        storage_roots or {},
+                    )
+                elif data_type == constants.transfer.DATA_TYPE_IMAGE:
+                    canonical_source = index_existing_image_zarr(
+                        conn,
+                        object,
+                        source_path,
+                        storage_roots or {},
+                    )
             except Exception as exc:
                 logger.warning(
                     "Existing Zarr indexing failed for %s %s; retaining "
@@ -1395,18 +1719,22 @@ def save_as_zarr(
             )
             logger.error(f"Critical error: {error_msg}")
             raise Exception(error_msg)
-        if (
-            shallow_zarr_storage
-            and data_type == constants.transfer.DATA_TYPE_IMAGE
-            and canonical_source is None
-        ):
+        if shallow_zarr_storage and canonical_source is None:
             try:
-                canonical_source = promote_exported_image_zarr(
-                    conn,
-                    object,
-                    img_name,
-                    storage_roots or {},
-                )
+                if data_type == constants.transfer.DATA_TYPE_PLATE:
+                    canonical_source = promote_exported_plate_zarr(
+                        conn,
+                        object,
+                        img_name,
+                        storage_roots or {},
+                    )
+                elif data_type == constants.transfer.DATA_TYPE_IMAGE:
+                    canonical_source = promote_exported_image_zarr(
+                        conn,
+                        object,
+                        img_name,
+                        storage_roots or {},
+                    )
             except Exception as exc:
                 logger.warning(
                     "Canonical Zarr promotion failed for %s %s; retaining "
