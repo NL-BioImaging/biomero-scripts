@@ -433,8 +433,7 @@ def normalize_eligible_returned_zarrs(decisions, workflow_id, results_path):
             )
             logger.info(
                 "Shallow Zarr label manifest: %s local/new-or-changed, %s "
-                "inherited (inherited bytes remain local until recursive "
-                "materialization is enabled)",
+                "inherited (returned inherited copies omitted)",
                 len(result.collection.images[0].label_components) - inherited,
                 inherited,
             )
@@ -2530,6 +2529,9 @@ def create_upload_orders_for_results(
             wf_id,
             results_path,
         )
+        # Normalization may remove returned copies of inherited labels. Only
+        # submit label nodes that remain physically local to this collection.
+        label_zarr_files = find_label_zarr_paths(results_path)
         # Re-scan after label compatibility renames and normalization. Nested
         # labels receive their own order and must not also enter the primary
         # image order. Exact unchanged/no-label input artifacts are omitted.
