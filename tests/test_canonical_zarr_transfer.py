@@ -90,6 +90,8 @@ def _load_canonical_functions():
         "logging": logging,
         "logger": logging.getLogger(__name__),
         "log": lambda text: None,
+        "load_canonical_marker": lambda _path: None,
+        "write_indexed_canonical_marker": lambda *_args: None,
         "pixel_identities_match": lambda left, right: left == right,
         "os": os,
         "shutil": shutil,
@@ -184,18 +186,23 @@ class Object:
         group_id=3,
         shape=(1, 1, 1, 16, 16),
         pixel_type="uint16",
+        children=(),
     ):
         self.object_id = object_id
         self.annotations = annotations
         self.group_id = group_id
         self.shape = shape
         self.pixel_type = pixel_type
+        self.children = list(children)
 
     def getId(self):
         return self.object_id
 
     def listAnnotations(self):
         return self.annotations
+
+    def listChildren(self):
+        return self.children
 
     def getDetails(self):
         return Details(self.group_id)
@@ -449,11 +456,14 @@ def test_resolves_latest_canonical_plate_source(pixel_identity):
     assert restored == current
 
 
-def test_split_canonical_plate_annotations_round_trip(pixel_identity):
+def test_storage_backed_plate_index_round_trip(pixel_identity):
     ns = _load_canonical_functions()
     canonical = plate_source(pixel_identity)
     writes = []
     plate = Object(9, [])
+    ns["load_group_storage_roots"] = lambda: {}
+    ns["resolve_managed_source_path"] = lambda *_args: Path("/plate.zarr")
+    ns["load_canonical_marker"] = lambda _path: canonical
 
     result = ns["attach_canonical_plate_source"](
         "connection",
@@ -465,12 +475,35 @@ def test_split_canonical_plate_annotations_round_trip(pixel_identity):
         Annotation(write["ns"], write["kv_dict"]) for write in writes
     )
 
-    assert result == (1, 2)
+    assert result == 1
     assert [write["ns"] for write in writes] == [
-        CANONICAL_PLATE_IMAGE_NAMESPACE,
         CANONICAL_PLATE_SOURCE_NAMESPACE,
     ]
-    assert "images" not in writes[-1]["kv_dict"]
+    assert writes[0]["object_type"] == "Plate"
+    assert "images" not in writes[0]["kv_dict"]
+    assert ns["get_canonical_plate_source"](plate) == canonical
+
+
+def test_reads_legacy_split_plate_records(pixel_identity):
+    ns = _load_canonical_functions()
+    canonical = plate_source(pixel_identity)
+    index = CanonicalPlateIndex.from_source(canonical)
+    image_record = CanonicalPlateImageRecord(
+        source_object_id=canonical.source_object_id,
+        source_generation=canonical.source_generation,
+        image=canonical.images[0],
+    )
+    plate = Object(9, [
+        Annotation(
+            CANONICAL_PLATE_SOURCE_NAMESPACE,
+            index.to_annotation_values(),
+        ),
+        Annotation(
+            CANONICAL_PLATE_IMAGE_NAMESPACE,
+            image_record.to_annotation_values(),
+        ),
+    ])
+
     assert ns["get_canonical_plate_source"](plate) == canonical
 
 
@@ -923,6 +956,41 @@ def test_indexes_verified_existing_image_without_copying(
     assert existing.is_dir()
     assert writes[0]["ns"] == CANONICAL_SOURCE_NAMESPACE
     assert "indexed generation 1 in place" in caplog.text
+
+
+def test_indexes_existing_plate_with_storage_marker_and_compact_annotation(
+    tmp_path, pixel_identity
+):
+    ns = _load_canonical_functions()
+    root = tmp_path / "managed"
+    existing = root / ".processed/plate.ome.zarr"
+    existing.mkdir(parents=True)
+    canonical = plate_source(pixel_identity).model_copy(update={
+        "relative_path": ".processed/plate.ome.zarr",
+    })
+    marker_writes = []
+    annotation_writes = []
+    ns["build_canonical_plate_source"] = lambda *args, **kwargs: canonical
+    ns["write_indexed_canonical_marker"] = (
+        lambda path, source: marker_writes.append((Path(path), source))
+    )
+
+    indexed = ns["index_existing_plate_zarr"](
+        "connection",
+        Object(9, []),
+        existing,
+        {"group-3-data": root},
+        annotation_writer=(
+            lambda **kwargs: annotation_writes.append(kwargs) or 99
+        ),
+    )
+
+    assert indexed == canonical
+    assert marker_writes == [(existing, canonical)]
+    assert len(annotation_writes) == 1
+    assert annotation_writes[0]["object_type"] == "Plate"
+    assert annotation_writes[0]["ns"] == CANONICAL_PLATE_SOURCE_NAMESPACE
+    assert "images" not in annotation_writes[0]["kv_dict"]
 
 
 def test_rejects_ngff_shape_or_dtype_that_disagrees_with_omero():

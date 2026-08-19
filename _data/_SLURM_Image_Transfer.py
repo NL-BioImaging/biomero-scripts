@@ -104,7 +104,11 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         from biomero_importer.utils.canonical_promotion import (
             CanonicalPromotionService,
         )
-        from biomero_importer.utils.canonical_store import CanonicalStore
+        from biomero_importer.utils.canonical_store import (
+            CanonicalStore,
+            load_canonical_marker,
+            write_indexed_canonical_marker,
+        )
         from biomero_importer.utils.pixel_identity import (
             IsccBioIdentityProvider,
             pixel_identities_match,
@@ -369,7 +373,7 @@ def get_canonical_source(obj, object_type):
 
 
 def get_canonical_plate_source(plate):
-    """Resolve old monolithic or new bounded canonical Plate annotations."""
+    """Resolve compact storage-backed or legacy canonical Plate metadata."""
     plate_id = int(plate.getId())
     candidates = []
     indexes = []
@@ -412,6 +416,39 @@ def get_canonical_plate_source(plate):
             )
 
     for index in indexes:
+        # Scalable layout: one compact OMERO index points to the detailed
+        # identity inventory stored beside the managed Zarr. This prevents a
+        # thousand-field Plate from creating a thousand MapAnnotations.
+        try:
+            managed_path = resolve_managed_source_path(
+                index,
+                load_group_storage_roots(),
+            )
+            if managed_path is not None:
+                managed_source = load_canonical_marker(managed_path)
+                if (
+                    isinstance(managed_source, CanonicalPlateSource)
+                    and managed_source.source_object_id == plate_id
+                    and managed_source.source_generation
+                        == index.source_generation
+                    and managed_source.storage_root == index.storage_root
+                    and managed_source.relative_path == index.relative_path
+                    and len(managed_source.images) == index.image_count
+                    and sum(len(image.labels) for image in managed_source.images)
+                        == index.label_count
+                ):
+                    candidates.append(managed_source)
+                    continue
+        except Exception as exc:
+            logger.warning(
+                "Could not load canonical Plate %s generation %s storage "
+                "manifest; trying legacy OMERO records: %s",
+                plate_id,
+                index.source_generation,
+                exc,
+            )
+
+        # Backward-compatible reader for deployed split annotations.
         generation_images = [
             record for record in image_records
             if record.source_generation == index.source_generation
@@ -969,7 +1006,7 @@ def attach_canonical_plate_source(
     source,
     annotation_writer=None,
 ):
-    """Attach bounded node records, then the compact Plate index as commit."""
+    """Attach one compact Plate index; detailed identities live in storage."""
     existing = get_canonical_plate_source(plate)
     if existing == source:
         return None
@@ -986,46 +1023,15 @@ def attach_canonical_plate_source(
         from ezomero import post_map_annotation
 
         annotation_writer = post_map_annotation
-    writes = []
-    for image in source.images:
-        image_record = CanonicalPlateImageRecord(
-            source_object_id=source.source_object_id,
-            source_generation=source.source_generation,
-            image=image.model_copy(update={"labels": ()}),
-        )
-        writes.append(annotation_writer(
-            conn=conn,
-            object_type="Plate",
-            object_id=int(plate.getId()),
-            kv_dict=image_record.to_annotation_values(),
-            ns=CANONICAL_PLATE_IMAGE_NAMESPACE,
-            across_groups=False,
-        ))
-        for label in image.labels:
-            label_record = CanonicalPlateLabelRecord(
-                source_object_id=source.source_object_id,
-                source_generation=source.source_generation,
-                image_node_path=image.image_node_path,
-                label=label,
-            )
-            writes.append(annotation_writer(
-                conn=conn,
-                object_type="Plate",
-                object_id=int(plate.getId()),
-                kv_dict=label_record.to_annotation_values(),
-                ns=CANONICAL_PLATE_LABEL_NAMESPACE,
-                across_groups=False,
-            ))
     index = CanonicalPlateIndex.from_source(source)
-    writes.append(annotation_writer(
+    return annotation_writer(
         conn=conn,
         object_type="Plate",
         object_id=int(plate.getId()),
         kv_dict=index.to_annotation_values(),
         ns=CANONICAL_PLATE_SOURCE_NAMESPACE,
         across_groups=False,
-    ))
-    return tuple(writes)
+    )
 
 
 def validate_omero_image_semantics(image, guard):
@@ -1324,6 +1330,7 @@ def index_existing_plate_zarr(
         source_generation=source_generation,
         identity_provider=identity_provider,
     )
+    write_indexed_canonical_marker(existing_path, source)
     attach_canonical_plate_source(
         conn,
         plate,
