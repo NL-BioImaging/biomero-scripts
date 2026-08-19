@@ -262,26 +262,35 @@ def discover_canonical_inputs(objects, object_type):
     return sources, tuple(canonical_inputs) if complete else ()
 
 
-def canonical_inputs_from_sources(objects, object_type, sources):
+def canonical_inputs_from_sources(
+    objects,
+    object_type,
+    sources,
+    transfer_artifacts=None,
+):
     """Build an ordered all-or-nothing snapshot after export-side promotion."""
+    transfer_artifacts = transfer_artifacts or {}
     inputs = []
     missing_ids = []
     for ordinal, obj in enumerate(objects):
         object_id = int(obj.getId())
         source = sources.get(object_id)
-        if source is None:
+        transfer_artifact = transfer_artifacts.get(object_id)
+        if source is None or transfer_artifact is None:
             missing_ids.append(object_id)
             continue
         inputs.append(CanonicalInput(
             ordinal=ordinal,
             selected_object_type=object_type,
             selected_object_id=object_id,
+            transfer_artifact=transfer_artifact,
             source=source,
         ))
     if missing_ids:
         logger.info(
             "No complete canonical input snapshot for %s selection: "
-            "canonical records are missing for IDs %s",
+            "canonical records or transfer artifact names are missing for "
+            "IDs %s",
             object_type,
             missing_ids,
         )
@@ -1261,7 +1270,7 @@ def save_as_zarr(
                     " Canonical caching unavailable for %s %s; using normal "
                     "export" % (data_type, object.getId())
                 )
-    return canonical_source
+    return canonical_source, os.path.basename(img_name)
 
 
 def save_planes_for_image(suuid, image, size_c, split_cs, merged_cs,
@@ -1384,6 +1393,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     message = ""
     canonical_inputs = ()
     canonical_sources = {}
+    transfer_artifacts = {}
     storage_roots = {}
     shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
 
@@ -1532,7 +1542,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     if format == constants.transfer.FORMAT_OMEZARR and data_type == constants.transfer.DATA_TYPE_PLATE:
         for plate in objects:
             log("Processing plate: ID %s: %s" % (plate.id, plate.getName()))
-            save_plate_as_zarr(
+            promoted_source, transfer_artifact = save_plate_as_zarr(
                 conn,
                 suuid,
                 plate,
@@ -1543,6 +1553,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
             )
+            object_id = int(plate.getId())
+            transfer_artifacts[object_id] = transfer_artifact
+            if promoted_source is not None:
+                canonical_sources[object_id] = promoted_source
             write_logfile(exp_dir)
             
     for img in images:
@@ -1565,7 +1579,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             else:
                 save_as_ome_tiff(conn, img, folder_name)
         elif format == constants.transfer.FORMAT_OMEZARR:
-            promoted_source = save_image_as_zarr(
+            promoted_source, transfer_artifact = save_image_as_zarr(
                 conn,
                 suuid,
                 img,
@@ -1575,8 +1589,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
             )
+            object_id = int(img.getId())
+            transfer_artifacts[object_id] = transfer_artifact
             if promoted_source is not None:
-                canonical_sources[int(img.getId())] = promoted_source
+                canonical_sources[object_id] = promoted_source
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()
@@ -1641,6 +1657,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             export_objects,
             canonical_object_type,
             canonical_sources,
+            transfer_artifacts,
         )
 
     if len(os.listdir(exp_dir)) == 0:

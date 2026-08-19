@@ -705,13 +705,29 @@ def test_builds_snapshot_from_promoted_and_existing_sources(pixel_identity):
     })
 
     inputs = ns["canonical_inputs_from_sources"](
-        objects, "Image", {7: first, 8: second}
+        objects,
+        "Image",
+        {7: first, 8: second},
+        {7: "first.zarr", 8: "second.zarr"},
     )
 
     assert [item.ordinal for item in inputs] == [0, 1]
     assert [item.source.source_object_id for item in inputs] == [7, 8]
+    assert [item.transfer_artifact for item in inputs] == [
+        "first.zarr",
+        "second.zarr",
+    ]
     assert ns["canonical_inputs_from_sources"](
-        objects, "Image", {7: first}
+        objects,
+        "Image",
+        {7: first},
+        {7: "first.zarr", 8: "second.zarr"},
+    ) == ()
+    assert ns["canonical_inputs_from_sources"](
+        objects,
+        "Image",
+        {7: first, 8: second},
+        {7: "first.zarr"},
     ) == ()
 
 
@@ -727,5 +743,6 @@ def test_fresh_image_exports_feed_promotion_and_final_snapshot():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert "canonical_source = promote_exported_image_zarr(" in script
-    assert "promoted_source = save_image_as_zarr(" in script
+    assert "promoted_source, transfer_artifact = save_image_as_zarr(" in script
     assert "canonical_inputs = canonical_inputs_from_sources(" in script
+    assert "transfer_artifacts," in script
