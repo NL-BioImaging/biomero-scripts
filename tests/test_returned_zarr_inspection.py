@@ -73,7 +73,7 @@ def _load_plate_label_selector():
     return namespace["select_common_plate_label"]
 
 
-def test_keep_mode_logs_eligible_result_without_mutating_it(tmp_path):
+def test_eligibility_logs_result_without_claiming_final_keep_mode(tmp_path):
     store = tmp_path / "input.zarr"
     decision = SimpleNamespace(
         eligible=True,
@@ -94,11 +94,13 @@ def test_keep_mode_logs_eligible_result_without_mutating_it(tmp_path):
     decisions = inspector(tmp_path, object())
 
     assert decisions == (decision,)
-    assert "[KEEP MODE]" in logger.info_calls[-1][0][0]
-    assert "no files were changed" in logger.info_calls[-1][0][0]
+    message = logger.info_calls[-1][0][0]
+    assert "Shallow Zarr eligibility" in message
+    assert "KEEP MODE" not in message
+    assert "No files were changed during evaluation" in message
 
 
-def test_keep_mode_fails_open_when_discovery_raises(tmp_path):
+def test_eligibility_fails_open_when_discovery_raises(tmp_path):
     def fail(_path):
         raise RuntimeError("bad result")
 
@@ -134,9 +136,19 @@ def test_normalizes_only_eligible_results_inside_results_root(tmp_path):
         store_path=inside.store_path,
         bytes_before=100,
         bytes_after=10,
-        collection=SimpleNamespace(images=(SimpleNamespace(
-            label_node_paths=("labels/cells",),
-        ),)),
+        collection=SimpleNamespace(images=(
+            SimpleNamespace(
+                label_node_paths=("labels/cells",),
+                label_components=(SimpleNamespace(source=None),),
+            ),
+            SimpleNamespace(
+                label_node_paths=("labels/nuclei", "labels/cytoplasm"),
+                label_components=(
+                    SimpleNamespace(source=None),
+                    SimpleNamespace(source=None),
+                ),
+            ),
+        )),
     )
     calls = []
 
@@ -150,8 +162,41 @@ def test_normalizes_only_eligible_results_inside_results_root(tmp_path):
 
     assert results == (committed,)
     assert calls == [(inside, "workflow-id")]
-    assert "saved %s bytes" in logger.info_calls[-1][0][0]
+    assert "saved %s bytes" in logger.info_calls[0][0][0]
+    assert logger.info_calls[0][0][2] == 3
+    assert logger.info_calls[1][0][1:] == (3, 0)
     assert "retaining the full result" in logger.warning_calls[-1][0][0]
+
+
+def test_normalization_logs_without_expensive_byte_measurement(tmp_path):
+    inside = SimpleNamespace(
+        eligible=True,
+        store_path=tmp_path / "result.zarr",
+    )
+    committed = SimpleNamespace(
+        store_path=inside.store_path,
+        bytes_before=None,
+        bytes_after=None,
+        collection=SimpleNamespace(images=(
+            SimpleNamespace(
+                label_node_paths=("A/1/0/labels/cells",),
+                label_components=(SimpleNamespace(source=None),),
+            ),
+            SimpleNamespace(
+                label_node_paths=("A/1/1/labels/cells",),
+                label_components=(SimpleNamespace(source=object()),),
+            ),
+        )),
+    )
+
+    normalizer, logger = _load_normalizer(
+        lambda decision, workflow_id: committed
+    )
+
+    assert normalizer((inside,), "workflow-id", tmp_path) == (committed,)
+    assert "Exact byte accounting was skipped" in logger.info_calls[0][0][0]
+    assert logger.info_calls[0][0][2] == 2
+    assert logger.info_calls[1][0][1:] == (1, 1)
 
 
 def test_normalization_occurs_after_label_path_compatibility_renames():

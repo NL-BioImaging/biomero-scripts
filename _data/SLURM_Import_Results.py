@@ -318,7 +318,7 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
 
 
 def inspect_returned_zarrs(results_path, canonical_inputs):
-    """Log keep-only shallow eligibility without modifying result data."""
+    """Evaluate shallow eligibility without modifying result data."""
     if not RETURNED_ZARR_SUPPORT_AVAILABLE:
         logger.info(
             "Shallow Zarr return inspection skipped: processing support is "
@@ -347,10 +347,11 @@ def inspect_returned_zarrs(results_path, canonical_inputs):
                 matched = decision.matched_inputs[0]
                 identity = decision.image_identities[0]
                 logger.info(
-                    "Shallow Zarr decision [KEEP MODE]: %s is eligible; "
+                    "Shallow Zarr eligibility: %s can be normalized; "
                     "returned image pixels match transferred %s %s "
-                    "(artifact=%s, identity=%s, labels=%s). The full result "
-                    "store is retained and no files were changed.",
+                    "(artifact=%s, identity=%s, labels=%s). No files were "
+                    "changed during evaluation; normalization follows during "
+                    "import-order preparation.",
                     store,
                     matched.selected_object_type,
                     matched.selected_object_id,
@@ -378,7 +379,7 @@ def inspect_returned_zarrs(results_path, canonical_inputs):
             elif getattr(decision, "unchanged_passthrough", False):
                 matched = decision.matched_inputs[0]
                 logger.info(
-                    "Shallow Zarr decision [KEEP MODE]: %s is an unchanged "
+                    "Shallow Zarr eligibility: %s is an unchanged "
                     "input pass-through with no returned labels; it will not "
                     "be imported as a duplicate result (artifact=%s, %s %s)",
                     store,
@@ -388,7 +389,7 @@ def inspect_returned_zarrs(results_path, canonical_inputs):
                 )
             else:
                 logger.info(
-                    "Shallow Zarr decision [KEEP MODE]: retaining full store "
+                    "Shallow Zarr eligibility: retaining full store "
                     "%s (reason=%s, labels=%s). No files were changed.",
                     store,
                     decision.reason,
@@ -416,25 +417,47 @@ def normalize_eligible_returned_zarrs(decisions, workflow_id, results_path):
             decision.store_path.resolve().relative_to(results_root)
             result = normalize_returned_zarr(decision, workflow_id)
             normalized.append(result)
-            saved = max(0, result.bytes_before - result.bytes_after)
-            logger.info(
-                "Shallow Zarr committed: %s retained %s label node(s), "
-                "omitted verified duplicate image chunks, and reduced this "
-                "result from %s to %s bytes (saved %s bytes)",
-                result.store_path,
-                len(result.collection.images[0].label_node_paths),
-                result.bytes_before,
-                result.bytes_after,
-                saved,
+            label_count = sum(
+                len(image.label_node_paths)
+                for image in result.collection.images
             )
+            if (
+                result.bytes_before is not None
+                and result.bytes_after is not None
+            ):
+                saved = max(0, result.bytes_before - result.bytes_after)
+                logger.info(
+                    "Shallow Zarr committed: %s retained %s label node(s), "
+                    "omitted verified duplicate image chunks, and reduced "
+                    "this result from %s to %s bytes (saved %s bytes)",
+                    result.store_path,
+                    label_count,
+                    result.bytes_before,
+                    result.bytes_after,
+                    saved,
+                )
+            else:
+                logger.info(
+                    "Shallow Zarr committed: %s retained %s label node(s) "
+                    "and omitted verified duplicate image chunks. Exact byte "
+                    "accounting was skipped to avoid synchronous Plate tree "
+                    "scans.",
+                    result.store_path,
+                    label_count,
+                )
             inherited = sum(
                 component.source is not None
-                for component in result.collection.images[0].label_components
+                for image in result.collection.images
+                for component in image.label_components
+            )
+            component_count = sum(
+                len(image.label_components)
+                for image in result.collection.images
             )
             logger.info(
                 "Shallow Zarr label manifest: %s local/new-or-changed, %s "
                 "inherited (returned inherited copies omitted)",
-                len(result.collection.images[0].label_components) - inherited,
+                component_count - inherited,
                 inherited,
             )
         except Exception as exc:
