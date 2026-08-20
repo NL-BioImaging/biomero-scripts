@@ -177,8 +177,17 @@ rebuild.
 
 - false: Image Transfer exports normally and Import Results imports normally;
 - true: Image Transfer may promote/reuse a verified canonical Zarr, and Import
-  Results may replace an unchanged returned image copy with a shallow
-  source-and-label collection.
+  Results submits a typed `biomero.shallow-zarr` operation with the exact
+  workflow input snapshot. BIOMERO.importer performs identity comparison,
+  fail-safe normalization, and registration planning in its independent
+  service after the order is committed.
+
+The OMERO script does not hash or mutate returned Zarrs. If the deployed
+importer does not advertise the lifecycle operation, or no canonical workflow
+snapshot is available, it uses the established full-import path. Existing
+legacy label-result controls remain unchanged in that fallback. Identity
+worker concurrency is configured on BIOMERO.importer, so a web/script timeout
+cannot stop the expensive Plate comparison after hand-off.
 
 Canonical Plate identities are indexed in OMERO as one compact Plate record
 plus bounded image- and label-node records. This keeps large Plate metadata

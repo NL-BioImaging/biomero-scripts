@@ -84,7 +84,7 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
@@ -273,19 +273,28 @@ if not IMPORTER_ENABLED:
     logger.warning(
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
-RETURNED_ZARR_SUPPORT_AVAILABLE = False
+IMPORTER_ORDER_API_AVAILABLE = False
+SHALLOW_ZARR_OPERATION_AVAILABLE = False
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     try:
-        from biomero_importer.utils.result_zarr import (
-            evaluate_returned_zarr,
-            find_returned_zarr_stores,
-            normalize_returned_zarr,
+        from biomero_importer import (
+            get_importer_capabilities,
+            submit_import_order,
         )
-        RETURNED_ZARR_SUPPORT_AVAILABLE = True
+        from biomero_schema.imports import (
+            SHALLOW_ZARR_OPERATION,
+            ImportOptionsEnvelope,
+            ShallowZarrImportOperation,
+        )
+        IMPORTER_ORDER_API_AVAILABLE = True
+        SHALLOW_ZARR_OPERATION_AVAILABLE = (
+            SHALLOW_ZARR_OPERATION
+            in get_importer_capabilities().get("lifecycleOperations", ())
+        )
     except ImportError as exc:
         logger.warning(
-            "BIOMERO_SHALLOW_ZARR is enabled, but returned-Zarr processing "
-            "is unavailable; full results will be retained: %s",
+            "BIOMERO_SHALLOW_ZARR is enabled, but the importer lifecycle API "
+            "is unavailable; legacy full-result imports remain active: %s",
             exc,
         )
 
@@ -317,204 +326,70 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         return None
 
 
-def inspect_returned_zarrs(results_path, canonical_inputs):
-    """Evaluate shallow eligibility without modifying result data."""
-    if not RETURNED_ZARR_SUPPORT_AVAILABLE:
+def build_shallow_import_options(canonical_inputs, client=None):
+    """Build an importer-owned shallow operation or preserve legacy import."""
+    if not (
+        IMPORTER_ENABLED
+        and SHALLOW_ZARR_ENABLED
+        and IMPORTER_ORDER_API_AVAILABLE
+        and SHALLOW_ZARR_OPERATION_AVAILABLE
+    ):
+        return None
+    if canonical_inputs is None or not canonical_inputs.inputs:
         logger.info(
-            "Shallow Zarr return inspection skipped: processing support is "
-            "not available"
+            "Shallow Zarr importer operation not requested: no canonical "
+            "workflow input snapshot is available"
         )
-        return ()
-
-    decisions = []
-    try:
-        stores = find_returned_zarr_stores(results_path)
-        if not stores:
-            logger.info(
-                "Shallow Zarr return inspection found no *.zarr stores in %s",
-                results_path,
-            )
-            return ()
-        logger.info(
-            "Shallow Zarr return inspection found %s outermost store(s) in %s",
-            len(stores),
-            results_path,
-        )
-        for store in stores:
-            decision = evaluate_returned_zarr(store, canonical_inputs)
-            decisions.append(decision)
-            if decision.eligible:
-                matched = decision.matched_inputs[0]
-                identity = decision.image_identities[0]
-                logger.info(
-                    "Shallow Zarr eligibility: %s can be normalized; "
-                    "returned image pixels match transferred %s %s "
-                    "(artifact=%s, identity=%s, labels=%s). No files were "
-                    "changed during evaluation; normalization follows during "
-                    "import-order preparation.",
-                    store,
-                    matched.selected_object_type,
-                    matched.selected_object_id,
-                    matched.transfer_artifact,
-                    identity.iscc_code,
-                    list(decision.label_node_paths),
-                )
-                for component in getattr(decision, "label_components", ()):
-                    logger.info(
-                        "Returned Zarr label identity: store=%s, node=%s, "
-                        "pixel ISCC=%s, classification=%s%s",
-                        store,
-                        component.logical_node_path,
-                        component.pixel_identity.iscc_code,
-                        "inherited" if component.source is not None else "local",
-                        (
-                            " from %s:%s#%s" % (
-                                component.source.storage_root,
-                                component.source.relative_path,
-                                component.source.node_path,
-                            )
-                            if component.source is not None else ""
-                        ),
-                    )
-            elif getattr(decision, "unchanged_passthrough", False):
-                matched = decision.matched_inputs[0]
-                logger.info(
-                    "Shallow Zarr eligibility: %s is an unchanged "
-                    "input pass-through with no returned labels; it will not "
-                    "be imported as a duplicate result (artifact=%s, %s %s)",
-                    store,
-                    matched.transfer_artifact,
-                    matched.selected_object_type,
-                    matched.selected_object_id,
-                )
-            else:
-                logger.info(
-                    "Shallow Zarr eligibility: retaining full store "
-                    "%s (reason=%s, labels=%s). No files were changed.",
-                    store,
-                    decision.reason,
-                    list(decision.label_node_paths),
-                )
-    except Exception as exc:
-        logger.warning(
-            "Shallow Zarr return inspection failed; retaining every full "
-            "result store: %s",
-            exc,
-            exc_info=True,
-        )
-        return ()
-    return tuple(decisions)
+        return None
+    import_plate_preview = bool(unwrap(client.getInput(
+        constants.results.IMPORT_PLATE_LABEL_PREVIEW
+    ))) if client else False
+    plate_label_name = (unwrap(client.getInput(
+        constants.results.PLATE_LABEL_PREVIEW_NAME
+    )) or "").strip() if client else ""
+    operation = ShallowZarrImportOperation(
+        canonicalInputs=canonical_inputs,
+        importImageLabelViews=True,
+        importPlateLabelPreview=import_plate_preview,
+        plateLabelName=(plate_label_name or None),
+    )
+    envelope = ImportOptionsEnvelope(operations=(operation,))
+    logger.info(
+        "Prepared importer-owned %s operation for workflow %s with %s "
+        "canonical input record(s)",
+        operation.kind,
+        canonical_inputs.workflow_id,
+        len(canonical_inputs.inputs),
+    )
+    return envelope.to_dict()
 
 
-def normalize_eligible_returned_zarrs(decisions, workflow_id, results_path):
-    """Commit eligible shallow stores, retaining full data on every failure."""
-    normalized = []
-    results_root = Path(results_path).resolve()
-    for decision in decisions or ():
-        if not decision.eligible:
+def select_lifecycle_import_paths(results_path):
+    """Keep regular images and only the outermost returned Zarr stores."""
+    candidates = [Path(path) for path in find_supported_image_paths(results_path)]
+    zarrs = [
+        path.resolve() for path in candidates
+        if path.is_dir() and path.name.lower().endswith(".zarr")
+    ]
+    outermost = {
+        path for path in zarrs
+        if not any(path != parent and path.is_relative_to(parent)
+                   for parent in zarrs)
+    }
+    selected = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in zarrs and resolved not in outermost:
             continue
-        try:
-            decision.store_path.resolve().relative_to(results_root)
-            result = normalize_returned_zarr(decision, workflow_id)
-            normalized.append(result)
-            label_count = sum(
-                len(image.label_node_paths)
-                for image in result.collection.images
-            )
-            if (
-                result.bytes_before is not None
-                and result.bytes_after is not None
-            ):
-                saved = max(0, result.bytes_before - result.bytes_after)
-                logger.info(
-                    "Shallow Zarr committed: %s retained %s label node(s), "
-                    "omitted verified duplicate image chunks, and reduced "
-                    "this result from %s to %s bytes (saved %s bytes)",
-                    result.store_path,
-                    label_count,
-                    result.bytes_before,
-                    result.bytes_after,
-                    saved,
-                )
-            else:
-                logger.info(
-                    "Shallow Zarr committed: %s retained %s label node(s) "
-                    "and omitted verified duplicate image chunks. Exact byte "
-                    "accounting was skipped to avoid synchronous Plate tree "
-                    "scans.",
-                    result.store_path,
-                    label_count,
-                )
-            inherited = sum(
-                component.source is not None
-                for image in result.collection.images
-                for component in image.label_components
-            )
-            component_count = sum(
-                len(image.label_components)
-                for image in result.collection.images
-            )
-            logger.info(
-                "Shallow Zarr label manifest: %s local/new-or-changed, %s "
-                "inherited (returned inherited copies omitted)",
-                component_count - inherited,
-                inherited,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Shallow Zarr normalization failed for %s; retaining the "
-                "full result when available: %s",
-                decision.store_path,
-                exc,
-                exc_info=True,
-            )
-    return tuple(normalized)
-
-
-def is_shallow_plate_collection(collection) -> bool:
-    """Return whether every omitted image belongs to one Plate source."""
-    images = tuple(getattr(collection, "images", ()))
-    return bool(images) and all(
-        image.source.source_object_type == "Plate" for image in images
-    )
-
-
-def select_common_plate_label(collection, requested_name=""):
-    """Select one exact image-level label shared by every Plate image."""
-    if not is_shallow_plate_collection(collection):
-        return None, "result is not a shallow Plate"
-    labels_per_image = []
-    for image in collection.images:
-        prefix = PurePosixPath(image.image_node_path) / "labels"
-        names = set()
-        for logical_path in image.label_node_paths:
-            try:
-                relative = PurePosixPath(logical_path).relative_to(prefix)
-            except ValueError:
-                continue
-            if len(relative.parts) == 1:
-                names.add(relative.name)
-        labels_per_image.append(names)
-    common = set.intersection(*labels_per_image)
-    requested_name = (requested_name or "").strip()
-    if requested_name:
-        if requested_name in common:
-            return requested_name, None
-        return None, (
-            f"label {requested_name!r} is not declared on every Plate image"
-        )
-    if len(common) == 1:
-        return next(iter(common)), None
-    if not common:
-        return None, "no label name is declared on every Plate image"
-    return None, (
-        "multiple common Plate labels require Plate_Label_Preview_Name: "
-        + ", ".join(sorted(common))
-    )
+        if any(resolved != root and resolved.is_relative_to(root)
+               for root in outermost):
+            continue
+        selected.append(str(candidate))
+    return selected
 
 
 def get_images_by_ids(conn, image_ids):
-    """Load OMERO Images without issuing an invalid empty ``IN`` query."""
+    """Load OMERO Images without issuing an invalid empty IN query."""
     normalized_ids = [int(image_id) for image_id in (image_ids or [])]
     if not normalized_ids:
         return []
@@ -2378,8 +2253,16 @@ def create_upload_order(order_dict: Dict[str, Any]) -> None:
             "Cannot create upload order: biomero-importer not available")
 
     try:
-        # Log the new order using importer's ingestion tracking
-        log_ingestion_step(order_dict, STAGE_NEW_ORDER)
+        import_options = order_dict.get("ImportOptions", {})
+        if import_options.get("schema") == 2:
+            if not IMPORTER_ORDER_API_AVAILABLE:
+                raise RuntimeError(
+                    "Importer lifecycle order API is not available"
+                )
+            submit_import_order(order_dict)
+        else:
+            # Preserve the established database writer for legacy importers.
+            log_ingestion_step(order_dict, STAGE_NEW_ORDER)
         logger.info(f"Created upload order: {order_dict['UUID']}")
     except Exception as e:
         logger.error(f"Failed to create upload order: {e}")
@@ -2540,7 +2423,7 @@ def create_upload_orders_for_results(
     results_path: str,
     wf_id: UUID,
     client: Any = None,
-    shallow_decisions=(),
+    canonical_inputs=None,
 ) -> List[Dict[str, Any]]:
     """Create upload orders for SLURM results (images and optionally label zarrs).
 
@@ -2564,94 +2447,50 @@ def create_upload_orders_for_results(
 
     orders = []
 
-    # Legacy result controls remain effective when shallow handling is off.
-    # With shallow handling on, the returned NGFF structure determines imports:
-    # the primary logical result and every declared label projection are both
-    # registered automatically.
-    import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
-    import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
-    import_plate_label_preview = bool(unwrap(client.getInput(
-        constants.results.IMPORT_PLATE_LABEL_PREVIEW
-    ))) if client else False
-    plate_label_preview_name = (unwrap(client.getInput(
-        constants.results.PLATE_LABEL_PREVIEW_NAME
-    )) or "").strip() if client else ""
-    automatic_shallow_import = (
-        SHALLOW_ZARR_ENABLED
-        and RETURNED_ZARR_SUPPORT_AVAILABLE
-        and bool(shallow_decisions)
+    lifecycle_options = build_shallow_import_options(
+        canonical_inputs,
+        client,
     )
-    if automatic_shallow_import:
-        if not import_label_zarrs or import_only_labels:
-            logger.info(
-                "Ignoring legacy label-only result options because shallow "
-                "Zarr result registration is automatic"
+    if lifecycle_options is not None:
+        image_files = select_lifecycle_import_paths(results_path)
+        if not image_files:
+            logger.warning(
+                "No image files found for importer lifecycle processing in %s",
+                results_path,
             )
-        import_label_zarrs = True
-        import_only_labels = False
-
-    # Rename label nodes for current importer compatibility before shallow
-    # normalization writes their final paths into the collection manifest.
-    label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
-
-    if automatic_shallow_import:
-        normalized_results = normalize_eligible_returned_zarrs(
-            shallow_decisions,
-            wf_id,
-            results_path,
-        )
-        # Normalization may remove returned copies of inherited labels. Only
-        # submit label nodes that remain physically local to this collection.
-        label_zarr_files = find_label_zarr_paths(results_path)
-        # Re-scan after label compatibility renames and normalization. Nested
-        # labels receive their own order and must not also enter the primary
-        # image order. Exact unchanged/no-label input artifacts are omitted.
-        all_image_files = find_supported_image_paths(results_path)
-        label_paths = {str(Path(path).resolve()) for path in label_zarr_files}
-        passthrough_paths = {
-            str(Path(decision.store_path).resolve())
-            for decision in shallow_decisions
-            if getattr(decision, "unchanged_passthrough", False)
+            return []
+        order = {
+            "Group": group_name,
+            "Username": username,
+            "DestinationID": destination_id,
+            "DestinationType": destination_type,
+            "UUID": str(uuid.uuid4()),
+            "Files": image_files,
+            "ImportOptions": lifecycle_options,
+            "wf_id": wf_id,
+            "source": "SLURM_Results_Lifecycle",
         }
-        shallow_plate_results = tuple(
-            result for result in normalized_results
-            if is_shallow_plate_collection(result.collection)
-        )
-        shallow_plate_paths = {
-            str(Path(result.store_path).resolve())
-            for result in shallow_plate_results
-        }
-        shallow_image_primary_paths = {
-            str(Path(result.store_path).resolve())
-            for result in normalized_results
-            if not is_shallow_plate_collection(result.collection)
-        }
-        label_zarr_files = [
-            path for path in label_zarr_files
-            if not any(
-                Path(path).resolve().is_relative_to(Path(plate_path))
-                for plate_path in shallow_plate_paths
-            )
-        ]
-        image_files = [
-            path for path in all_image_files
-            if str(Path(path).resolve()) not in label_paths
-            and str(Path(path).resolve()) not in passthrough_paths
-            and str(Path(path).resolve()) not in shallow_image_primary_paths
-        ]
+        create_upload_order(order)
         logger.info(
-            "Automatic shallow result selection prepared %s primary image/Plate "
-            "path(s), %s Image label projection(s), %s shallow Plate(s), "
-            "skipped %s shallow Image duplicate(s), and skipped %s unchanged "
-            "pass-through store(s)",
+            "Handed %s result path(s) to BIOMERO.importer for asynchronous "
+            "shallow evaluation, normalization, and registration planning",
             len(image_files),
-            len(label_zarr_files),
-            len(shallow_plate_paths),
-            len(shallow_image_primary_paths),
-            len(passthrough_paths),
         )
-    else:
-        image_files = find_supported_image_paths(results_path)
+        return [order]
+
+    # From here down, retain the established user-controlled import behavior.
+    import_label_zarrs = (
+        unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS))
+        if client else True
+    )
+    import_only_labels = (
+        unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS))
+        if client else True
+    )
+    label_zarr_files = (
+        find_label_zarr_paths(results_path) if import_label_zarrs else []
+    )
+    image_files = find_supported_image_paths(results_path)
 
     if not image_files and not label_zarr_files:
         logger.warning(
@@ -2664,22 +2503,6 @@ def create_upload_orders_for_results(
     if import_label_zarrs and import_only_labels and len(label_zarr_files) == 0:
         logger.warning("Import_Only_Labels=true but no label zarr directories found. Falling back to main image import to avoid empty import.")
         skip_main_images = False
-
-    # Current OMERO PixelBuffer support registers each retained label node as
-    # its own ordinary image. Only normalize when the main returned image is
-    # intentionally excluded from this import order; otherwise keep it fully
-    # self-contained for the established importer path.
-    if skip_main_images and shallow_decisions and not automatic_shallow_import:
-        normalize_eligible_returned_zarrs(
-            shallow_decisions,
-            wf_id,
-            results_path,
-        )
-    elif shallow_decisions and not automatic_shallow_import:
-        logger.info(
-            "Shallow Zarr normalization skipped because the main returned "
-            "images are required by this importer order"
-        )
 
     # Create order for image files if any exist (unless we're only importing labels)
     if image_files and not skip_main_images:
@@ -2700,43 +2523,6 @@ def create_upload_orders_for_results(
     elif image_files and skip_main_images:
         logger.info(f"Skipping main image import for {len(image_files)} files (Import_Only_Labels=true, {len(label_zarr_files)} label zarr directories found)")
 
-    if automatic_shallow_import and import_plate_label_preview:
-        for result in shallow_plate_results:
-            label_name, reason = select_common_plate_label(
-                result.collection,
-                plate_label_preview_name,
-            )
-            if label_name is None:
-                logger.warning(
-                    "Skipping optional label-backed Plate preview for %s: %s",
-                    result.store_path,
-                    reason,
-                )
-                continue
-            preview_order = {
-                "Group": group_name,
-                "Username": username,
-                "DestinationID": destination_id,
-                "DestinationType": destination_type,
-                "UUID": str(uuid.uuid4()),
-                "Files": [str(result.store_path)],
-                "ImportOptions": {
-                    "schema": 1,
-                    "platePixelSource": "label",
-                    "plateLabelName": label_name,
-                },
-                "wf_id": wf_id,
-                "source": "SLURM_Results_Plate_Label_Preview",
-            }
-            create_upload_order(preview_order)
-            orders.append(preview_order)
-            logger.info(
-                "Created optional label-backed Plate upload order for %s "
-                "using label %s",
-                result.store_path,
-                label_name,
-            )
-            
     # Create orders for label zarr directories if enabled and found
     if import_label_zarrs and label_zarr_files:
         label_order = {
@@ -3468,7 +3254,7 @@ def process_importer_workflow(
     task_id: Optional[UUID] = None,
     input_images: Optional[List[Any]] = None,
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
-    shallow_decisions=(),
+    canonical_inputs=None,
 
 ) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
@@ -3591,7 +3377,7 @@ def process_importer_workflow(
     logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
         group_name, username, destination_type, destination_id,
-        permanent_storage_path, wf_id, client, shallow_decisions)
+        permanent_storage_path, wf_id, client, canonical_inputs)
 
     if orders:
         message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
@@ -4707,7 +4493,7 @@ def runScript() -> None:
                 None, None, None, None)
             _bulk_zip_perm: Optional[str] = None  # set once after extraction; used for skip-list and cleanup
             extraction_error = None
-            shallow_zarr_decisions = ()
+            canonical_input_manifest = None
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_slurm_results_zip(
                     slurmClient, slurm_job_id, local_tmp_storage, group_name, wf_id, message)
@@ -4724,6 +4510,7 @@ def runScript() -> None:
 
             if (
                 IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+                and SHALLOW_ZARR_OPERATION_AVAILABLE
                 and not extraction_error
                 and permanent_storage_path
             ):
@@ -4737,9 +4524,9 @@ def runScript() -> None:
                         "tracking for result processing",
                         len(canonical_input_manifest.inputs),
                     )
-                shallow_zarr_decisions = inspect_returned_zarrs(
-                    permanent_storage_path,
-                    canonical_input_manifest,
+                logger.info(
+                    "Returned Zarr inspection is delegated to "
+                    "BIOMERO.importer after the import order is committed"
                 )
 
             # Copy log to permanent storage (only possible when extraction succeeded),
@@ -4866,7 +4653,7 @@ def runScript() -> None:
                     group_name, username,
                     permanent_storage_path, wf_id, task_id,
                     input_images=input_images, roi_pairs=roi_pairs,
-                    shallow_decisions=shallow_zarr_decisions)
+                    canonical_inputs=canonical_input_manifest)
                 message += importer_message
 
             if unwrap(client.getInput(constants.results.OUTPUT_CREATE_ROIS)):
