@@ -917,6 +917,28 @@ def runScript():
             client.closeSession()
 
 
+def _get_input_group_id(client, conn):
+    """Return the concrete OMERO group of the first selected input object."""
+    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
+    object_ids = unwrap(client.getInput(constants.transfer.IDS))
+    if not isinstance(object_ids, (list, tuple)):
+        object_ids = [object_ids]
+    if not data_type or not object_ids or object_ids[0] is None:
+        raise ValueError("Cannot determine an OMERO group without input data")
+
+    input_object = conn.getObject(data_type, int(object_ids[0]))
+    if input_object is None:
+        raise ValueError(
+            f"Cannot find selected OMERO {data_type} {object_ids[0]}")
+    details = input_object.getDetails()
+    group_id = details.getGroup().getId() if details else None
+    group_id = int(unwrap(group_id)) if group_id is not None else None
+    if group_id is None or group_id < 0:
+        raise ValueError(
+            f"Selected OMERO {data_type} {object_ids[0]} has no concrete group")
+    return group_id
+
+
 def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
     """Fetch a workflow job's Slurm log and attach it to OMERO (best-effort).
 
@@ -948,8 +970,15 @@ def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
         description = f"Log from SLURM job {slurm_job_id}"
         if wf_id:
             description += f" (Workflow {wf_id})"
-        annotation = conn.createFileAnnfromLocalFile(
-            local_path, mimetype=mimetype, ns=namespace, desc=description)
+        input_group_id = _get_input_group_id(client, conn)
+        previous_group = conn.SERVICE_OPTS.getOmeroGroup()
+        conn.SERVICE_OPTS.setOmeroGroup(input_group_id)
+        try:
+            annotation = conn.createFileAnnfromLocalFile(
+                local_path, mimetype=mimetype, ns=namespace,
+                desc=description)
+        finally:
+            conn.SERVICE_OPTS.setOmeroGroup(previous_group)
         obj_id = annotation.getFile().getId()
         try:
             config = conn.getConfigService()
