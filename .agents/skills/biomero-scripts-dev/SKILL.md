@@ -124,6 +124,31 @@ Run available targeted tests as well. If the checkout contains only cached test
 artifacts and no test source, report that limitation rather than claiming tests
 passed.
 
+## Follow red/green TDD
+
+Write behavior tests before changing production scripts and run them against the
+unchanged production worktree. A new positive test must fail for the behavior it
+is intended to add or fix; a test that has never been red is not evidence that
+the change works.
+
+- Start with the narrowest relevant test selection and capture the expected
+  failure.
+- Implement the smallest backward-compatible production change that makes the
+  test pass.
+- Rerun the narrow selection after each implementation batch, then the complete
+  test harness before declaring the work done.
+- Distinguish positive tests from guard tests that assert something does not
+  happen. Guard tests may already pass before implementation, so pair them with
+  at least one positive test that demonstrably goes red.
+- If tests and implementation cannot be separated, temporarily neutralize the
+  new production path, prove the positive regression test fails, then restore it
+  and prove it passes.
+
+Because tests live on `test-suite`, make the test commit in its separate
+worktree and point `BIOMERO_SCRIPTS_ROOT` at the unchanged production worktree
+for the red run. Do not use the source snapshot carried by `test-suite` as proof
+of current production behavior.
+
 ## Keep tests off the deployable branch
 
 The `master` branch is cloned directly into OMERO's recursively scanned
