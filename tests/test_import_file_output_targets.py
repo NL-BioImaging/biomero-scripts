@@ -22,25 +22,63 @@ def load_target_resolver():
     return namespace["resolve_non_image_output_targets"]
 
 
-def test_importer_destination_is_used_when_result_container_was_created():
+class Container:
+    def __init__(self, object_type, object_id):
+        self.object_type = object_type
+        self.object_id = object_id
+
+
+def test_result_dataset_wins_over_input_dataset_and_fallback():
     resolve_targets = load_target_resolver()
-    input_plate = object()
-    destination_screen = object()
+    input_dataset = Container("Dataset", 10)
+    result_dataset = Container("Dataset", 20)
+    input_project = Container("Project", 30)
 
     assert resolve_targets(
-        [input_plate], destination_screen, [input_plate]
-    ) == [destination_screen]
+        [input_dataset], result_dataset, [input_project]
+    ) == [result_dataset]
 
 
-def test_configured_input_target_is_used_when_no_result_container_was_created():
+def test_result_screen_wins_over_input_plate_and_fallback():
     resolve_targets = load_target_resolver()
-    input_plate = object()
+    input_plate = Container("Plate", 11)
+    result_screen = Container("Screen", 21)
+    input_screen = Container("Screen", 31)
+
+    assert resolve_targets(
+        [input_plate], result_screen, [input_screen]
+    ) == [result_screen]
+
+
+def test_input_dataset_is_used_when_no_result_container_was_created():
+    resolve_targets = load_target_resolver()
+    input_dataset = Container("Dataset", 12)
+
+    assert resolve_targets([input_dataset], None, []) == [input_dataset]
+
+
+def test_input_plate_is_used_when_no_result_container_was_created():
+    resolve_targets = load_target_resolver()
+    input_plate = Container("Plate", 13)
 
     assert resolve_targets([input_plate], None, []) == [input_plate]
 
 
+def test_all_configured_input_targets_are_preserved_without_a_result():
+    resolve_targets = load_target_resolver()
+    input_datasets = [Container("Dataset", 14), Container("Dataset", 15)]
+
+    assert resolve_targets(input_datasets, None, []) == input_datasets
+
+
 def test_input_container_fallback_supports_older_or_manual_invocations():
     resolve_targets = load_target_resolver()
-    input_screen = object()
+    input_screen = Container("Screen", 32)
 
     assert resolve_targets([], None, [input_screen]) == [input_screen]
+
+
+def test_no_available_container_preserves_legacy_empty_target_behavior():
+    resolve_targets = load_target_resolver()
+
+    assert resolve_targets([], None, []) == []
