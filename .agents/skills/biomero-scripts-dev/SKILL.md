@@ -124,6 +124,67 @@ Run available targeted tests as well. If the checkout contains only cached test
 artifacts and no test source, report that limitation rather than claiming tests
 passed.
 
+## Follow red/green TDD
+
+Write behavior tests before changing production scripts and run them against the
+unchanged production worktree. A new positive test must fail for the behavior it
+is intended to add or fix; a test that has never been red is not evidence that
+the change works.
+
+- Start with the narrowest relevant test selection and capture the expected
+  failure.
+- Implement the smallest backward-compatible production change that makes the
+  test pass.
+- Rerun the narrow selection after each implementation batch, then the complete
+  test harness before declaring the work done.
+- Distinguish positive tests from guard tests that assert something does not
+  happen. Guard tests may already pass before implementation, so pair them with
+  at least one positive test that demonstrably goes red.
+- If tests and implementation cannot be separated, temporarily neutralize the
+  new production path, prove the positive regression test fails, then restore it
+  and prove it passes.
+
+Because tests live on `test-suite`, make the test commit in its separate
+worktree and point `BIOMERO_SCRIPTS_ROOT` at the unchanged production worktree
+for the red run. Do not use the source snapshot carried by `test-suite` as proof
+of current production behavior.
+
+## Keep tests off the deployable branch
+
+The `master` branch is cloned directly into OMERO's recursively scanned
+`lib/scripts` directory by manual installations. Do not add Python test files or
+a `tests/` directory to `master`, because OMERO may expose them as runnable
+scripts.
+
+The canonical test harness lives on the separate `test-suite` branch. The
+workflow at `.github/workflows/tests.yml` checks out the triggering `master` or
+pull-request revision as `source`, checks out `test-suite` as `harness`, and sets
+`BIOMERO_SCRIPTS_ROOT` so the harness tests the exact source revision rather than
+the source snapshot on its own branch.
+
+When production behavior changes:
+
+1. Make the production edit on `master` or its feature branch.
+2. Use a separate worktree checked out to `test-suite`; never merge
+   `test-suite` into `master`.
+3. Add or update tests under `tests/` in that worktree. Tests must resolve the
+   source repository from `BIOMERO_SCRIPTS_ROOT`, with their own branch root only
+   as a local fallback.
+4. Run the harness against the production worktree, for example:
+
+```powershell
+$env:BIOMERO_SCRIPTS_ROOT = "D:\path\to\biomero-scripts"
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
+python -m pytest tests -q
+```
+
+5. Commit and push production and test changes to their respective branches.
+   Keep `tests/requirements.txt` on `test-suite` aligned with test dependencies.
+
+The workflow runs for pull requests and pushes to `master`. Coordinate test
+branch updates with production pull requests so the required check exercises
+the intended behavior.
+
 ## Keep cross-repository documentation aligned
 
 Update this repository's `README.md` when script roles, inputs, security,

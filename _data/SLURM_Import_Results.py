@@ -299,7 +299,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0"
+VERSION = "2.8.2"
 
 
 def load_canonical_input_snapshot(slurm_client, workflow_id):
@@ -801,11 +801,36 @@ def find_best_matching_image(
     return None
 
 
+def get_images_in_id_order(
+    conn: BlitzGateway,
+    image_ids: List[int],
+) -> List[Any]:
+    """Load images while preserving the caller's requested ID order."""
+    requested_ids = [int(image_id) for image_id in image_ids]
+    images_by_id = {
+        int(image.getId()): image
+        for image in conn.getObjects("Image", ids=requested_ids)
+        if image is not None
+    }
+    missing_ids = [
+        image_id for image_id in requested_ids
+        if image_id not in images_by_id
+    ]
+    if missing_ids:
+        logger.warning(
+            f"Could not load source images with IDs: {missing_ids}")
+    return [
+        images_by_id[image_id]
+        for image_id in requested_ids
+        if image_id in images_by_id
+    ]
+
+
 def match_results_to_inputs(
     result_keys: List[str],
     input_images: List[Any],
     og_name_map: Optional[Dict[str, str]] = None,
-) -> Dict[str, Optional[Any]]:
+) -> List[Optional[Any]]:
     """Map each result file (or imported image name) to its source input OMERO image.
 
     Single source of truth for parent-matching used by ALL output paths
@@ -838,10 +863,11 @@ def match_results_to_inputs(
             rename_files_in_importer_storage. Pass None when no rename ran.
 
     Returns:
-        Dict mapping each result_key to its matched source Image (or None).
+        Source Image matches aligned with result_keys by occurrence. A list is
+        required because multiple imported images may have the same name.
     """
     if not input_images:
-        return {k: None for k in result_keys}
+        return [None for _ in result_keys]
 
     # Scenario 4 prep: reverse-lookup so post-rename basenames resolve to pre-rename names.
     # og_name_map keys are full paths; basename(key) → pre_rename covers imported image names.
@@ -860,21 +886,25 @@ def match_results_to_inputs(
         return getOriginalFilename(bn)            # no rename: extract stem from workflow suffix
 
     # Scenario 4 / positional: sort results by pre-rename name so order matches submission order.
-    sorted_keys = sorted(result_keys, key=resolve_match_name) if len(input_images) > 1 else list(result_keys)
-    logger.debug(f"Results sorted for source matching: {[os.path.basename(k) for k in sorted_keys]}")
+    indexed_keys = list(enumerate(result_keys))
+    sorted_keys = (sorted(indexed_keys,
+                          key=lambda item: resolve_match_name(item[1]))
+                   if len(input_images) > 1 else indexed_keys)
+    logger.debug(
+        "Results sorted for source matching: "
+        f"{[os.path.basename(key) for _, key in sorted_keys]}")
 
     remaining = list(input_images)  # consumed — each input claimed at most once
-    mapping: Dict[str, Optional[Any]] = {}
+    matches: List[Optional[Any]] = [None for _ in result_keys]
 
-    for key in sorted_keys:
+    for result_index, key in sorted_keys:
         if not remaining:
-            mapping[key] = None
             continue
 
         match_name = resolve_match_name(key)
 
         if len(remaining) == 1:  # scenario 1
-            mapping[key] = remaining.pop(0)
+            matched = remaining.pop(0)
         else:
             # Scenario 2a — prefix match (higher priority than similarity).
             # Finds the input whose name is the longest proper prefix of match_name.
@@ -908,9 +938,9 @@ def match_results_to_inputs(
                     matched = remaining.pop(0)
                     logger.info(
                         f"No name match for '{match_name}'; positional fallback → id={matched.getId()}")
-            mapping[key] = matched
+        matches[result_index] = matched
 
-    return mapping
+    return matches
 
 
 def saveImagesToOmeroAsAttachments(
@@ -950,14 +980,16 @@ def saveImagesToOmeroAsAttachments(
 
     # Build result → source mapping once; used for both attachment and legacy paths.
     # match_results_to_inputs owns all scenario logic (prefix, similarity, positional).
-    source_map = match_results_to_inputs(files, input_images, og_name_map) if input_images else {}
+    source_matches = (match_results_to_inputs(
+        files, input_images, og_name_map) if input_images else [])
 
-    for name in files:
+    for result_index, name in enumerate(files):
         # og_name only needed for the legacy (no input_images) OMERO name-search path.
         og_name = (og_name_map.get(name) if og_name_map else None) or getOriginalFilename(os.path.basename(name))
 
         if input_images is not None:
-            matched = source_map.get(name)
+            matched = (source_matches[result_index]
+                       if result_index < len(source_matches) else None)
             if matched is None:  # no remaining inputs or genuinely unmatched
                 logger.info(f"No source mapped for '{og_name}'; skipping attachment")
                 continue
@@ -2802,15 +2834,15 @@ def add_metadata_to_imported_images(
         # Build result → source mapping using the same helper as the attachment path.
         # Imported image names are post-rename; og_name_map reverse-lookup resolves them
         # back to pre-rename basenames so similarity matching works correctly.
-        source_map = match_results_to_inputs(
+        source_matches = match_results_to_inputs(
             [img.getName() for img in imported_images],
             input_images or [],
             og_name_map
-        ) if input_images else {}
+        ) if input_images else []
 
         # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
         metadata_added = 0
-        for img in imported_images:
+        for result_index, img in enumerate(imported_images):
             if destination_type.lower() == "dataset":
                 try:
                     add_image_annotations(
@@ -2822,7 +2854,9 @@ def add_metadata_to_imported_images(
 
             if input_images:
                 try:
-                    source_img = source_map.get(img.getName())
+                    source_img = (source_matches[result_index]
+                                  if result_index < len(source_matches)
+                                  else None)
                     if source_img:
                         match_name = img.getName()
                         if og_name_map:
@@ -4595,7 +4629,7 @@ def runScript() -> None:
             # and attachment matching (scenarios 1-3 + 4 with rename).
             _roi_target_ids = unwrap(client.getInput(
                 constants.results.ROI_TARGET_IMAGE_IDS)) or []
-            input_images = get_images_by_ids(conn, _roi_target_ids)
+            input_images = get_images_in_id_order(conn, _roi_target_ids)
             _lookup_task_id = task_id
             if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
                 try:
@@ -4637,7 +4671,8 @@ def runScript() -> None:
                         except Exception as _we:
                             logger.debug(f"Could not walk workflow tasks for image IDs: {_we}")
                     if _image_ids:
-                        input_images = get_images_by_ids(conn, _image_ids)
+                        input_images = get_images_in_id_order(
+                            conn, _image_ids)
                         logger.info(
                             f"Loaded {len(input_images)} input images for matching: "
                             f"{[img.getId() for img in input_images]}")

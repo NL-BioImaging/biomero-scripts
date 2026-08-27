@@ -1,0 +1,43 @@
+name: Test BIOMERO scripts
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source revision
+        uses: actions/checkout@v7
+        with:
+          path: source
+
+      - name: Check out test suite
+        uses: actions/checkout@v7
+        with:
+          ref: test-suite
+          path: harness
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install test dependencies
+        run: python -m pip install -r harness/tests/requirements.txt
+
+      - name: Run tests
+        env:
+          BIOMERO_SCRIPTS_ROOT: ${{ github.workspace }}/source
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python -m pytest harness/tests -q
+
+      - name: Compile scripts
+        run: python -m compileall -q source/admin source/_data source/__workflows

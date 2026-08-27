@@ -101,7 +101,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
-VERSION = "2.9.0"
+VERSION = "2.8.2"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 
@@ -888,7 +888,8 @@ def runScript():
                             # Upload the job log so the user can see why it
                             # timed out (import step is skipped on failure).
                             UI_messages += upload_job_log_to_omero(
-                                client, conn, slurmClient, slurm_job_id, wf_id)
+                                client, conn, slurmClient, slurm_job_id, wf_id,
+                                group)
                             # slurm_job_id_list.append(new_job_id)
                         elif job_state == "COMPLETED":
                             # 5. Retrieve SLURM images
@@ -958,7 +959,8 @@ def runScript():
                             # Upload the job log so the failure is visible in
                             # OMERO even though the import step is skipped.
                             UI_messages += upload_job_log_to_omero(
-                                client, conn, slurmClient, slurm_job_id, wf_id)
+                                client, conn, slurmClient, slurm_job_id, wf_id,
+                                group)
                         elif (job_state == "PENDING"
                                 or job_state == "RUNNING"):
                             # expected
@@ -1009,7 +1011,8 @@ def runScript():
             client.closeSession()
 
 
-def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
+def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id,
+                            group_id):
     """Fetch a workflow job's Slurm log and attach it to OMERO (best-effort).
 
     Normally the workflow log is uploaded by the result-import step, but that
@@ -1026,6 +1029,7 @@ def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
         slurmClient: Active SLURM client.
         slurm_job_id: The Slurm job ID whose log should be uploaded.
         wf_id: Workflow UUID for the description.
+        group_id: Caller's active concrete OMERO group ID.
 
     Returns:
         str: A short status string to append to the UI messages.
@@ -1040,8 +1044,18 @@ def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id):
         description = f"Log from SLURM job {slurm_job_id}"
         if wf_id:
             description += f" (Workflow {wf_id})"
-        annotation = conn.createFileAnnfromLocalFile(
-            local_path, mimetype=mimetype, ns=namespace, desc=description)
+        group_id = int(unwrap(group_id))
+        if group_id < 0:
+            raise ValueError(
+                f"Cannot upload a job log to OMERO group {group_id}")
+        previous_group = conn.SERVICE_OPTS.getOmeroGroup()
+        conn.SERVICE_OPTS.setOmeroGroup(group_id)
+        try:
+            annotation = conn.createFileAnnfromLocalFile(
+                local_path, mimetype=mimetype, ns=namespace,
+                desc=description)
+        finally:
+            conn.SERVICE_OPTS.setOmeroGroup(previous_group)
         obj_id = annotation.getFile().getId()
         try:
             config = conn.getConfigService()
