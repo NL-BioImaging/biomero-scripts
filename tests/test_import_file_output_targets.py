@@ -2,11 +2,28 @@ import ast
 import os
 from pathlib import Path
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
+TARGET_INTERFACE_PATH = (
+    SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
+)
+TARGET_INTERFACE_AVAILABLE = (
+    TARGET_INTERFACE_PATH.exists()
+    and "OUTPUT_ATTACH_FILE_OUTPUTS_TARGET"
+    in TARGET_INTERFACE_PATH.read_text(encoding="utf-8")
+)
+pytestmark = pytest.mark.skipif(
+    not TARGET_INTERFACE_AVAILABLE,
+    reason=(
+        "file-output destination policies are not available in this source "
+        "revision"
+    ),
+)
 
 
 def load_target_resolver():

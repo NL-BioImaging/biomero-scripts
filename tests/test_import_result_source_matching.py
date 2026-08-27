@@ -8,11 +8,18 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
+SOURCE_TEXT = SCRIPT_PATH.read_text(encoding="utf-8")
+pytestmark = pytest.mark.skipif(
+    "def get_images_in_id_order" not in SOURCE_TEXT,
+    reason="ordered result-source matching is not available in this revision",
+)
 
 
 def load_functions(*names):

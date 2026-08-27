@@ -15,3 +15,9 @@ python -m pytest tests -q
 
 Keep tests under `tests/` on this branch. Do not merge this branch into
 `master`; update it independently whenever production behavior changes.
+
+Because every pull request uses the latest shared harness, tests for behavior
+that has not reached `master` must be capability-gated. Such tests run when the
+checked-out source contains their required function or interface and skip for
+older or unrelated source revisions. This keeps the harness forward-compatible
+without weakening coverage on the feature branch that introduces the behavior.

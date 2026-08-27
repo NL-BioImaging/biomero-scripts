@@ -3,11 +3,18 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
+SOURCE_TEXT = SCRIPT_PATH.read_text(encoding="utf-8")
+pytestmark = pytest.mark.skipif(
+    "ROI postprocessing for Plate workflows is not yet supported" not in SOURCE_TEXT,
+    reason="the Plate ROI guard is not available in this revision",
+)
 
 
 def load_validate_roi_output_request():

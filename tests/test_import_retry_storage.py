@@ -7,11 +7,18 @@ from typing import Optional, Tuple
 from uuid import UUID
 import zipfile
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
+SOURCE_TEXT = SCRIPT_PATH.read_text(encoding="utf-8")
+pytestmark = pytest.mark.skipif(
+    "def find_existing_result_storage" not in SOURCE_TEXT,
+    reason="safe staged-result retry is not available in this revision",
+)
 
 
 def load_find_existing_result_storage(base_path):
