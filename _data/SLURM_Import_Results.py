@@ -3766,6 +3766,23 @@ def process_zip_attachments(
     return message, attached_zip_path
 
 
+def resolve_non_image_output_targets(
+        configured_input_targets, importer_destination_target,
+        input_container_fallback):
+    """Choose where individually attached workflow files should be linked.
+
+    Importer-backed workflows use the result container when they create one.
+    Otherwise the Dataset/Plate target forwarded by Run Workflow is retained.
+    The same input-container floor used for job logs supports older or manual
+    invocations that do not include those newer target parameters.
+    """
+    if importer_destination_target is not None:
+        return [importer_destination_target]
+    if configured_input_targets:
+        return list(configured_input_targets)
+    return list(input_container_fallback or [])
+
+
 def process_non_image_file_outputs(
     conn: BlitzGateway,
     permanent_storage_path: str,
@@ -4971,7 +4988,21 @@ def runScript() -> None:
 
             # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
             if process_file_outputs:
-                file_output_targets = _file_output_targets_for_log  # already built above (reuse, avoids double OMERO query)
+                file_output_targets = resolve_non_image_output_targets(
+                    _file_output_targets_for_log,
+                    importer_destination_target,
+                    _log_floor,
+                )
+                if importer_destination_target is not None:
+                    logger.info(
+                        "Attaching non-image workflow outputs to the importer "
+                        "destination container"
+                    )
+                elif not _file_output_targets_for_log and _log_floor:
+                    logger.info(
+                        "No forwarded non-image attachment target was available; "
+                        "using the input-container fallback"
+                    )
                 # Exclude the SLURM job log from file-annotation attachment —
                 # upload_log_to_omero already attached it. All other .log files
                 # (e.g. workflow run.log) are processed normally.
