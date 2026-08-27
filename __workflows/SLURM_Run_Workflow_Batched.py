@@ -215,6 +215,17 @@ def runScript():
                            grouping="02.85",
                            description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
                            default=False),
+            omscripts.String(
+                constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET,
+                optional=True,
+                grouping="02.85",
+                description=(
+                    "Where to link individual file annotations. Forwarded "
+                    "unchanged to every child workflow."
+                ),
+                values=[rstring(value) for value in
+                        constants.file_output_targets.USER_VALUES],
+                default=constants.file_output_targets.INPUT_CONTAINER),
             omscripts.Bool(constants.workflow.OUTPUT_CREATE_ROIS,
                            optional=True,
                            grouping="02.86",

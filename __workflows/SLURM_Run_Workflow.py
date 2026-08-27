@@ -526,6 +526,18 @@ def runScript():
                            grouping="02.85",
                            description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
                            default=False),
+            omscripts.String(
+                constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET,
+                optional=True,
+                grouping="02.85",
+                description=(
+                    "Where to link individual file annotations. Auto uses the "
+                    "selected result destination when present, otherwise the "
+                    "input Dataset or Plate."
+                ),
+                values=[rstring(value) for value in
+                        constants.file_output_targets.USER_VALUES],
+                default=constants.file_output_targets.INPUT_CONTAINER),
             omscripts.Bool(constants.workflow.OUTPUT_CREATE_ROIS,
                            optional=True,
                            grouping="02.86",
@@ -2026,6 +2038,13 @@ def importResultsToOmero(client: omscripts.client,
             inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(False)
     else:
         inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(False)
+
+    file_output_target = unwrap(client.getInput(
+        constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET))
+    if file_output_target not in constants.file_output_targets.USER_VALUES:
+        file_output_target = constants.file_output_targets.INPUT_CONTAINER
+    inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET] = rstring(
+        file_output_target)
 
     if selected_output.get(constants.workflow.OUTPUT_CREATE_ROIS, False):
         inputs[constants.results.OUTPUT_CREATE_ROIS] = rbool(True)

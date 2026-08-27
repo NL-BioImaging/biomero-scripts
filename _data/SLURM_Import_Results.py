@@ -3767,20 +3767,44 @@ def process_zip_attachments(
 
 
 def resolve_non_image_output_targets(
-        configured_input_targets, importer_destination_target,
+        target_mode, configured_input_targets, importer_destination_target,
         input_container_fallback):
     """Choose where individually attached workflow files should be linked.
 
-    Importer-backed workflows use the result container when they create one.
-    Otherwise the Dataset/Plate target forwarded by Run Workflow is retained.
-    The same input-container floor used for job logs supports older or manual
-    invocations that do not include those newer target parameters.
+    A missing mode preserves the historic input-container behavior. ``auto``
+    and ``result_destination`` prefer the Dataset or Screen used by the
+    importer. ``input_parent`` resolves Dataset -> Project and Plate -> Screen
+    through the typed OMERO wrappers. Unavailable requested targets safely
+    fall back to the input container so file outputs remain findable.
     """
-    if importer_destination_target is not None:
+    input_targets = list(
+        configured_input_targets or input_container_fallback or [])
+    mode = target_mode or "legacy_input_container"
+
+    if mode in ("auto", "result_destination") \
+            and importer_destination_target is not None:
         return [importer_destination_target]
-    if configured_input_targets:
-        return list(configured_input_targets)
-    return list(input_container_fallback or [])
+
+    if mode == "input_parent":
+        parents = []
+        seen = set()
+        for target in input_targets:
+            try:
+                target_parents = list(target.listParents())
+            except Exception:
+                target_parents = []
+            for parent in target_parents:
+                try:
+                    identity = (parent.__class__.__name__, parent.getId())
+                except Exception:
+                    identity = id(parent)
+                if identity not in seen:
+                    parents.append(parent)
+                    seen.add(identity)
+        if parents:
+            return parents
+
+    return input_targets
 
 
 def process_non_image_file_outputs(
@@ -4430,6 +4454,14 @@ def runScript() -> None:
                          grouping="09",
                          description="Attach individual non-image output files (e.g. NumPy arrays, model weights, JSON/YAML configs) as OMERO file annotations. Bilayers workflows with 'array', 'file', or 'executable' output types benefit most from this option. Images and CSVs are handled separately.",
                          default=False),
+            scripts.String(
+                constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET,
+                optional=True,
+                grouping="09",
+                description="Container selection policy for non-image file outputs.",
+                values=[rstring(value) for value in
+                        constants.file_output_targets.USER_VALUES],
+                default=constants.file_output_targets.INPUT_CONTAINER),
             scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET,
                          optional=True,
                          grouping="09.1",
@@ -4608,6 +4640,11 @@ def runScript() -> None:
                 constants.results.OUTPUT_ATTACH_TABLE))
             process_file_outputs = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_FILE_OUTPUTS)) or False
+            file_output_target_mode = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET))
+            if not file_output_target_mode:
+                file_output_target_mode = (
+                    constants.file_output_targets.LEGACY)
             process_attachments = (unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)) or
                                    unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PROJECT)) or
                                    unwrap(client.getInput(constants.results.OUTPUT_ATTACH_DATASET)) or
@@ -4989,14 +5026,24 @@ def runScript() -> None:
             # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
             if process_file_outputs:
                 file_output_targets = resolve_non_image_output_targets(
+                    file_output_target_mode,
                     _file_output_targets_for_log,
                     importer_destination_target,
                     _log_floor,
                 )
-                if importer_destination_target is not None:
+                if (file_output_target_mode in (
+                        constants.file_output_targets.AUTO,
+                        constants.file_output_targets.RESULT_DESTINATION)
+                        and importer_destination_target is not None):
                     logger.info(
                         "Attaching non-image workflow outputs to the importer "
                         "destination container"
+                    )
+                elif (file_output_target_mode
+                      == constants.file_output_targets.INPUT_PARENT):
+                    logger.info(
+                        "Attaching non-image workflow outputs to the input "
+                        "container parent(s)"
                     )
                 elif not _file_output_targets_for_log and _log_floor:
                     logger.info(
