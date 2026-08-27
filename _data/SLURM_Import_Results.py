@@ -1836,6 +1836,85 @@ def get_workflow_results_path(group_name: str, wf_id: Optional[str]) -> str:
     return results_path
 
 
+def find_existing_result_storage(
+    group_name: str,
+    wf_id: UUID,
+    slurm_job_id: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Find durable results left by an earlier import attempt.
+
+    Result retrieval happens before importer registration. If registration
+    fails, the ``.analyzed`` copy must be reusable without retransferring the
+    same Slurm output or requiring its temporary remote job log.
+    """
+    base_path = get_importer_group_base_path(group_name)
+    workflow_path = os.path.join(
+        base_path, '.analyzed', str(wf_id)) if base_path else None
+    if not workflow_path or not os.path.isdir(workflow_path):
+        return None, None
+
+    ignored_names = {
+        f"omero-{slurm_job_id}.log",
+        f"{slurm_job_id}_metadata.csv",
+    }
+    candidates = sorted(
+        (
+            entry for entry in os.scandir(workflow_path)
+            if entry.is_dir()
+        ),
+        key=lambda entry: entry.name,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            has_result_content = any(
+                entry.name not in ignored_names
+                for entry in os.scandir(candidate.path)
+            )
+        except OSError:
+            continue
+        if not has_result_content:
+            continue
+        log_path = os.path.join(
+            candidate.path, f"omero-{slurm_job_id}.log")
+        return candidate.path, log_path if os.path.isfile(log_path) else None
+
+    return None, None
+
+
+def extract_or_reuse_slurm_results(
+    slurmClient: SlurmClient,
+    slurm_job_id: str,
+    local_tmp_storage: Optional[str],
+    group_name: str,
+    wf_id: UUID,
+    message: str,
+    permanent_storage_path: Optional[str],
+) -> Tuple[Optional[str], str, Optional[str], str, str]:
+    """Reuse durable staged results or perform the initial Slurm retrieval."""
+    if permanent_storage_path:
+        filename = f"{slurm_job_id}_out"
+        zip_path = os.path.join(permanent_storage_path, f"{filename}.zip")
+        message += (
+            "\nReusing results already retrieved into permanent storage: "
+            f"{permanent_storage_path}")
+        return (
+            None,
+            permanent_storage_path,
+            zip_path if os.path.isfile(zip_path) else None,
+            filename,
+            message,
+        )
+    return extract_slurm_results_zip(
+        slurmClient,
+        slurm_job_id,
+        local_tmp_storage,
+        group_name,
+        wf_id,
+        message,
+    )
+
+
 def extract_slurm_results_zip(
     slurmClient: SlurmClient,
     slurm_job_id: str,
@@ -4494,11 +4573,29 @@ def runScript() -> None:
                 except Exception as db_e:
                     logger.warning(f"Failed to update task status: {db_e}")
 
-            logger.info("Copying logfile from SLURM...")
+            permanent_storage_path, staged_log_file = (
+                find_existing_result_storage(
+                    group_name, wf_id, slurm_job_id))
+            if permanent_storage_path:
+                log_file = staged_log_file
+                logger.info(
+                    "Reusing staged results from an earlier import attempt: %s",
+                    permanent_storage_path)
+                if log_file:
+                    logger.info("Reusing staged workflow log: %s", log_file)
+                else:
+                    logger.warning(
+                        "No staged workflow log found for job %s; continuing "
+                        "with durable result content", slurm_job_id)
+            else:
+                logger.info("Copying logfile from SLURM...")
             local_tmp_storage = None
             _logfile_max_retries = 5
             _logfile_retry_delay = 10  # seconds between retries
-            for _logfile_attempt in range(1, _logfile_max_retries + 1):
+            _logfile_attempts = (
+                () if permanent_storage_path
+                else range(1, _logfile_max_retries + 1))
+            for _logfile_attempt in _logfile_attempts:
                 try:
                     tup = slurmClient.get_logfile_from_slurm(slurm_job_id)
                     (local_tmp_storage, log_file, get_result) = tup
@@ -4521,18 +4618,22 @@ def runScript() -> None:
             # Ensure local_tmp_storage has trailing slash (required for copy operations)
             if local_tmp_storage and not local_tmp_storage.endswith('/'):
                 local_tmp_storage += '/'
-            message += "\nSuccessfully copied logfile."
-            logger.info(f"Logfile copied successfully: {log_file}")
+            if permanent_storage_path:
+                message += "\nReusing previously retrieved workflow results."
+            else:
+                message += "\nSuccessfully copied logfile."
+                logger.info(f"Logfile copied successfully: {log_file}")
 
             logger.info("Extracting SLURM results...")
-            slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename = (
-                None, None, None, None)
+            slurm_data_path, temporary_zip_file_path, filename = (
+                None, None, None)
             _bulk_zip_perm: Optional[str] = None  # set once after extraction; used for skip-list and cleanup
             extraction_error = None
             canonical_input_manifest = None
             try:
-                slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_slurm_results_zip(
-                    slurmClient, slurm_job_id, local_tmp_storage, group_name, wf_id, message)
+                slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_or_reuse_slurm_results(
+                    slurmClient, slurm_job_id, local_tmp_storage, group_name,
+                    wf_id, message, permanent_storage_path)
                 message += f"\nSuccessfully extracted SLURM results: {permanent_storage_path}"
                 logger.info(
                     f"SLURM results extracted and available: {permanent_storage_path}")
@@ -4574,11 +4675,11 @@ def runScript() -> None:
                 try:
                     log_dest = os.path.join(
                         permanent_storage_path, os.path.basename(log_file))
-                    shutil.copy2(log_file, log_dest)
+                    if os.path.abspath(log_file) != os.path.abspath(log_dest):
+                        shutil.copy2(log_file, log_dest)
                     log_to_upload = log_dest  # prefer permanent path for in-place import
-                    logger.info(
-                        f"Copied log file to permanent storage: {log_dest}")
-                    message += f"\nLog file copied to permanent storage."
+                    logger.info(f"Workflow log available in permanent storage: {log_dest}")
+                    message += f"\nLog file available in permanent storage."
                 except Exception as _log_copy_err:
                     logger.warning(
                         f"Failed to copy log file to permanent storage: {_log_copy_err}")
