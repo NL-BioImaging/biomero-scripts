@@ -84,7 +84,7 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import UUID
 
@@ -107,6 +107,8 @@ except ImportError:
 USE_INPLACE_ATTACHMENTS = os.getenv("USE_INPLACE_ATTACHMENTS", "true").lower() == "true"
 
 logger = logging.getLogger(__name__)
+
+RESULTS_RETRIEVED_MARKER = ".biomero-results-retrieved.json"
 
 # OMERO processors download only the selected script into an isolated working
 # directory. Keep this integration self-contained for remote workers.
@@ -1728,10 +1730,6 @@ def find_existing_result_storage(
     if not workflow_path or not os.path.isdir(workflow_path):
         return None, None
 
-    ignored_names = {
-        f"omero-{slurm_job_id}.log",
-        f"{slurm_job_id}_metadata.csv",
-    }
     candidates = sorted(
         (
             entry for entry in os.scandir(workflow_path)
@@ -1741,20 +1739,106 @@ def find_existing_result_storage(
         reverse=True,
     )
     for candidate in candidates:
-        try:
-            has_result_content = any(
-                entry.name not in ignored_names
-                for entry in os.scandir(candidate.path)
+        marker_valid = has_result_retrieval_marker(
+            candidate.path, wf_id, slurm_job_id)
+        legacy_archive_valid = (
+            not marker_valid
+            and extracted_results_match_archive(
+                candidate.path, slurm_job_id)
+        )
+        if not marker_valid and not legacy_archive_valid:
+            logger.info(
+                "Not reusing staged result directory without proof of a "
+                "complete retrieval: %s",
+                candidate.path,
             )
-        except OSError:
-            continue
-        if not has_result_content:
             continue
         log_path = os.path.join(
             candidate.path, f"omero-{slurm_job_id}.log")
         return candidate.path, log_path if os.path.isfile(log_path) else None
 
     return None, None
+
+
+def has_result_retrieval_marker(
+    storage_path: str,
+    wf_id: UUID,
+    slurm_job_id: str,
+) -> bool:
+    """Return whether storage has a matching successful-retrieval marker."""
+    marker_path = os.path.join(storage_path, RESULTS_RETRIEVED_MARKER)
+    try:
+        with open(marker_path, "r", encoding="utf-8") as marker_file:
+            marker = json.load(marker_file)
+    except (OSError, ValueError, TypeError):
+        return False
+    return (
+        marker.get("schema") == 1
+        and marker.get("workflowId") == str(wf_id)
+        and marker.get("slurmJobId") == str(slurm_job_id)
+        and marker.get("status") == "complete"
+    )
+
+
+def extracted_results_match_archive(
+    storage_path: str,
+    slurm_job_id: str,
+) -> bool:
+    """Validate a pre-marker staged result against its retained ZIP archive.
+
+    This compatibility path is intentionally strict. It checks the ZIP CRCs
+    and requires every archived file to exist at its extracted size. Partial
+    copies therefore fall back to the normal Slurm retrieval path.
+    """
+    archive_path = os.path.join(storage_path, f"{slurm_job_id}_out.zip")
+    if not os.path.isfile(archive_path):
+        return False
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            if archive.testzip() is not None:
+                return False
+            file_count = 0
+            for info in archive.infolist():
+                member = PurePosixPath(info.filename)
+                if info.is_dir():
+                    continue
+                if member.is_absolute() or ".." in member.parts:
+                    return False
+                target = os.path.join(storage_path, *member.parts)
+                if not os.path.isfile(target):
+                    return False
+                if os.path.getsize(target) != info.file_size:
+                    return False
+                file_count += 1
+            return file_count > 0
+    except (OSError, zipfile.BadZipFile, RuntimeError):
+        return False
+
+
+def write_result_retrieval_marker(
+    storage_path: str,
+    wf_id: UUID,
+    slurm_job_id: str,
+) -> str:
+    """Atomically record that retrieval and extraction fully completed."""
+    marker_path = os.path.join(storage_path, RESULTS_RETRIEVED_MARKER)
+    temporary_path = f"{marker_path}.{uuid.uuid4().hex}.tmp"
+    marker = {
+        "schema": 1,
+        "status": "complete",
+        "workflowId": str(wf_id),
+        "slurmJobId": str(slurm_job_id),
+        "completedAt": datetime.now().astimezone().isoformat(),
+    }
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as marker_file:
+            json.dump(marker, marker_file, sort_keys=True)
+            marker_file.write("\n")
+        os.replace(temporary_path, marker_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    return marker_path
 
 
 def extract_or_reuse_slurm_results(
@@ -2014,6 +2098,10 @@ def move_results_to_permanent_storage(
             f"ALL workflow results moved to PERMANENT storage: {target_path}")
         logger.info(
             " COMPREHENSIVE PERMANENT storage created - preserves complete workflow results")
+        marker_path = write_result_retrieval_marker(
+            target_path, wf_id, slurm_job_id)
+        logger.info(
+            "Recorded completed result retrieval marker: %s", marker_path)
         return target_path
 
     except Exception as e:
