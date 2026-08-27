@@ -807,6 +807,8 @@ def get_images_in_id_order(
 ) -> List[Any]:
     """Load images while preserving the caller's requested ID order."""
     requested_ids = [int(image_id) for image_id in image_ids]
+    if not requested_ids:
+        return []
     images_by_id = {
         int(image.getId()): image
         for image in conn.getObjects("Image", ids=requested_ids)
