@@ -23,9 +23,13 @@ def load_target_resolver():
 
 
 class Container:
-    def __init__(self, object_type, object_id):
+    def __init__(self, object_type, object_id, parents=None):
         self.object_type = object_type
         self.object_id = object_id
+        self.parents = list(parents or [])
+
+    def listParents(self):
+        return iter(self.parents)
 
 
 def test_result_dataset_wins_over_input_dataset_and_fallback():
@@ -35,7 +39,7 @@ def test_result_dataset_wins_over_input_dataset_and_fallback():
     input_project = Container("Project", 30)
 
     assert resolve_targets(
-        [input_dataset], result_dataset, [input_project]
+        "auto", [input_dataset], result_dataset, [input_project]
     ) == [result_dataset]
 
 
@@ -46,7 +50,7 @@ def test_result_screen_wins_over_input_plate_and_fallback():
     input_screen = Container("Screen", 31)
 
     assert resolve_targets(
-        [input_plate], result_screen, [input_screen]
+        "result_destination", [input_plate], result_screen, [input_screen]
     ) == [result_screen]
 
 
@@ -54,31 +58,68 @@ def test_input_dataset_is_used_when_no_result_container_was_created():
     resolve_targets = load_target_resolver()
     input_dataset = Container("Dataset", 12)
 
-    assert resolve_targets([input_dataset], None, []) == [input_dataset]
+    assert resolve_targets(
+        "input_container", [input_dataset], None, []
+    ) == [input_dataset]
 
 
 def test_input_plate_is_used_when_no_result_container_was_created():
     resolve_targets = load_target_resolver()
     input_plate = Container("Plate", 13)
 
-    assert resolve_targets([input_plate], None, []) == [input_plate]
+    assert resolve_targets(
+        "legacy_input_container", [input_plate], None, []
+    ) == [input_plate]
 
 
 def test_all_configured_input_targets_are_preserved_without_a_result():
     resolve_targets = load_target_resolver()
     input_datasets = [Container("Dataset", 14), Container("Dataset", 15)]
 
-    assert resolve_targets(input_datasets, None, []) == input_datasets
+    assert resolve_targets(
+        "input_container", input_datasets, None, []
+    ) == input_datasets
 
 
 def test_input_container_fallback_supports_older_or_manual_invocations():
     resolve_targets = load_target_resolver()
     input_screen = Container("Screen", 32)
 
-    assert resolve_targets([], None, [input_screen]) == [input_screen]
+    assert resolve_targets(
+        "legacy_input_container", [], None, [input_screen]
+    ) == [input_screen]
+
+
+def test_input_parent_uses_typed_container_parents():
+    resolve_targets = load_target_resolver()
+    input_screen = Container("Screen", 51)
+    input_plate = Container("Plate", 301, parents=[input_screen])
+
+    assert resolve_targets(
+        "input_parent", [input_plate], None, []
+    ) == [input_screen]
+
+
+def test_input_parent_falls_back_to_input_container_when_unlinked():
+    resolve_targets = load_target_resolver()
+    input_dataset = Container("Dataset", 52)
+
+    assert resolve_targets(
+        "input_parent", [input_dataset], None, []
+    ) == [input_dataset]
+
+
+def test_missing_mode_preserves_legacy_input_container_behavior():
+    resolve_targets = load_target_resolver()
+    input_plate = Container("Plate", 301)
+    result_screen = Container("Screen", 51)
+
+    assert resolve_targets(
+        None, [input_plate], result_screen, []
+    ) == [input_plate]
 
 
 def test_no_available_container_preserves_legacy_empty_target_behavior():
     resolve_targets = load_target_resolver()
 
-    assert resolve_targets([], None, []) == []
+    assert resolve_targets(None, [], None, []) == []
