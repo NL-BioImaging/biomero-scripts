@@ -116,6 +116,14 @@ def validate_roi_output_request(client, conn, selected_output,
     if not selected_output.get(constants.workflow.OUTPUT_CREATE_ROIS, False):
         return "", None
 
+    data_type = unwrap(client.getInput(constants.transfer.DATA_TYPE))
+    if data_type == constants.transfer.DATA_TYPE_PLATE:
+        selected_output[constants.workflow.OUTPUT_CREATE_ROIS] = False
+        return "", (
+            "ROI postprocessing for Plate workflows is not yet supported; "
+            "the Plate result will still be imported."
+        )
+
     # An optional integration must remain backward compatible. Check for the
     # utility first so older deployments merely ignore this requested output,
     # even if they cannot validate its remaining settings.
