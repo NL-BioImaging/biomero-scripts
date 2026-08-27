@@ -101,6 +101,18 @@ def test_image_lookup_restores_forwarded_id_order():
     assert [image.getId() for image in images] == [55, 169]
 
 
+def test_image_lookup_skips_omero_query_for_empty_ids():
+    get_images = load_functions("get_images_in_id_order")[
+        "get_images_in_id_order"
+    ]
+
+    class ConnectionThatMustNotBeQueried:
+        def getObjects(self, *_args, **_kwargs):
+            raise AssertionError("empty image IDs must not query OMERO")
+
+    assert get_images(ConnectionThatMustNotBeQueried(), []) == []
+
+
 class Parameters:
     def addString(self, _key, _value):
         pass
