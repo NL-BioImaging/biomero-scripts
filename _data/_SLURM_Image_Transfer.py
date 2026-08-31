@@ -1744,6 +1744,7 @@ def save_plate_as_zarr(
     canonical_source=None,
     storage_roots=None,
     shallow_zarr_storage=False,
+    reconstruct_shallow_zarr=True,
 ):
     """Export plate as ZARR format using omero-cli-zarr.
     
@@ -1769,6 +1770,7 @@ def save_plate_as_zarr(
         canonical_source,
         storage_roots,
         shallow_zarr_storage,
+        reconstruct_shallow_zarr,
     )
 
 
@@ -1781,6 +1783,7 @@ def save_image_as_zarr(
     canonical_source=None,
     storage_roots=None,
     shallow_zarr_storage=False,
+    reconstruct_shallow_zarr=True,
 ):
     """Export image as ZARR format using omero-cli-zarr.
     
@@ -1801,6 +1804,7 @@ def save_image_as_zarr(
         canonical_source,
         storage_roots,
         shallow_zarr_storage,
+        reconstruct_shallow_zarr,
     )
     
 
@@ -1841,6 +1845,7 @@ def save_as_zarr(
     canonical_source=None,
     storage_roots=None,
     shallow_zarr_storage=False,
+    reconstruct_shallow_zarr=True,
 ):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
@@ -1873,7 +1878,32 @@ def save_as_zarr(
             shallow_reference = get_shallow_reference(object)
         elif data_type == constants.transfer.DATA_TYPE_PLATE:
             shallow_reference = get_shallow_plate_reference(object)
-    if shallow_reference is not None:
+    if (
+        shallow_reference is not None
+        and data_type == constants.transfer.DATA_TYPE_PLATE
+        and not reconstruct_shallow_zarr
+    ):
+        logger.warning(
+            "Ignoring selected-pixels transfer mode for shallow Plate %s; "
+            "Plate inputs always require full Zarr reconstruction",
+            object.getId(),
+        )
+        reconstruct_shallow_zarr = True
+
+    selected_pixel_export = (
+        shallow_reference is not None and not reconstruct_shallow_zarr
+    )
+    if selected_pixel_export:
+        logger.info(
+            "Bypassing full shallow reconstruction for Image %s because the "
+            "temporary Zarr will be converted to TIFF; exporting the exact "
+            "OMERO PixelBuffer and excluding it from canonical promotion",
+            object.getId(),
+        )
+        log(" Exporting selected OMERO pixels as TIFF conversion material")
+        canonical_source = None
+
+    if shallow_reference is not None and reconstruct_shallow_zarr:
         materialized = materialize_shallow_zarr(
             shallow_reference,
             img_name,
@@ -1911,10 +1941,16 @@ def save_as_zarr(
             materialized.labels,
         )
 
-    source_path = select_zarr_source_path(
-        object, canonical_source, storage_roots or {})
+    source_path = None
+    if not selected_pixel_export:
+        source_path = select_zarr_source_path(
+            object, canonical_source, storage_roots or {})
     if source_path is not None:
-        if shallow_zarr_storage and canonical_source is None:
+        if (
+            shallow_zarr_storage
+            and canonical_source is None
+            and not selected_pixel_export
+        ):
             try:
                 if data_type == constants.transfer.DATA_TYPE_PLATE:
                     canonical_source = index_existing_plate_zarr(
@@ -1950,7 +1986,13 @@ def save_as_zarr(
     else:
         if canonical_source is None:
             if data_type == constants.transfer.DATA_TYPE_IMAGE:
-                if shallow_zarr_storage:
+                if selected_pixel_export:
+                    logger.info(
+                        "Exporting a fresh NGFF store from the registered "
+                        "OMERO pixels for shallow Image %s",
+                        object.getId(),
+                    )
+                elif shallow_zarr_storage:
                     logger.info(
                         "No reusable canonical or legacy Zarr found for %s "
                         "%s; exporting NGFF for importer-enabled result "
@@ -2030,7 +2072,11 @@ def save_as_zarr(
             )
             logger.error(f"Critical error: {error_msg}")
             raise Exception(error_msg)
-        if shallow_zarr_storage and canonical_source is None:
+        if (
+            shallow_zarr_storage
+            and canonical_source is None
+            and not selected_pixel_export
+        ):
             try:
                 if data_type == constants.transfer.DATA_TYPE_PLATE:
                     canonical_source = promote_exported_plate_zarr(
@@ -2187,6 +2233,11 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     label_components_by_object = {}
     storage_roots = {}
     shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
+    reconstruct_shallow_zarr = script_params.get(
+        constants.transfer.RECONSTRUCT_SHALLOW_ZARR
+    )
+    if reconstruct_shallow_zarr is None:
+        reconstruct_shallow_zarr = True
 
     if (not split_cs) and (not merged_cs):
         log("Not chosen to save Individual Channels OR Merged Image")
@@ -2343,6 +2394,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 canonical_source=canonical_sources.get(int(plate.getId())),
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
+                reconstruct_shallow_zarr=reconstruct_shallow_zarr,
             )
             object_id = int(plate.getId())
             transfer_artifacts[object_id] = transfer_artifact
@@ -2380,6 +2432,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 canonical_source=canonical_sources.get(int(img.getId())),
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
+                reconstruct_shallow_zarr=reconstruct_shallow_zarr,
             )
             object_id = int(img.getId())
             transfer_artifacts[object_id] = transfer_artifact
@@ -2445,7 +2498,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         # write log for exported images (not needed for ome-tiff)
         write_logfile(exp_dir)
 
-    if shallow_zarr_storage:
+    if shallow_zarr_storage and reconstruct_shallow_zarr:
         canonical_inputs = canonical_inputs_from_sources(
             export_objects,
             canonical_object_type,
@@ -2462,6 +2515,13 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             "Wrote %s/%s temporary Zarr input marker(s)",
             marked_inputs,
             len(canonical_inputs),
+        )
+    elif shallow_zarr_storage:
+        canonical_inputs = ()
+        logger.info(
+            "Skipped canonical input snapshot and Zarr input markers because "
+            "these exports are selected-pixel conversion material for a "
+            "TIFF-consuming workflow"
         )
 
     if len(os.listdir(exp_dir)) == 0:
@@ -2706,6 +2766,17 @@ def run_script():
                 constants.transfer.OME_VERSION, grouping="5.2",
                 description="Ome-zarr version", values=ome_zarr_versions,
                 default=constants.transfer.OME_ZARR_VERSION_0_4),
+
+            scripts.Bool(
+                constants.transfer.RECONSTRUCT_SHALLOW_ZARR,
+                grouping="5.2.1",
+                optional=True,
+                description=(
+                    "Reconstruct managed original pixels and labels for a "
+                    "Zarr-consuming workflow. Disable only when this Zarr is "
+                    "temporary conversion material for a TIFF workflow."
+                ),
+                default=True),
 
             scripts.String(
                 constants.transfer.FOLDER, grouping="3",

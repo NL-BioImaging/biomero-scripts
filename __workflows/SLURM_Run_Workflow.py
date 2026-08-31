@@ -797,8 +797,15 @@ def runScript():
             zipfile = createFileName(client, conn, wf_id)
             # Send data to Slurm, zipped, over SSH
             # Uses _SLURM_Image_Transfer script from Omero
-            rv, task_id = exportImageToSLURM(client, conn, slurmClient,
-                                             zipfile, wf_id, ome_zarr_version)
+            rv, task_id = exportImageToSLURM(
+                client,
+                conn,
+                slurmClient,
+                zipfile,
+                wf_id,
+                ome_zarr_version,
+                reconstruct_shallow_zarr=use_zarr_format,
+            )
             logger.debug(f"Ran data export: {rv.keys()}, {rv}")
             if 'Message' in rv:
                 logger.info(rv['Message'].getValue())  # log
@@ -1499,7 +1506,8 @@ def exportImageToSLURM(client: omscripts.client,
                        slurmClient: SlurmClient,
                        zipfile: str,
                        wf_id: UUID,
-                       ome_zarr_version: str):
+                       ome_zarr_version: str,
+                       reconstruct_shallow_zarr: bool = True):
     """
     Export selected OMERO data to SLURM cluster for processing.
 
@@ -1515,6 +1523,9 @@ def exportImageToSLURM(client: omscripts.client,
         zipfile: Target filename for the exported data
         wf_id: Workflow UUID for tracking
         ome_zarr_version: Version of OME-Zarr format to use
+        reconstruct_shallow_zarr: Reconstruct managed original pixels and
+            labels for a Zarr-consuming workflow. False preserves the exact
+            selected OMERO Image pixels for later conversion to TIFF.
     Returns:
         tuple: (export_result_dict, task_id) containing script results and task ID
 
@@ -1547,6 +1558,8 @@ def exportImageToSLURM(client: omscripts.client,
         constants.transfer.FORMAT: rstring(
             constants.transfer.FORMAT_OMEZARR),
         constants.transfer.OME_VERSION: rstring(ome_zarr_version),
+        constants.transfer.RECONSTRUCT_SHALLOW_ZARR: rbool(
+            reconstruct_shallow_zarr),
         constants.transfer.FOLDER: rstring(zipfile),
         constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True)
     }

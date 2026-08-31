@@ -182,6 +182,17 @@ rebuild.
   fail-safe normalization, and registration planning in its independent
   service after the order is committed.
 
+Run Workflow distinguishes complete Zarr inputs from temporary conversion
+material. A workflow that consumes Zarr receives a reconstructed shallow input
+containing the canonical original pixels and every managed label. When the
+selected workflow consumes TIFF, a shallow-backed OMERO Image instead follows
+the established OMERO CLI Zarr export path: the Image's registered PixelBuffer
+is exported as a standalone temporary Zarr and then converted to TIFF. This
+preserves a selected mask Image as mask pixels, avoids transferring unrelated
+original pixels and labels, and deliberately excludes the temporary export
+from canonical promotion and returned-Zarr matching. Plates always use the
+complete Zarr path.
+
 The OMERO script does not hash or mutate returned Zarrs. If the deployed
 importer does not advertise the lifecycle operation, or no canonical workflow
 snapshot is available, it uses the established full-import path. Existing
