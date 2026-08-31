@@ -77,6 +77,7 @@ from biomero.zarr_contracts import (
     CANONICAL_PLATE_SOURCE_NAMESPACE,
     CANONICAL_SOURCE_NAMESPACE,
     SHALLOW_COLLECTION_NAMESPACE,
+    TRANSFER_INPUT_MARKER,
     CanonicalInput,
     CanonicalPlateImage,
     CanonicalPlateImageRecord,
@@ -816,6 +817,71 @@ def canonical_inputs_from_sources(
         object_type,
     )
     return tuple(inputs)
+
+
+def write_transfer_input_markers(export_directory, canonical_inputs):
+    """Bind each temporary workflow Zarr to one selected BIOMERO input.
+
+    The marker is written only into the disposable transfer copy. The
+    workflow-scoped event snapshot remains authoritative, and the importer
+    validates any returned marker against that snapshot before using it.
+    """
+    export_root = Path(export_directory).resolve()
+    written = 0
+    for item in canonical_inputs:
+        artifact = item.transfer_artifact
+        if not artifact:
+            logger.warning(
+                "Cannot mark canonical input %s: transfer artifact is missing",
+                item.selected_object_id,
+            )
+            continue
+        store = (export_root / artifact).resolve()
+        try:
+            store.relative_to(export_root)
+        except ValueError:
+            logger.warning(
+                "Cannot mark canonical input %s: transfer artifact escapes "
+                "the export directory",
+                item.selected_object_id,
+            )
+            continue
+        if not store.is_dir():
+            logger.warning(
+                "Cannot mark canonical input %s: transfer store is missing: %s",
+                item.selected_object_id,
+                store,
+            )
+            continue
+        marker = store / TRANSFER_INPUT_MARKER
+        temporary = marker.with_name(
+            ".%s.%s.tmp" % (marker.name, os.getpid())
+        )
+        try:
+            temporary.write_text(
+                json.dumps(item.to_dict(), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temporary, marker)
+        except OSError as exc:
+            if temporary.exists():
+                temporary.unlink()
+            logger.warning(
+                "Cannot write transfer input marker for %s %s: %s",
+                item.selected_object_type,
+                item.selected_object_id,
+                exc,
+            )
+            continue
+        written += 1
+        logger.info(
+            "Marked temporary transfer Zarr %s as %s %s input ordinal %s",
+            artifact,
+            item.selected_object_type,
+            item.selected_object_id,
+            item.ordinal,
+        )
+    return written
 
 
 def load_group_storage_roots(
@@ -2387,6 +2453,15 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             transfer_artifacts,
             storage_roots,
             label_components_by_object,
+        )
+        marked_inputs = write_transfer_input_markers(
+            exp_dir,
+            canonical_inputs,
+        )
+        logger.info(
+            "Wrote %s/%s temporary Zarr input marker(s)",
+            marked_inputs,
+            len(canonical_inputs),
         )
 
     if len(os.listdir(exp_dir)) == 0:
