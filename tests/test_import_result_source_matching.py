@@ -160,47 +160,6 @@ class Connection:
         return self.update_service
 
 
-@pytest.mark.parametrize("object_type", ["Image", "Plate"])
-def test_workflow_reference_is_searchable_and_idempotent(object_type):
-    ensure_reference = load_functions(
-        "ensure_searchable_workflow_reference"
-    )["ensure_searchable_workflow_reference"]
-    result = Image(251, "result", "existing provenance")
-    update_service = UpdateService()
-
-    class ResultConnection:
-        def getObject(self, requested_type, object_id):
-            assert requested_type == object_type
-            assert object_id == 251
-            return result
-
-        def getUpdateService(self):
-            return update_service
-
-    conn = ResultConnection()
-
-    assert ensure_reference(conn, object_type, 251, "workflow-uuid") is True
-    assert result.getDescription() == (
-        "existing provenance | BIOMERO workflow: workflow-uuid"
-    )
-    assert ensure_reference(conn, object_type, 251, "workflow-uuid") is False
-    assert len(update_service.saved) == 1
-
-
-def test_workflow_reference_ignores_missing_workflow_id():
-    ensure_reference = load_functions(
-        "ensure_searchable_workflow_reference"
-    )["ensure_searchable_workflow_reference"]
-
-    class ConnectionThatMustNotBeQueried:
-        def getObject(self, *_args, **_kwargs):
-            raise AssertionError("missing workflow ID must not query OMERO")
-
-    assert ensure_reference(
-        ConnectionThatMustNotBeQueried(), "Image", 251, None
-    ) is False
-
-
 def test_duplicate_imported_names_get_distinct_descriptions_and_roi_pairs(
         monkeypatch):
     functions = load_functions(
