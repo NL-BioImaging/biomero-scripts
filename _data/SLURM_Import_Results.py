@@ -3320,62 +3320,9 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
     add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
 
 
-def ensure_searchable_workflow_reference(
-    conn: BlitzGateway,
-    object_type: str,
-    object_id: int,
-    wf_id: Optional[str],
-) -> bool:
-    """Put the workflow UUID in an OMERO-searchable object description.
-
-    OMERO MapAnnotations retain the structured workflow provenance used by
-    BIOMERO, but their values are not returned by the normal OMERO object
-    search.  Descriptions are indexed, so retain the structured annotations
-    and add one unobtrusive, idempotent reference for user-facing discovery.
-
-    Returns ``True`` when the description was changed.
-    """
-    if not wf_id:
-        return False
-
-    obj = conn.getObject(object_type, object_id)
-    if obj is None:
-        raise ValueError(f"Could not load {object_type} ID {object_id}")
-
-    workflow_reference = f"BIOMERO workflow: {wf_id}"
-    existing_description = obj.getDescription() or ""
-    if workflow_reference in existing_description:
-        return False
-
-    description = (existing_description + " | " + workflow_reference).strip(" |")
-    obj._obj.setDescription(rstring(description))
-    conn.getUpdateService().saveAndReturnObject(obj._obj)
-    logger.debug(
-        "Added searchable workflow reference to %s ID %s: %s",
-        object_type,
-        object_id,
-        wf_id,
-    )
-    return True
-
-
 def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf_id=None):
     """Generic function to add workflow metadata annotations to any OMERO object (Image, Plate, etc.)"""
     ns_wf = "biomero/workflow"
-
-    # Keep the UUID discoverable through OMERO.web's ordinary object search.
-    # This complements rather than replaces the structured MapAnnotations.
-    try:
-        ensure_searchable_workflow_reference(
-            conn, object_type, object_id, wf_id)
-    except Exception as search_ref_error:
-        logger.warning(
-            "Could not add searchable workflow reference to %s ID %s: %s",
-            object_type,
-            object_id,
-            search_ref_error,
-        )
-
     if slurmClient.track_workflows and wf_id:
         try:
             wf = slurmClient.workflowTracker.repository.get(wf_id)
