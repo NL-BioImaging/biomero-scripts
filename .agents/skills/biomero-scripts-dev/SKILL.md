@@ -191,6 +191,14 @@ The workflow runs for pull requests and pushes to `master`. Coordinate test
 branch updates with production pull requests so the required check exercises
 the intended behavior.
 
+Keep the harness runtime aligned with the `biomero` library that the scripts
+execute against. The scripts cannot support a Python version below biomero's
+declared minimum. Use released dependency ranges in the shared
+`tests/requirements.txt`; never make the global harness depend on another
+repository's feature branch. If a cross-repository feature is not released
+yet, keep its tests disabled by default and run them manually in a compatible
+environment until the dependency has been published and merged.
+
 ## Keep cross-repository documentation aligned
 
 Update this repository's `README.md` when script roles, inputs, security,
