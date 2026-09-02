@@ -1,1 +1,2 @@
 pytest>=8,<9
+biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@feature/zarr-shallow-storage
