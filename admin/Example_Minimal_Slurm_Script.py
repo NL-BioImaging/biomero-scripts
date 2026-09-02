@@ -66,7 +66,7 @@ _SOTHER = "Run_Other_Command"
 _SCMD = "Linux_Command"
 _DEFAULT_SCMD = "ls -la"
 
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 
 def runScript():
