@@ -5,6 +5,8 @@ from pathlib import Path
 import shutil
 from types import SimpleNamespace
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -27,6 +29,7 @@ def load_save_as_zarr(
     shallow_reference,
     reusable_path=None,
     shallow_plate_type=None,
+    restore_available=True,
 ):
     tree = ast.parse(TRANSFER_PATH.read_text(encoding="utf-8"))
     function = next(
@@ -78,6 +81,7 @@ def load_save_as_zarr(
         "get_shallow_reference": lambda _obj: shallow_reference,
         "log": lambda _message: None,
         "logger": logging.getLogger("shallow-conversion-material-test"),
+        "load_group_storage_roots": lambda: {"group-0-data": tmp_path},
         "materialize_shallow_zarr": materialize,
         "os": os,
         "promote_exported_image_zarr": lambda *_args, **_kwargs: (
@@ -87,6 +91,10 @@ def load_save_as_zarr(
             promotions.append((_args, _kwargs))
         ),
         "select_zarr_source_path": select_source,
+        "SHALLOW_ZARR_RESTORE_AVAILABLE": restore_available,
+        "SHALLOW_ZARR_RESTORE_IMPORT_ERROR": ImportError(
+            "BIOMERO.importer unavailable"
+        ),
         "shutil": shutil,
         "subprocess": SimpleNamespace(
             PIPE=object(),
@@ -207,6 +215,63 @@ def test_missing_reconstruction_flag_keeps_full_reconstruction(
     assert commands == []
     assert promotions == []
     assert selections == []
+
+
+def test_existing_shallow_reconstructs_when_new_shallowing_is_disabled(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "batch").mkdir()
+    canonical = object()
+    shallow = SimpleNamespace(source=canonical)
+    save, commands, materializations, promotions, selections, _plate = (
+        load_save_as_zarr(tmp_path, shallow_reference=shallow)
+    )
+
+    source, artifact, labels = save(
+        SimpleNamespace(host="omero"),
+        "session",
+        ImageObject(),
+        "batch",
+        "Image",
+        "0.4",
+        storage_roots={"group-0-data": tmp_path},
+        shallow_zarr_storage=False,
+        reconstruct_shallow_zarr=True,
+    )
+
+    assert source is canonical
+    assert artifact == "nuclei-mask.zarr"
+    assert labels == ("managed-label",)
+    assert len(materializations) == 1
+    assert commands == []
+    assert promotions == []
+    assert selections == []
+
+
+def test_existing_shallow_fails_clearly_without_restore_support(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "batch").mkdir()
+    shallow = SimpleNamespace(source=object())
+    save, *_rest = load_save_as_zarr(
+        tmp_path,
+        shallow_reference=shallow,
+        restore_available=False,
+    )
+
+    with pytest.raises(RuntimeError, match="reconstruction support"):
+        save(
+            SimpleNamespace(host="omero"),
+            "session",
+            ImageObject(),
+            "batch",
+            "Image",
+            "0.4",
+            shallow_zarr_storage=False,
+            reconstruct_shallow_zarr=True,
+        )
 
 
 def test_plate_cannot_enter_selected_pixel_conversion_mode(

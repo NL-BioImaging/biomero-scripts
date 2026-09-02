@@ -130,7 +130,7 @@ def test_shallow_zarr_storage_requires_importer_capability():
     assert ns["is_shallow_zarr_storage_enabled"]("OME-TIFF") is False
 
 
-def test_importer_dependencies_are_only_imported_behind_capability_guard():
+def test_importer_write_dependencies_are_only_imported_behind_feature_guard():
     tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
     top_level_imports = [
         node
@@ -159,6 +159,28 @@ def test_importer_dependencies_are_only_imported_behind_capability_guard():
         )
     ]
     assert len(guarded_imports) == 4
+    guarded_names = {
+        alias.name
+        for node in guarded_imports
+        for alias in node.names
+    }
+    assert "materialize_shallow_zarr" not in guarded_names
+
+    restore_imports = [
+        node
+        for statement in tree.body
+        if isinstance(statement, ast.Try)
+        for node in ast.walk(statement)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "biomero_importer.utils.result_zarr"
+            and any(
+                alias.name == "materialize_shallow_zarr"
+                for alias in node.names
+            )
+        )
+    ]
+    assert len(restore_imports) == 1
 
 
 class NamedValue:
