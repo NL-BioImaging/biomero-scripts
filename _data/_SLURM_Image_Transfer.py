@@ -72,6 +72,25 @@ try:
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
+from biomero.zarr_contracts import (
+    CANONICAL_PLATE_IMAGE_NAMESPACE,
+    CANONICAL_PLATE_LABEL_NAMESPACE,
+    CANONICAL_PLATE_SOURCE_NAMESPACE,
+    CANONICAL_SOURCE_NAMESPACE,
+    SHALLOW_COLLECTION_NAMESPACE,
+    TRANSFER_INPUT_MARKER,
+    CanonicalInput,
+    CanonicalPlateImage,
+    CanonicalPlateImageRecord,
+    CanonicalPlateIndex,
+    CanonicalPlateLabelRecord,
+    CanonicalPlateSource,
+    CanonicalZarrSource,
+    ManagedZarrNode,
+    ShallowPlateReference,
+    ShallowZarrReference,
+    ZarrLabelComponent,
+)
 import sys
 
 logger = logging.getLogger(__name__)
@@ -80,28 +99,20 @@ IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
+
+SHALLOW_ZARR_RESTORE_AVAILABLE = False
+SHALLOW_ZARR_RESTORE_IMPORT_ERROR = None
+try:
+    from biomero_importer.utils.result_zarr import materialize_shallow_zarr
+    SHALLOW_ZARR_RESTORE_AVAILABLE = True
+except ImportError as exc:
+    # Existing shallow inputs are detected below and then fail explicitly.
+    # Ordinary inputs remain compatible with deployments without the importer.
+    SHALLOW_ZARR_RESTORE_IMPORT_ERROR = exc
+
 SHALLOW_ZARR_SUPPORT_AVAILABLE = False
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     try:
-        from biomero.zarr_contracts import (
-            CANONICAL_PLATE_IMAGE_NAMESPACE,
-            CANONICAL_PLATE_LABEL_NAMESPACE,
-            CANONICAL_PLATE_SOURCE_NAMESPACE,
-            CANONICAL_SOURCE_NAMESPACE,
-            SHALLOW_COLLECTION_NAMESPACE,
-            TRANSFER_INPUT_MARKER,
-            CanonicalInput,
-            CanonicalPlateImage,
-            CanonicalPlateImageRecord,
-            CanonicalPlateIndex,
-            CanonicalPlateLabelRecord,
-            CanonicalPlateSource,
-            CanonicalZarrSource,
-            ManagedZarrNode,
-            ShallowPlateReference,
-            ShallowZarrReference,
-            ZarrLabelComponent,
-        )
         from biomero_importer.utils.canonical_promotion import (
             CanonicalPromotionService,
         )
@@ -117,7 +128,6 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
         from biomero_importer.utils.result_zarr import (
             discover_ngff_nodes,
-            materialize_shallow_zarr,
         )
         SHALLOW_ZARR_SUPPORT_AVAILABLE = True
     except ImportError as exc:
@@ -1873,11 +1883,10 @@ def save_as_zarr(
         i += 1
 
     shallow_reference = None
-    if shallow_zarr_storage:
-        if data_type == constants.transfer.DATA_TYPE_IMAGE:
-            shallow_reference = get_shallow_reference(object)
-        elif data_type == constants.transfer.DATA_TYPE_PLATE:
-            shallow_reference = get_shallow_plate_reference(object)
+    if data_type == constants.transfer.DATA_TYPE_IMAGE:
+        shallow_reference = get_shallow_reference(object)
+    elif data_type == constants.transfer.DATA_TYPE_PLATE:
+        shallow_reference = get_shallow_plate_reference(object)
     if (
         shallow_reference is not None
         and data_type == constants.transfer.DATA_TYPE_PLATE
@@ -1889,6 +1898,23 @@ def save_as_zarr(
             object.getId(),
         )
         reconstruct_shallow_zarr = True
+
+    if (
+        shallow_reference is not None
+        and reconstruct_shallow_zarr
+        and not SHALLOW_ZARR_RESTORE_AVAILABLE
+    ):
+        raise RuntimeError(
+            "This OMERO object is backed by a BIOMERO shallow Zarr, but its "
+            "reconstruction support is unavailable. Install a compatible "
+            "BIOMERO.importer before using it as workflow input."
+        ) from SHALLOW_ZARR_RESTORE_IMPORT_ERROR
+
+    if shallow_reference is not None and reconstruct_shallow_zarr:
+        if storage_roots is None:
+            storage_roots = {}
+        if not storage_roots:
+            storage_roots.update(load_group_storage_roots())
 
     selected_pixel_export = (
         shallow_reference is not None and not reconstruct_shallow_zarr
