@@ -66,31 +66,12 @@ from pathlib import Path
 import glob
 import zipfile
 from datetime import datetime
+import logging
 try:
     from PIL import Image  # see ticket:2597
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
-from biomero.zarr_contracts import (
-    CANONICAL_PLATE_IMAGE_NAMESPACE,
-    CANONICAL_PLATE_LABEL_NAMESPACE,
-    CANONICAL_PLATE_SOURCE_NAMESPACE,
-    CANONICAL_SOURCE_NAMESPACE,
-    SHALLOW_COLLECTION_NAMESPACE,
-    TRANSFER_INPUT_MARKER,
-    CanonicalInput,
-    CanonicalPlateImage,
-    CanonicalPlateImageRecord,
-    CanonicalPlateIndex,
-    CanonicalPlateLabelRecord,
-    CanonicalPlateSource,
-    CanonicalZarrSource,
-    ManagedZarrNode,
-    ShallowPlateReference,
-    ShallowZarrReference,
-    ZarrLabelComponent,
-)
-import logging
 import sys
 
 logger = logging.getLogger(__name__)
@@ -99,9 +80,28 @@ IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
-SHALLOW_ZARR_SUPPORT_AVAILABLE = True
+SHALLOW_ZARR_SUPPORT_AVAILABLE = False
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     try:
+        from biomero.zarr_contracts import (
+            CANONICAL_PLATE_IMAGE_NAMESPACE,
+            CANONICAL_PLATE_LABEL_NAMESPACE,
+            CANONICAL_PLATE_SOURCE_NAMESPACE,
+            CANONICAL_SOURCE_NAMESPACE,
+            SHALLOW_COLLECTION_NAMESPACE,
+            TRANSFER_INPUT_MARKER,
+            CanonicalInput,
+            CanonicalPlateImage,
+            CanonicalPlateImageRecord,
+            CanonicalPlateIndex,
+            CanonicalPlateLabelRecord,
+            CanonicalPlateSource,
+            CanonicalZarrSource,
+            ManagedZarrNode,
+            ShallowPlateReference,
+            ShallowZarrReference,
+            ZarrLabelComponent,
+        )
         from biomero_importer.utils.canonical_promotion import (
             CanonicalPromotionService,
         )
@@ -119,8 +119,8 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
             discover_ngff_nodes,
             materialize_shallow_zarr,
         )
+        SHALLOW_ZARR_SUPPORT_AVAILABLE = True
     except ImportError as exc:
-        SHALLOW_ZARR_SUPPORT_AVAILABLE = False
         logger.warning(
             "BIOMERO_SHALLOW_ZARR is enabled but biomero-importer Zarr "
             "support is unavailable; using normal Zarr export: %s",

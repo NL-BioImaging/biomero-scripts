@@ -66,9 +66,7 @@ from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
-from biomero.zarr_contracts import CanonicalInput
 import logging
-import os
 import time as timesleep
 from paramiko import SSHException
 
@@ -79,6 +77,8 @@ IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
+if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+    from biomero.zarr_contracts import CanonicalInput
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
