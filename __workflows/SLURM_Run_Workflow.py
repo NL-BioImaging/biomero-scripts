@@ -851,8 +851,8 @@ def runScript():
                 # Record the run and hand it to the supervisor, so the user is
                 # not kept waiting on transfer, Slurm and import.
                 detached.register_detached_launcher(
-                    client, slurmClient, wf_id, constants.RUN_WF_SCRIPT,
-                    VERSION, selected_workflow_names,
+                    client, slurmClient.workflowTracker, wf_id,
+                    constants.RUN_WF_SCRIPT, VERSION, selected_workflow_names,
                     {"zipfile": createFileName(client, conn, wf_id),
                      "email": email,
                      "group": group,
@@ -944,7 +944,7 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
     # picked up again by the supervisor. Read back what already happened so we
     # neither re-transfer the data nor submit a second Slurm job for work that
     # is already on the cluster.
-    history = (detached.load_task_history(slurmClient, wf_id)
+    history = (detached.load_task_history(slurmClient.workflowTracker, wf_id)
                if resume and detached else [])
     logger.info('''
     # --------------------------------------------

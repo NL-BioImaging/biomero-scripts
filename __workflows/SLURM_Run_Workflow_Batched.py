@@ -527,7 +527,7 @@ def runScript():
                                            in selected_workflows.items()
                                            if selected]
                 detached.register_detached_launcher(
-                    client, slurmClient, wf_id,
+                    client, slurmClient.workflowTracker, wf_id,
                     constants.RUN_WF_BATCHED_SCRIPT, VERSION,
                     selected_workflow_names,
                     {"batches": [list(batch) for batch in batch_ids_list],
