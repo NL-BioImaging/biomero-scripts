@@ -242,6 +242,9 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
 
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
 UUID_PATTERN = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 try:
@@ -272,8 +275,130 @@ if not IMPORTER_ENABLED:
     logger.warning(
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
+IMPORTER_ORDER_API_AVAILABLE = False
+SHALLOW_ZARR_OPERATION_AVAILABLE = False
+if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+    try:
+        from biomero_importer import (
+            get_importer_capabilities,
+            submit_import_order,
+        )
+        from biomero_schema.imports import (
+            SHALLOW_ZARR_OPERATION,
+            ImportOptionsEnvelope,
+            ShallowZarrImportOperation,
+        )
+        IMPORTER_ORDER_API_AVAILABLE = True
+        SHALLOW_ZARR_OPERATION_AVAILABLE = (
+            SHALLOW_ZARR_OPERATION
+            in get_importer_capabilities().get("lifecycleOperations", ())
+        )
+    except ImportError as exc:
+        logger.warning(
+            "BIOMERO_SHALLOW_ZARR is enabled, but the importer lifecycle API "
+            "is unavailable; legacy full-result imports remain active: %s",
+            exc,
+        )
+
 # Version constant for easy version management
 VERSION = "2.8.2"
+
+
+def load_canonical_input_snapshot(slurm_client, workflow_id):
+    """Resolve the exact workflow input snapshot from workflow tracking."""
+    workflow_id = UUID(str(workflow_id))
+    if not slurm_client.track_workflows:
+        logger.info(
+            "Workflow tracking is disabled for %s; canonical matching must "
+            "fall back to the returned pixel identity",
+            workflow_id,
+        )
+        return None
+    try:
+        return slurm_client.workflowTracker.get_canonical_input_manifest(
+            workflow_id
+        )
+    except Exception as exc:
+        logger.info(
+            "No tracked canonical input snapshot for workflow %s; canonical "
+            "matching must fall back to the returned pixel identity: %s",
+            workflow_id,
+            exc,
+        )
+        return None
+
+
+def build_shallow_import_options(canonical_inputs, client=None):
+    """Build an importer-owned shallow operation or preserve legacy import."""
+    if not (
+        IMPORTER_ENABLED
+        and SHALLOW_ZARR_ENABLED
+        and IMPORTER_ORDER_API_AVAILABLE
+        and SHALLOW_ZARR_OPERATION_AVAILABLE
+    ):
+        return None
+    if canonical_inputs is None or not canonical_inputs.inputs:
+        logger.info(
+            "Shallow Zarr importer operation not requested: no canonical "
+            "workflow input snapshot is available"
+        )
+        return None
+    import_plate_preview = bool(unwrap(client.getInput(
+        constants.results.IMPORT_PLATE_LABEL_PREVIEW
+    ))) if client else False
+    plate_label_name = (unwrap(client.getInput(
+        constants.results.PLATE_LABEL_PREVIEW_NAME
+    )) or "").strip() if client else ""
+    operation = ShallowZarrImportOperation(
+        canonicalInputs=canonical_inputs,
+        importImageLabelViews=True,
+        importPlateLabelPreview=import_plate_preview,
+        plateLabelName=(plate_label_name or None),
+    )
+    envelope = ImportOptionsEnvelope(operations=(operation,))
+    logger.info(
+        "Prepared importer-owned %s operation for workflow %s with %s "
+        "canonical input record(s)",
+        operation.kind,
+        canonical_inputs.workflow_id,
+        len(canonical_inputs.inputs),
+    )
+    return envelope.to_dict()
+
+
+def select_lifecycle_import_paths(results_path):
+    """Keep regular images and only the outermost returned Zarr stores."""
+    candidates = [Path(path) for path in find_supported_image_paths(results_path)]
+    zarrs = [
+        path.resolve() for path in candidates
+        if path.is_dir() and path.name.lower().endswith(".zarr")
+    ]
+    outermost = {
+        path for path in zarrs
+        if not any(path != parent and path.is_relative_to(parent)
+                   for parent in zarrs)
+    }
+    selected = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in zarrs and resolved not in outermost:
+            continue
+        if any(resolved != root and resolved.is_relative_to(root)
+               for root in outermost):
+            continue
+        selected.append(str(candidate))
+    return selected
+
+
+def get_images_by_ids(conn, image_ids):
+    """Load OMERO Images without issuing an invalid empty IN query."""
+    normalized_ids = [int(image_id) for image_id in (image_ids or [])]
+    if not normalized_ids:
+        return []
+    return [
+        image for image in conn.getObjects("Image", ids=normalized_ids)
+        if image
+    ]
 
 
 def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
@@ -2329,8 +2454,16 @@ def create_upload_order(order_dict: Dict[str, Any]) -> None:
             "Cannot create upload order: biomero-importer not available")
 
     try:
-        # Log the new order using importer's ingestion tracking
-        log_ingestion_step(order_dict, STAGE_NEW_ORDER)
+        import_options = order_dict.get("ImportOptions", {})
+        if import_options.get("schema") == 2:
+            if not IMPORTER_ORDER_API_AVAILABLE:
+                raise RuntimeError(
+                    "Importer lifecycle order API is not available"
+                )
+            submit_import_order(order_dict)
+        else:
+            # Preserve the established database writer for legacy importers.
+            log_ingestion_step(order_dict, STAGE_NEW_ORDER)
         logger.info(f"Created upload order: {order_dict['UUID']}")
     except Exception as e:
         logger.error(f"Failed to create upload order: {e}")
@@ -2490,7 +2623,8 @@ def create_upload_orders_for_results(
     destination_id: int,
     results_path: str,
     wf_id: UUID,
-    client: Any = None
+    client: Any = None,
+    canonical_inputs=None,
 ) -> List[Dict[str, Any]]:
     """Create upload orders for SLURM results (images and optionally label zarrs).
 
@@ -2512,22 +2646,57 @@ def create_upload_orders_for_results(
             "Cannot create upload orders: biomero-importer not available")
         return []
 
-    # Find only image files (CSV tables handled by zip workflow)
+    orders = []
+
+    lifecycle_options = build_shallow_import_options(
+        canonical_inputs,
+        client,
+    )
+    if lifecycle_options is not None:
+        image_files = select_lifecycle_import_paths(results_path)
+        if not image_files:
+            logger.warning(
+                "No image files found for importer lifecycle processing in %s",
+                results_path,
+            )
+            return []
+        order = {
+            "Group": group_name,
+            "Username": username,
+            "DestinationID": destination_id,
+            "DestinationType": destination_type,
+            "UUID": str(uuid.uuid4()),
+            "Files": image_files,
+            "ImportOptions": lifecycle_options,
+            "wf_id": wf_id,
+            "source": "SLURM_Results_Lifecycle",
+        }
+        create_upload_order(order)
+        logger.info(
+            "Handed %s result path(s) to BIOMERO.importer for asynchronous "
+            "shallow evaluation, normalization, and registration planning",
+            len(image_files),
+        )
+        return [order]
+
+    # From here down, retain the established user-controlled import behavior.
+    import_label_zarrs = (
+        unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS))
+        if client else True
+    )
+    import_only_labels = (
+        unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS))
+        if client else True
+    )
+    label_zarr_files = (
+        find_label_zarr_paths(results_path) if import_label_zarrs else []
+    )
     image_files = find_supported_image_paths(results_path)
 
-    if not image_files:
+    if not image_files and not label_zarr_files:
         logger.warning(
             f"No image files matched extensions {SUPPORTED_IMAGE_EXTENSIONS}")
 
-    orders = []
-
-    # Check if label zarr import is enabled
-    import_label_zarrs = unwrap(client.getInput(constants.results.IMPORT_LABEL_ZARRS)) if client else True
-    import_only_labels = unwrap(client.getInput(constants.results.IMPORT_ONLY_LABELS)) if client else True
-    
-    # First check if there are actually label zarr files available
-    label_zarr_files = find_label_zarr_paths(results_path) if import_label_zarrs else []
-    
     # Determine if we should skip main image import (only when both label options are true AND labels exist)
     skip_main_images = import_label_zarrs and import_only_labels and len(label_zarr_files) > 0
     
@@ -2554,7 +2723,7 @@ def create_upload_orders_for_results(
         logger.info(f"Created image upload order for {len(image_files)} files")
     elif image_files and skip_main_images:
         logger.info(f"Skipping main image import for {len(image_files)} files (Import_Only_Labels=true, {len(label_zarr_files)} label zarr directories found)")
-            
+
     # Create orders for label zarr directories if enabled and found
     if import_label_zarrs and label_zarr_files:
         label_order = {
@@ -3288,6 +3457,7 @@ def process_importer_workflow(
     task_id: Optional[UUID] = None,
     input_images: Optional[List[Any]] = None,
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
+    canonical_inputs=None,
 
 ) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
@@ -3410,7 +3580,7 @@ def process_importer_workflow(
     logger.info("Creating upload orders for biomero-importer...")
     orders = create_upload_orders_for_results(
         group_name, username, destination_type, destination_id,
-        permanent_storage_path, wf_id, client)
+        permanent_storage_path, wf_id, client, canonical_inputs)
 
     if orders:
         message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
@@ -3594,6 +3764,47 @@ def process_zip_attachments(
                 client, conn, message, slurm_job_id, projects, metadata_files, wf_id)
 
     return message, attached_zip_path
+
+
+def resolve_non_image_output_targets(
+        target_mode, configured_input_targets, importer_destination_target,
+        input_container_fallback):
+    """Choose where individually attached workflow files should be linked.
+
+    A missing mode preserves the historic input-container behavior. ``auto``
+    and ``result_destination`` prefer the Dataset or Screen used by the
+    importer. ``input_parent`` resolves Dataset -> Project and Plate -> Screen
+    through the typed OMERO wrappers. Unavailable requested targets safely
+    fall back to the input container so file outputs remain findable.
+    """
+    input_targets = list(
+        configured_input_targets or input_container_fallback or [])
+    mode = target_mode or "legacy_input_container"
+
+    if mode in ("auto", "result_destination") \
+            and importer_destination_target is not None:
+        return [importer_destination_target]
+
+    if mode == "input_parent":
+        parents = []
+        seen = set()
+        for target in input_targets:
+            try:
+                target_parents = list(target.listParents())
+            except Exception:
+                target_parents = []
+            for parent in target_parents:
+                try:
+                    identity = (parent.__class__.__name__, parent.getId())
+                except Exception:
+                    identity = id(parent)
+                if identity not in seen:
+                    parents.append(parent)
+                    seen.add(identity)
+        if parents:
+            return parents
+
+    return input_targets
 
 
 def process_non_image_file_outputs(
@@ -4203,6 +4414,16 @@ def runScript() -> None:
                          grouping="07.1",
                          description="Import ONLY label zarr directories (requires Import_Label_Zarrs=true). Skips main image import.",
                          default=True),
+            scripts.Bool(constants.results.IMPORT_PLATE_LABEL_PREVIEW,
+                         optional=True,
+                         grouping="07.2",
+                         description="Also create one Plate view whose WellSample pixels use a common image-level label. Off by default and only applies to shallow Plate results.",
+                         default=False),
+            scripts.String(constants.results.PLATE_LABEL_PREVIEW_NAME,
+                           optional=True,
+                           grouping="07.3",
+                           description="Exact common NGFF label name for the optional label-backed Plate. Leave empty only when exactly one label name exists on every Plate image.",
+                           default=""),
             scripts.Bool(constants.results.OUTPUT_ATTACH_TABLE,
                          optional=False,
                          grouping="08",
@@ -4233,6 +4454,14 @@ def runScript() -> None:
                          grouping="09",
                          description="Attach individual non-image output files (e.g. NumPy arrays, model weights, JSON/YAML configs) as OMERO file annotations. Bilayers workflows with 'array', 'file', or 'executable' output types benefit most from this option. Images and CSVs are handled separately.",
                          default=False),
+            scripts.String(
+                constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET,
+                optional=True,
+                grouping="09",
+                description="Container selection policy for non-image file outputs.",
+                values=[rstring(value) for value in
+                        constants.file_output_targets.USER_VALUES],
+                default=constants.file_output_targets.INPUT_CONTAINER),
             scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET,
                          optional=True,
                          grouping="09.1",
@@ -4411,6 +4640,11 @@ def runScript() -> None:
                 constants.results.OUTPUT_ATTACH_TABLE))
             process_file_outputs = unwrap(client.getInput(
                 constants.results.OUTPUT_ATTACH_FILE_OUTPUTS)) or False
+            file_output_target_mode = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET))
+            if not file_output_target_mode:
+                file_output_target_mode = (
+                    constants.file_output_targets.LEGACY)
             process_attachments = (unwrap(client.getInput(constants.results.OUTPUT_ATTACH_OG_IMAGES)) or
                                    unwrap(client.getInput(constants.results.OUTPUT_ATTACH_PROJECT)) or
                                    unwrap(client.getInput(constants.results.OUTPUT_ATTACH_DATASET)) or
@@ -4537,6 +4771,7 @@ def runScript() -> None:
                 None, None, None)
             _bulk_zip_perm: Optional[str] = None  # set once after extraction; used for skip-list and cleanup
             extraction_error = None
+            canonical_input_manifest = None
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_or_reuse_slurm_results(
                     slurmClient, slurm_job_id, local_tmp_storage, group_name,
@@ -4551,6 +4786,27 @@ def runScript() -> None:
                 logger.error(f"Failed to extract SLURM results: {e}")
                 message += f"\nFailed to extract SLURM results: {e}"
                 extraction_error = e  # defer raise so log is still uploaded below
+
+            if (
+                IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+                and SHALLOW_ZARR_OPERATION_AVAILABLE
+                and not extraction_error
+                and permanent_storage_path
+            ):
+                canonical_input_manifest = load_canonical_input_snapshot(
+                    slurmClient,
+                    wf_id,
+                )
+                if canonical_input_manifest is not None:
+                    logger.info(
+                        "Loaded %s canonical input record(s) from workflow "
+                        "tracking for result processing",
+                        len(canonical_input_manifest.inputs),
+                    )
+                logger.info(
+                    "Returned Zarr inspection is delegated to "
+                    "BIOMERO.importer after the import order is committed"
+                )
 
             # Copy log to permanent storage (only possible when extraction succeeded),
             # then upload from the best available path so the in-place symlink stays valid.
@@ -4676,7 +4932,8 @@ def runScript() -> None:
                     client, conn, slurmClient, slurm_job_id,
                     group_name, username,
                     permanent_storage_path, wf_id, task_id,
-                    input_images=input_images, roi_pairs=roi_pairs)
+                    input_images=input_images, roi_pairs=roi_pairs,
+                    canonical_inputs=canonical_input_manifest)
                 message += importer_message
 
             if unwrap(client.getInput(constants.results.OUTPUT_CREATE_ROIS)):
@@ -4768,7 +5025,31 @@ def runScript() -> None:
 
             # NON-IMAGE FILE OUTPUT ANNOTATIONS (bilayers array/file/executable outputs)
             if process_file_outputs:
-                file_output_targets = _file_output_targets_for_log  # already built above (reuse, avoids double OMERO query)
+                file_output_targets = resolve_non_image_output_targets(
+                    file_output_target_mode,
+                    _file_output_targets_for_log,
+                    importer_destination_target,
+                    _log_floor,
+                )
+                if (file_output_target_mode in (
+                        constants.file_output_targets.AUTO,
+                        constants.file_output_targets.RESULT_DESTINATION)
+                        and importer_destination_target is not None):
+                    logger.info(
+                        "Attaching non-image workflow outputs to the importer "
+                        "destination container"
+                    )
+                elif (file_output_target_mode
+                      == constants.file_output_targets.INPUT_PARENT):
+                    logger.info(
+                        "Attaching non-image workflow outputs to the input "
+                        "container parent(s)"
+                    )
+                elif not _file_output_targets_for_log and _log_floor:
+                    logger.info(
+                        "No forwarded non-image attachment target was available; "
+                        "using the input-container fallback"
+                    )
                 # Exclude the SLURM job log from file-annotation attachment —
                 # upload_log_to_omero already attached it. All other .log files
                 # (e.g. workflow run.log) are processed normally.
