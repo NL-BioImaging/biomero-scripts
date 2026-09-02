@@ -75,6 +75,21 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
 # Version constant for easy version management
 VERSION = "2.8.2"
 
+# Batched runs are queued the same way single runs are: this script resolves
+# the batches and records them in a launcher task, and the supervisor spawns
+# one child workflow per batch (see biomero.detached and, in NL-BIOMERO, the
+# WorkflowSupervisor in processor.py). Without a biomero that ships the
+# launcher contract, batches are run inline as sub-scripts as before.
+try:
+    from biomero import detached
+except ImportError:  # pragma: no cover - older biomero release
+    detached = None
+
+
+def detached_mode_enabled() -> bool:
+    """Whether to queue the batches for the supervisor instead of running them."""
+    return detached is not None and detached.detached_mode_enabled()
+
 
 def runScript():
     """Main entry point for SLURM batched workflow execution script.
@@ -504,6 +519,32 @@ def runScript():
             # Explicit Dataset_ID / Screen_ID overrides are kept as-is (already in inputs).
             inputs[constants.workflow.OUTPUT_DUPLICATES] = omscripts.rbool(
                 False)
+            if detached_mode_enabled():
+                # Hand the batches over and let the user go: the supervisor
+                # runs each batch as its own workflow, which keeps per-batch
+                # progress and failures visible exactly as before.
+                selected_workflow_names = [name for name, selected
+                                           in selected_workflows.items()
+                                           if selected]
+                detached.register_detached_launcher(
+                    client, slurmClient, wf_id,
+                    constants.RUN_WF_BATCHED_SCRIPT, VERSION,
+                    selected_workflow_names,
+                    {"batches": [list(batch) for batch in batch_ids_list],
+                     "batch_size": batch_size,
+                     "effective_type": effective_type,
+                     "base_inputs": {key: unwrap(value)
+                                     for key, value in inputs.items()},
+                     "selected_output": selected_output,
+                     "group": group,
+                     constants.transfer.IDS: list(image_ids)})
+                client.setOutput("Message", rstring(
+                    f"Your {len(batch_ids_list)} batches are queued and run "
+                    f"in the background: you can close this tab. Results are "
+                    f"imported into OMERO automatically and progress is shown "
+                    f"in the BIOMERO workflow overview."))
+                return
+
             processes = {}
             remaining_batches = {i: b for i, b in enumerate(batch_ids_list)}
             logger.info("#--------------------------------------------#")
