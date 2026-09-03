@@ -55,7 +55,8 @@ License:
 from __future__ import print_function
 import sys
 import os
-from uuid import UUID
+import json
+from uuid import UUID, uuid4
 import omero
 from omero.grid import JobParams
 from omero.rtypes import rstring, unwrap, rlong, rbool, rlist, robject, wrap
@@ -66,7 +67,6 @@ import omero.scripts as omscripts
 import datetime
 from biomero import SlurmClient, constants
 import logging
-import os
 import time as timesleep
 from paramiko import SSHException
 
@@ -74,6 +74,11 @@ logger = logging.getLogger(__name__)
 
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
+if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+    from biomero.zarr_contracts import CanonicalInput
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -96,7 +101,71 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
-VERSION = "2.8.2"
+VERSION = "2.9.0"
+CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
+
+
+def ensure_tracking_uuid(value):
+    """Keep tracker UUIDs or create one for tracking-disabled deployments."""
+    if value is None:
+        return uuid4()
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
+
+
+def parse_canonical_inputs_output(results):
+    """Validate canonical input records returned by Image Transfer."""
+    if not results or CANONICAL_INPUTS_OUTPUT not in results:
+        return ()
+    raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
+    if not raw_value:
+        return ()
+    payload = json.loads(raw_value)
+    if not isinstance(payload, list):
+        raise ValueError("Canonical_Inputs must contain a JSON list")
+    return tuple(CanonicalInput.from_dict(item) for item in payload)
+
+
+def record_canonical_input_snapshot(
+    slurm_client,
+    workflow_id,
+    export_task_id,
+    canonical_inputs,
+):
+    """Record the immutable canonical input snapshot in workflow tracking."""
+    if not canonical_inputs:
+        logger.info(
+            "Image Transfer returned no complete canonical input snapshot "
+            "for workflow %s; result processing will use returned pixel "
+            "identity matching instead of task-lineage candidates",
+            workflow_id,
+        )
+        return False
+    if not slurm_client.track_workflows:
+        logger.info(
+            "Workflow tracking is disabled for %s; the canonical input "
+            "snapshot is not recorded and result processing will use returned "
+            "pixel identity matching",
+            workflow_id,
+        )
+        return False
+    logger.info(
+        "Image Transfer returned %s canonical input record(s) for workflow %s; "
+        "persisting the immutable task snapshot",
+        len(canonical_inputs),
+        workflow_id,
+    )
+    slurm_client.workflowTracker.record_canonical_inputs(
+        workflow_id,
+        export_task_id,
+        tuple(canonical_inputs),
+    )
+    logger.info(
+        "Recorded canonical input snapshot in the workflow event store for %s",
+        workflow_id,
+    )
+    return True
 
 def get_roi_script_capability(conn: BlitzGateway) -> dict:
     """Ask OMERO whether its optional Labels2Rois script is installed."""
@@ -413,6 +482,27 @@ def runScript():
                              grouping="02.5.1",
                              description="Name for the new screen w/ result images",
                              default=constants.workflow.NO),
+            omscripts.Bool(
+                constants.results.IMPORT_PLATE_LABEL_PREVIEW,
+                optional=True,
+                grouping="02.5.2",
+                description=(
+                    "For Plate workflows imported into a Screen, also register "
+                    "a separate Plate whose pixels show one common result label "
+                    "at every image position. Requires importer-backed shallow "
+                    "Zarr storage."
+                ),
+                default=False),
+            omscripts.String(
+                constants.results.PLATE_LABEL_PREVIEW_NAME,
+                optional=True,
+                grouping="02.5.3",
+                description=(
+                    "Optional exact OME-Zarr label name for the Plate preview. "
+                    "Leave empty to use the only label common to every image; "
+                    "ambiguous results skip the optional preview."
+                ),
+                default=""),
             omscripts.Bool(constants.workflow.OUTPUT_DUPLICATES,
                            optional=True,
                            grouping="02.6",
@@ -436,6 +526,18 @@ def runScript():
                            grouping="02.85",
                            description="Attach individual non-image output files (arrays, model weights, configs) as OMERO file annotations. Useful for bilayers workflows with 'array', 'file', or 'executable' output types.",
                            default=False),
+            omscripts.String(
+                constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET,
+                optional=True,
+                grouping="02.85",
+                description=(
+                    "Where to link individual file annotations. Auto uses the "
+                    "selected result destination when present, otherwise the "
+                    "input Dataset or Plate."
+                ),
+                values=[rstring(value) for value in
+                        constants.file_output_targets.USER_VALUES],
+                default=constants.file_output_targets.INPUT_CONTAINER),
             omscripts.Bool(constants.workflow.OUTPUT_CREATE_ROIS,
                            optional=True,
                            grouping="02.86",
@@ -672,11 +774,13 @@ def runScript():
                 logger.warning(roi_warning)
                 UI_messages += roi_warning + " "
             # Start tracking the workflow on a unique ID
-            wf_id = slurmClient.workflowTracker.initiate_workflow(
-                params.name,
-                "\n".join([params.description, VERSION]),
-                user,
-                group
+            wf_id = ensure_tracking_uuid(
+                slurmClient.workflowTracker.initiate_workflow(
+                    params.name,
+                    "\n".join([params.description, VERSION]),
+                    user,
+                    group
+                )
             )
             wf_failed = False  # wf state
 
@@ -693,8 +797,15 @@ def runScript():
             zipfile = createFileName(client, conn, wf_id)
             # Send data to Slurm, zipped, over SSH
             # Uses _SLURM_Image_Transfer script from Omero
-            rv, task_id = exportImageToSLURM(client, conn, slurmClient,
-                                             zipfile, wf_id, ome_zarr_version)
+            rv, task_id = exportImageToSLURM(
+                client,
+                conn,
+                slurmClient,
+                zipfile,
+                wf_id,
+                ome_zarr_version,
+                reconstruct_shallow_zarr=use_zarr_format,
+            )
             logger.debug(f"Ran data export: {rv.keys()}, {rv}")
             if 'Message' in rv:
                 logger.info(rv['Message'].getValue())  # log
@@ -1395,7 +1506,8 @@ def exportImageToSLURM(client: omscripts.client,
                        slurmClient: SlurmClient,
                        zipfile: str,
                        wf_id: UUID,
-                       ome_zarr_version: str):
+                       ome_zarr_version: str,
+                       reconstruct_shallow_zarr: bool = True):
     """
     Export selected OMERO data to SLURM cluster for processing.
 
@@ -1411,6 +1523,9 @@ def exportImageToSLURM(client: omscripts.client,
         zipfile: Target filename for the exported data
         wf_id: Workflow UUID for tracking
         ome_zarr_version: Version of OME-Zarr format to use
+        reconstruct_shallow_zarr: Reconstruct managed original pixels and
+            labels for a Zarr-consuming workflow. False preserves the exact
+            selected OMERO Image pixels for later conversion to TIFF.
     Returns:
         tuple: (export_result_dict, task_id) containing script results and task ID
 
@@ -1443,18 +1558,22 @@ def exportImageToSLURM(client: omscripts.client,
         constants.transfer.FORMAT: rstring(
             constants.transfer.FORMAT_OMEZARR),
         constants.transfer.OME_VERSION: rstring(ome_zarr_version),
+        constants.transfer.RECONSTRUCT_SHALLOW_ZARR: rbool(
+            reconstruct_shallow_zarr),
         constants.transfer.FOLDER: rstring(zipfile),
         constants.CLEANUP: client.getInput(constants.CLEANUP) or rbool(True)
     }
     persist_dict = {key: unwrap(value) for key, value in inputs.items()}
     logger.debug(f"{inputs}, {script_id}")
     try:
-        task_id = slurmClient.workflowTracker.add_task_to_workflow(
-            wf_id,
-            script_name,
-            VERSION,
-            persist_dict[constants.transfer.IDS],
-            persist_dict
+        task_id = ensure_tracking_uuid(
+            slurmClient.workflowTracker.add_task_to_workflow(
+                wf_id,
+                script_name,
+                VERSION,
+                persist_dict[constants.transfer.IDS],
+                persist_dict
+            )
         )
         slurmClient.workflowTracker.start_task(task_id)
     except Exception as db_e:
@@ -1525,6 +1644,15 @@ def exportImageToSLURM(client: omscripts.client,
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+
+        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+            canonical_inputs = parse_canonical_inputs_output(rv)
+            record_canonical_input_snapshot(
+                slurmClient,
+                wf_id,
+                task_id,
+                canonical_inputs,
+            )
 
         try:
             slurmClient.workflowTracker.complete_task(task_id, msg)
@@ -1830,6 +1958,36 @@ def importResultsToOmero(client: omscripts.client,
         inputs[constants.results.OUTPUT_ATTACH_NEW_SCREEN] = rbool(
             False)
 
+    # A label-backed Plate is an optional additional view of the authoritative
+    # shallow result Plate. Keep this importer-specific contract away from the
+    # legacy Get Results script, and enforce its valid context even when a
+    # caller submits stale or hand-crafted parameters.
+    if IMPORTER_ENABLED:
+        requested_plate_preview = bool(unwrap(client.getInput(
+            constants.results.IMPORT_PLATE_LABEL_PREVIEW)))
+        plate_preview_enabled = bool(
+            requested_plate_preview
+            and SHALLOW_ZARR_ENABLED
+            and data_type == constants.transfer.DATA_TYPE_PLATE
+            and selected_output[constants.workflow.OUTPUT_NEW_SCREEN]
+        )
+        inputs[constants.results.IMPORT_PLATE_LABEL_PREVIEW] = rbool(
+            plate_preview_enabled)
+        if plate_preview_enabled:
+            requested_label_name = (unwrap(client.getInput(
+                constants.results.PLATE_LABEL_PREVIEW_NAME)) or "").strip()
+            inputs[constants.results.PLATE_LABEL_PREVIEW_NAME] = rstring(
+                requested_label_name)
+            logger.info(
+                "Plate label preview requested%s",
+                (f" for exact label '{requested_label_name}'"
+                 if requested_label_name else " with automatic label selection"),
+            )
+        elif requested_plate_preview:
+            logger.warning(
+                "Ignoring Plate label preview outside importer-backed shallow "
+                "Plate-to-Screen result import")
+
     if selected_output[constants.workflow.OUTPUT_ATTACH]:
         inputs[
             constants.results.OUTPUT_ATTACH_OG_IMAGES
@@ -1893,6 +2051,13 @@ def importResultsToOmero(client: omscripts.client,
             inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_PLATE] = rbool(False)
     else:
         inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS] = rbool(False)
+
+    file_output_target = unwrap(client.getInput(
+        constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET))
+    if file_output_target not in constants.file_output_targets.USER_VALUES:
+        file_output_target = constants.file_output_targets.INPUT_CONTAINER
+    inputs[constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET] = rstring(
+        file_output_target)
 
     if selected_output.get(constants.workflow.OUTPUT_CREATE_ROIS, False):
         inputs[constants.results.OUTPUT_CREATE_ROIS] = rbool(True)

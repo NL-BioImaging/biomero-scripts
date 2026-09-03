@@ -37,7 +37,7 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 
 def format_image_submission(array_job_id, status):

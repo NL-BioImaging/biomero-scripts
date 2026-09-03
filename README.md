@@ -1,5 +1,5 @@
 # <img src="https://raw.githubusercontent.com/NL-BioImaging/OMERO.biomero/refs/tags/v1.2.1/webapp/src/img/biomero-logo.svg" alt="BIOMERO" height="28" style="height:28px; width:auto; vertical-align:middle;"> BIOMERO.scripts
-
+[![Test BIOMERO scripts](https://github.com/NL-BioImaging/biomero-scripts/actions/workflows/tests.yml/badge.svg)](https://github.com/NL-BioImaging/biomero-scripts/actions/workflows/tests.yml)
 > 🚀 **This package is part of <img src="https://raw.githubusercontent.com/NL-BioImaging/OMERO.biomero/refs/tags/v1.2.1/webapp/src/img/biomero-logo.svg" alt="BIOMERO" height="16" style="height:16px; width:auto; vertical-align:middle;"> BIOMERO 2.0** — For complete deployment and FAIR infrastructure setup, start with the [**NL-BIOMERO Documentation**](https://nl-bioimaging.github.io/NL-BIOMERO/) 📖
 
 
@@ -62,6 +62,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 ### Administrative Scripts (`admin/`)
 - **`SLURM_Init_environment.py`**: Initialize SLURM environment
 - **`SLURM_check_setup.py`**: Validate BIOMERO configuration
+- **`SLURM_Cownary.py`**: Run a fixed, admin-only lolcow cownary to verify SSH, Slurm scheduling, configured shared storage, and Singularity execution end to end. It accepts no command or path input and inherits BIOMERO's default partition, global `sbatch_*` settings, and configured Apptainer cache, temporary, and bind paths without allowing them to override the fixed cownary job scope.
 - **`Tail_logs.py`**: View recent BIOMERO log entries (admin only)
 - **`Example_Minimal_Slurm_Script.py`**: ⚠️ **Admin/example only** — runs ad-hoc SSH commands on the Slurm cluster from OMERO.web. Requires OMERO admin privileges. Note that a compromised admin account can already upload arbitrary scripts and reach the cluster that way, so this adds convenience rather than a new attack surface — but it's still not needed in production. See the note below.
 
@@ -150,7 +151,7 @@ This repository provides example OMERO scripts for using [BIOMERO](https://githu
 
 Always start with initiating the Slurm environment at least once, for example using [admin/SLURM Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Init_environment.py). With scheduler-native image pulls enabled, this submits one bounded Slurm array for workflow and converter images and returns its array job ID. Run **SLURM Check Setup** to see exact READY, RUNNING, and FAILED counts plus concise per-image failure reasons; reruns skip valid versioned SIFs.
 
-### Group folder mappings for importer results
+### Shared group folder mappings
 
 `SLURM_Import_Results.py` supports both the legacy
 `/opt/omero/server/biomero-config.json["group_mappings"]` configuration and an
@@ -161,6 +162,67 @@ dedicated file wins when the same group is present in both.
 Override the default paths with `OMERO_BIOMERO_CONFIG_FILE` and
 `OMERO_BIOMERO_GROUP_MAPPINGS_FILE`. Deployments that do not mount the dedicated
 file continue using the legacy configuration unchanged.
+
+When `BIOMERO_SHALLOW_ZARR=true`, Image Transfer also derives each group's
+managed storage root at runtime as `IMPORT_MOUNT_PATH / mapping.folder` for
+canonical Zarr promotion and reuse. There is no separate `storage_roots`
+configuration. The processor worker must receive the same read-only mapping
+files that OMERO.biomero edits and the same shared-storage mount; mappings are
+read for each script execution, so runtime changes do not require an image
+rebuild.
+
+### Optional shallow Zarr storage
+
+`BIOMERO_SHALLOW_ZARR` defaults to `false`. It is effective only together with
+`IMPORTER_ENABLED=true`:
+
+- false: Image Transfer exports normally and Import Results imports normally;
+- true: Image Transfer may promote/reuse a verified canonical Zarr, and Import
+  Results submits a typed `biomero.shallow-zarr` operation with the exact
+  workflow input snapshot. BIOMERO.importer performs identity comparison,
+  fail-safe normalization, and registration planning in its independent
+  service after the order is committed.
+
+Run Workflow distinguishes complete Zarr inputs from temporary conversion
+material. A workflow that consumes Zarr receives a reconstructed shallow input
+containing the canonical original pixels and every managed label. When the
+selected workflow consumes TIFF, a shallow-backed OMERO Image instead follows
+the established OMERO CLI Zarr export path: the Image's registered PixelBuffer
+is exported as a standalone temporary Zarr and then converted to TIFF. This
+preserves a selected mask Image as mask pixels, avoids transferring unrelated
+original pixels and labels, and deliberately excludes the temporary export
+from canonical promotion and returned-Zarr matching. Plates always use the
+complete Zarr path.
+
+The OMERO script does not hash or mutate returned Zarrs. If the deployed
+importer does not advertise the lifecycle operation, or no canonical workflow
+snapshot is available, it uses the established full-import path. Existing
+legacy label-result controls remain unchanged in that fallback. Identity
+worker concurrency is configured on BIOMERO.importer, so a web/script timeout
+cannot stop the expensive Plate comparison after hand-off.
+
+Canonical Plate identities are indexed in OMERO as one compact Plate record
+plus bounded image- and label-node records. This keeps large Plate metadata
+below OMERO/PostgreSQL MapAnnotation value limits; existing monolithic records
+remain readable.
+
+Eligible Image results expose their labels as ordinary OMERO Image projections
+until label-aware viewers are generally available. Eligible HCS results remain
+one derived OMERO Plate: its WellSample pixels are served from the canonical
+source Plate while the in-place shallow collection retains the image-level
+labels. This avoids flattening a large Plate into thousands of loose mask
+Images.
+
+**Import Plate label preview** is an optional result setting, disabled by
+default. It creates one additional Plate whose WellSample pixels point directly
+at one common image-level label. Supply **Plate label preview name**, or leave it
+empty only when exactly one label name occurs on every Plate image. The preview
+creates OMERO objects and PixelBuffer links but does not copy label arrays.
+
+Importer-disabled deployments continue to use `SLURM_Get_Results.py` and do not
+load BIOMERO.importer Zarr helpers. The worker processor must forward this
+environment variable to downloaded scripts; current NL-BIOMERO deployments do
+that dynamically through `biomero.constants.slurm_env`.
 
 ### Optional ROI postprocessing
 
@@ -206,6 +268,7 @@ For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/b
 - [`_data/SLURM Import Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Import_Results.py): to retrieve your Slurm job results back into OMERO as a zip, dataset or attachment. Datasets are in-place imported from remote storage via [BIOMERO.importer](https://github.com/NL-BioImaging/biomero.importer). Selected automatically when `IMPORTER_ENABLED=true`.
 
 Other example OMERO scripts are:
+- [`admin/SLURM Cownary`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Cownary.py): **Admin only** — submits the fixed `docker://godlovedc/lolcow` cownary through Slurm, waits for completion, and displays the hostname and cow in OMERO. It uses BIOMERO's configured Slurm destination, default partition, global job parameters, and Apptainer environment while accepting no user-supplied command or path.
 - [`_data/SLURM Get Update`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Update.py): to run while you are waiting on a job to finish on Slurm; it will try to get a `%` progress from your job's logfile. Depends on your job/workflow logging a `%` of course.
 - [`_data/SLURM File Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_File_Transfer.py): transfers a single OMERO FileAnnotation (e.g. model weights, a CSV) to the SLURM job's input directory. The returned SLURM path is injected as the CLI argument for the corresponding workflow parameter by `SLURM_Run_Workflow.py`.
 - [`admin/Example Minimal Slurm Script`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/Example_Minimal_Slurm_Script.py): ⚠️ **Admin only** — runs ad-hoc SSH commands on the Slurm cluster directly from OMERO. Useful for cluster diagnostics (`squeue`, `sinfo`, `ls`) and as a reference skeleton for building new admin scripts. Dangerous commands are blocked by pattern matching.
