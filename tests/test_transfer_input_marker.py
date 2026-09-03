@@ -5,18 +5,11 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py"
-SOURCE_TEXT = SCRIPT_PATH.read_text(encoding="utf-8")
-pytestmark = pytest.mark.skipif(
-    "def write_transfer_input_markers" not in SOURCE_TEXT,
-    reason="temporary Zarr input markers are not available in this revision",
-)
 
 
 def load_writer():

@@ -1,1 +1,2 @@
 pytest>=8,<9
+biomero-schema>=0.2,<0.3
