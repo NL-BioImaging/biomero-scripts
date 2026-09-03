@@ -1,7 +1,6 @@
 import ast
 import os
 from pathlib import Path
-import pytest
 
 
 SOURCE_ROOT = Path(os.environ.get(
@@ -18,7 +17,7 @@ def load_function(path, name):
         if isinstance(node, ast.FunctionDef) and node.name == name
     ), None)
     if function is None:
-        pytest.skip(f"{name} is not available on this source revision")
+        raise AssertionError(f"{name} is not available on this source revision")
     namespace = {}
     exec(compile(ast.Module(body=[function], type_ignores=[]),
                  str(path), "exec"), namespace)
