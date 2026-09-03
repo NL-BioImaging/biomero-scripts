@@ -1102,9 +1102,11 @@ def test_builds_snapshot_from_canonical_plate_source(pixel_identity):
     assert inputs[0].transfer_artifact == "plate.zarr"
 
 
+@pytest.mark.parametrize("label_components_by_object", [None, {7: ()}])
 def test_snapshot_hashes_labels_already_in_canonical_zarr(
     tmp_path,
     pixel_identity,
+    label_components_by_object,
 ):
     ns = _load_canonical_functions()
     canonical = source(pixel_identity)
@@ -1143,6 +1145,7 @@ def test_snapshot_hashes_labels_already_in_canonical_zarr(
         {7: canonical},
         {7: "image.zarr"},
         {"group-3-data": tmp_path},
+        label_components_by_object,
     )
 
     assert len(inputs) == 1
