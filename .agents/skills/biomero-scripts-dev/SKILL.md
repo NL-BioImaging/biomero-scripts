@@ -186,6 +186,9 @@ python -m pytest tests -q
    `BIOMERO_SCRIPTS_ROOT` pointed at the feature worktree. Do not solve the CI
    limitation by copying tests into the production branch. Keep
    `tests/requirements.txt` on `test-suite` aligned with test dependencies.
+   Open feature-specific test pull requests as drafts, with an explicit
+   dependency/merge-order note, until their production change and any
+   cross-repository dependency are available to the canonical harness.
 
 The workflow runs for pull requests and pushes to `master`. Coordinate test
 branch updates with production pull requests so the required check exercises
