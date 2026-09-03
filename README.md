@@ -149,7 +149,7 @@ Use the BIOMERO.scripts
 
 This repository provides example OMERO scripts for using [BIOMERO](https://github.com/NL-BioImaging/biomero). These scripts do not work without installing that client on your OMERO servers/processors that will run these scripts.
 
-Always start with initiating the Slurm environment at least once, for example using [admin/SLURM Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Init_environment.py). This might take a while to download all container images if you configured a lot.
+Always start with initiating the Slurm environment at least once, for example using [admin/SLURM Init environment](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Init_environment.py). With scheduler-native image pulls enabled, this submits one bounded Slurm array for workflow and converter images and returns its array job ID. Run **SLURM Check Setup** to see exact READY, RUNNING, and FAILED counts plus concise per-image failure reasons; reruns skip valid versioned SIFs.
 
 ### Shared group folder mappings
 
@@ -365,7 +365,7 @@ For advanced users who need custom processing:
 4. Use **SLURM Get Results** to import results back to OMERO
 
 ### Monitoring and Debugging
-- **SLURM Check Setup**: Validate your BIOMERO configuration
+- **SLURM Check Setup**: Validate configuration and report per-image READY, RUNNING, or FAILED state
 - **SLURM Get Update**: Monitor job progress and retrieve logs
 - **SLURM Init Environment**: Initialize or update SLURM environment
 

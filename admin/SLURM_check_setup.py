@@ -21,16 +21,16 @@ Key Features:
 - Monitor pending image downloads and builds
 - Verify converter tool availability
 - Display available data files on cluster
-- Retrieve and display cluster setup logs
+- Report per-image structured status and log locations
 
 Setup Validation:
 - BIOMERO version information
 - SLURM connection status
 - Available workflow models and versions
-- Pending model downloads/builds
+- READY, RUNNING, and FAILED image counts with concise failure reasons
 - Converter tool availability
 - Data file inventory
-- Container build logs (sing.log)
+- Per-image array logs and structured status
 
 Administrative Use:
 - Initial setup verification after installation
@@ -49,7 +49,7 @@ License: GPL v2+ (see LICENSE.txt)
 import omero
 import omero.gateway
 from omero import scripts
-from omero.rtypes import rstring, wrap
+from omero.rtypes import rstring
 from omero.gateway import BlitzGateway
 from biomero import SlurmClient
 import logging
@@ -63,23 +63,48 @@ VERSION = "2.9.0"
 logger = logging.getLogger(__name__)
 
 
+def format_image_pull_status(status):
+    """Format exact READY/RUNNING/FAILED counts and concise failures."""
+    counts = status.get("counts", {})
+    lines = [
+        "Image initialization:",
+        f"  READY: {counts.get('READY', 0)}",
+        f"  RUNNING: {counts.get('RUNNING', 0)}",
+        f"  FAILED: {counts.get('FAILED', 0)}",
+    ]
+    failed = [
+        image for image in status.get("images", [])
+        if image.get("state") == "FAILED"
+    ]
+    if failed:
+        lines.append("  Failure details:")
+        for image in failed:
+            reason = image.get("reason") or "unknown failure"
+            exit_code = image.get("exit_code")
+            exit_text = (
+                f" (exit {exit_code})" if exit_code is not None else "")
+            lines.append(
+                f"    {image.get('name')}:{image.get('version')} - "
+                f"{reason}{exit_text}")
+    return "\n".join(lines)
+
+
 def runScript():
     """Main entry point for SLURM setup validation script.
     
     Performs comprehensive validation of BIOMERO-SLURM integration
     including connectivity testing, workflow availability checking,
-    converter verification, and setup log retrieval.
+    converter verification, and structured image initialization status.
     
     Validation includes:
         - BIOMERO version information
         - SLURM cluster connectivity
-        - Available workflow models and pending downloads
+        - Exact READY, RUNNING, and FAILED image counts
         - Converter tool availability
         - Data file inventory
-        - Container build log retrieval and attachment
+        - Per-image array log and status location
     
-    Results are displayed to user and optionally attached as log files
-    to OMERO for administrative review.
+    Results are displayed to the user with concise per-image failure reasons.
     """
 
     client = scripts.client(
@@ -121,44 +146,21 @@ def runScript():
             message += f"\nConnected: {slurmClient.validate()}" + \
                     f"\n Slurm: {slurmClient}\n"
             models, data = slurmClient.get_all_image_versions_and_data_files()
-            
-            # Initialize pending models dictionary
-            pending = {}
-            # Iterate through slurm_model_repos to identify pending models
-            for model, repo in slurmClient.slurm_model_repos.items():
-                _, version = slurmClient.extract_parts_from_url(repo)
-                if model not in models:
-                    pending[model] = version
-                else:
-                    # Check versions for pending items
-                    if version not in models[model]:
-                        if model not in pending:
-                            pending[model] = [version]
-                        else:
-                            pending[model].append(version)    
-            
+            models = {name: versions for name, versions in models.items()
+                      if versions}
+            image_status = slurmClient.get_image_pull_status()
+            message += "\n" + format_image_pull_status(image_status)
             message += f"\n>> Available Models: {models}."
-            message += f"\n>>> Pending Models: {pending}."
             # Check converters:
             converters = slurmClient.list_available_converter_versions()
             message += f"\n>> Available Converters: {converters}."
             message += f"\n>> Available Data: {data}."
+            message += (
+                f"\n>> Per-image logs and structured status: "
+                f"{slurmClient.slurm_script_path}/image-pulls"
+            )
             
             logger.info(message)
-            # misuse get_logfile to get this sing.log
-            tup = slurmClient.get_logfile_from_slurm(slurm_job_id='',
-                                                     logfile=f"{slurmClient.slurm_images_path}/sing.log")
-            (dir, export_file, result) = tup
-            # little script hack here so we don't have to adjust the client
-            export_file = os.path.join(dir, "sing.log")
-            logger.debug(f"Pulled logfile {result.__dict__}")
-            # Upload logfile to Omero as Original File
-            mimetype = 'text/plain'
-            obj = client.upload(export_file, type=mimetype)
-            obj_id = obj.id.val
-            url = f"get_original_file/{obj_id}/"
-            client.setOutput("URL", wrap({"type": "URL", "href": url}))
-            message += f"\n>>Also pulled the singularity log, click the URL button above to view ({url})"
 
         client.setOutput("Message", rstring(str(message)))
 
