@@ -62,6 +62,7 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 ### Administrative Scripts (`admin/`)
 - **`SLURM_Init_environment.py`**: Initialize SLURM environment
 - **`SLURM_check_setup.py`**: Validate BIOMERO configuration
+- **`SLURM_Cownary.py`**: Run a fixed, admin-only lolcow cownary to verify SSH, Slurm scheduling, configured shared storage, and Singularity execution end to end. It accepts no command or path input and inherits BIOMERO's default partition, global `sbatch_*` settings, and configured Apptainer cache, temporary, and bind paths without allowing them to override the fixed cownary job scope.
 - **`Tail_logs.py`**: View recent BIOMERO log entries (admin only)
 - **`Example_Minimal_Slurm_Script.py`**: ⚠️ **Admin/example only** — runs ad-hoc SSH commands on the Slurm cluster from OMERO.web. Requires OMERO admin privileges. Note that a compromised admin account can already upload arbitrary scripts and reach the cluster that way, so this adds convenience rather than a new attack surface — but it's still not needed in production. See the note below.
 
@@ -267,6 +268,7 @@ For example, [__workflows/SLURM Run Workflow](https://github.com/NL-BioImaging/b
 - [`_data/SLURM Import Results`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Import_Results.py): to retrieve your Slurm job results back into OMERO as a zip, dataset or attachment. Datasets are in-place imported from remote storage via [BIOMERO.importer](https://github.com/NL-BioImaging/biomero.importer). Selected automatically when `IMPORTER_ENABLED=true`.
 
 Other example OMERO scripts are:
+- [`admin/SLURM Cownary`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/SLURM_Cownary.py): **Admin only** — submits the fixed `docker://godlovedc/lolcow` cownary through Slurm, waits for completion, and displays the hostname and cow in OMERO. It uses BIOMERO's configured Slurm destination, default partition, global job parameters, and Apptainer environment while accepting no user-supplied command or path.
 - [`_data/SLURM Get Update`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/SLURM_Get_Update.py): to run while you are waiting on a job to finish on Slurm; it will try to get a `%` progress from your job's logfile. Depends on your job/workflow logging a `%` of course.
 - [`_data/SLURM File Transfer`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/_data/_SLURM_File_Transfer.py): transfers a single OMERO FileAnnotation (e.g. model weights, a CSV) to the SLURM job's input directory. The returned SLURM path is injected as the CLI argument for the corresponding workflow parameter by `SLURM_Run_Workflow.py`.
 - [`admin/Example Minimal Slurm Script`](https://github.com/NL-BioImaging/biomero-scripts/blob/master/admin/Example_Minimal_Slurm_Script.py): ⚠️ **Admin only** — runs ad-hoc SSH commands on the Slurm cluster directly from OMERO. Useful for cluster diagnostics (`squeue`, `sinfo`, `ls`) and as a reference skeleton for building new admin scripts. Dangerous commands are blocked by pattern matching.

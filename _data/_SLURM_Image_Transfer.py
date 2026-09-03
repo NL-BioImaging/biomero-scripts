@@ -779,7 +779,7 @@ def canonical_inputs_from_sources(
         labels = label_components_by_object.get(object_id)
         if (
             object_type == "Image"
-            and labels is None
+            and not labels
             and storage_roots is not None
         ):
             try:
