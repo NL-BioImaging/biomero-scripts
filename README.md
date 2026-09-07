@@ -366,8 +366,13 @@ For advanced users who need custom processing:
 
 ### Monitoring and Debugging
 - **SLURM Check Setup**: Validate configuration and report per-image READY, RUNNING, or FAILED state
-- **SLURM Get Update**: Monitor job progress and retrieve logs
+- **SLURM Get Update**: Monitor workflow-job progress and retrieve its
+  `omero-<job-id>.log`; image initialization does not use this path
 - **SLURM Init Environment**: Initialize or update SLURM environment
+
+Image initialization logs are not combined into the legacy `sing.log`. Use
+**SLURM Check Setup** for structured per-image state and inspect the latest
+submission under `<slurm_script_path>/image-pulls` for its individual task logs.
 
 Legal
 -----
