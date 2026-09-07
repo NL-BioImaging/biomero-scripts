@@ -151,10 +151,10 @@ of current production behavior.
 
 ## Keep tests off the deployable branch
 
-The `master` branch is cloned directly into OMERO's recursively scanned
-`lib/scripts` directory by manual installations. Do not add Python test files or
-a `tests/` directory to `master`, because OMERO may expose them as runnable
-scripts.
+Every production branch can be cloned directly into OMERO's recursively scanned
+`lib/scripts` directory during development or deployment. Never add Python test
+files or a `tests/` directory to `master` **or a production feature branch**,
+because OMERO may expose them as runnable scripts.
 
 The canonical test harness lives on the separate `test-suite` branch. The
 workflow at `.github/workflows/tests.yml` checks out the triggering `master` or
@@ -164,7 +164,9 @@ the source snapshot on its own branch.
 
 When production behavior changes:
 
-1. Make the production edit on `master` or its feature branch.
+1. Make only the production edit on `master` or its feature branch. A pull
+   request branch must remain test-file-free even when its tests are temporary,
+   disabled in CI, or intended to be run only by hand.
 2. Use a separate worktree checked out to `test-suite`; never merge
    `test-suite` into `master`.
 3. Add or update tests under `tests/` in that worktree. Tests must resolve the
@@ -179,11 +181,23 @@ python -m pytest tests -q
 ```
 
 5. Commit and push production and test changes to their respective branches.
-   Keep `tests/requirements.txt` on `test-suite` aligned with test dependencies.
+   If CI cannot select feature-specific tests yet, keep those tests on
+   `test-suite` and run the relevant files manually with
+   `BIOMERO_SCRIPTS_ROOT` pointed at the feature worktree. Do not solve the CI
+   limitation by copying tests into the production branch. Keep
+   `tests/requirements.txt` on `test-suite` aligned with test dependencies.
 
 The workflow runs for pull requests and pushes to `master`. Coordinate test
 branch updates with production pull requests so the required check exercises
 the intended behavior.
+
+Keep the harness runtime aligned with the `biomero` library that the scripts
+execute against. The scripts cannot support a Python version below biomero's
+declared minimum. Use released dependency ranges in the shared
+`tests/requirements.txt`; never make the global harness depend on another
+repository's feature branch. If a cross-repository feature is not released
+yet, keep its tests disabled by default and run them manually in a compatible
+environment until the dependency has been published and merged.
 
 ## Keep cross-repository documentation aligned
 

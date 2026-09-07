@@ -76,7 +76,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 OBJECT_TYPES = (
     'Plate',
@@ -1650,6 +1650,54 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, w
     return message
 
 
+def resolve_non_image_output_targets(
+        target_mode, configured_input_targets, result_destination_target,
+        input_container_fallback=None):
+    """Resolve file-annotation containers for the classic result route."""
+    input_targets = list(
+        configured_input_targets or input_container_fallback or [])
+    mode = target_mode or "legacy_input_container"
+    if mode in ("auto", "result_destination") \
+            and result_destination_target is not None:
+        return [result_destination_target]
+    if mode == "input_parent":
+        parents = []
+        seen = set()
+        for target in input_targets:
+            try:
+                target_parents = list(target.listParents())
+            except Exception:
+                target_parents = []
+            for parent in target_parents:
+                try:
+                    identity = (parent.__class__.__name__, parent.getId())
+                except Exception:
+                    identity = id(parent)
+                if identity not in seen:
+                    parents.append(parent)
+                    seen.add(identity)
+        if parents:
+            return parents
+    return input_targets
+
+
+def resolve_classic_result_destination(client, conn):
+    """Return the Dataset selected or created for classic image results."""
+    if not unwrap(client.getInput(
+            constants.results.OUTPUT_ATTACH_NEW_DATASET)):
+        return None
+    explicit_id = unwrap(client.getInput(
+        constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
+    if explicit_id:
+        return conn.getObject("Dataset", int(explicit_id))
+    name = unwrap(client.getInput(
+        constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
+    if not name:
+        return None
+    return next(iter(conn.getObjects(
+        "Dataset", attributes={"name": name})), None)
+
+
 def process_non_image_file_outputs(
     conn,
     folder: str,
@@ -2067,6 +2115,14 @@ def runScript():
                          grouping="08",
                          description="Attach individual non-image output files (e.g. NumPy arrays, model weights, JSON/YAML configs) as OMERO file annotations. Bilayers workflows with 'array', 'file', or 'executable' output types benefit most from this option. Images and CSVs are handled separately.",
                          default=False),
+            scripts.String(
+                constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET,
+                optional=True,
+                grouping="08",
+                description="Container selection policy for non-image file outputs.",
+                values=[rstring(value) for value in
+                        constants.file_output_targets.USER_VALUES],
+                default=constants.file_output_targets.INPUT_CONTAINER),
             scripts.Bool(constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_DATASET,
                          optional=True,
                          grouping="08.1",
@@ -2422,6 +2478,16 @@ def runScript():
                                     if plate_ids:
                                         file_output_targets += [conn.getObject("Plate", p.split(":")[0]) for p in plate_ids]
                                 file_output_targets = [t for t in file_output_targets if t is not None]
+                                file_output_target_mode = unwrap(client.getInput(
+                                    constants.results.OUTPUT_ATTACH_FILE_OUTPUTS_TARGET))
+                                result_destination_target = (
+                                    resolve_classic_result_destination(
+                                        client, conn))
+                                file_output_targets = resolve_non_image_output_targets(
+                                    file_output_target_mode,
+                                    file_output_targets,
+                                    result_destination_target,
+                                )
                                 file_outputs_message = process_non_image_file_outputs(
                                     conn, folder, file_output_targets, slurm_job_id,
                                     metadata_files=metadata_files, wf_id=wf_id)
