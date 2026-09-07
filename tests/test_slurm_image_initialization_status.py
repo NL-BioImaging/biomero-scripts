@@ -74,3 +74,24 @@ def test_initializer_reports_array_id_and_initial_counts():
     assert "READY: 15" in message
     assert "RUNNING: 1" in message
     assert "FAILED: 0" in message
+
+
+def test_check_setup_uses_structured_image_status_not_legacy_log():
+    source = CHECK_SCRIPT.read_text(encoding="utf-8")
+
+    assert "slurmClient.get_image_pull_status()" in source
+    assert "format_image_pull_status(image_status)" in source
+    assert "slurmClient.slurm_script_path}/image-pulls" in source
+    assert "get_logfile_from_slurm" not in source
+    assert "sing.log" not in source
+
+
+def test_initializer_submits_one_combined_array_and_reads_its_status():
+    source = INIT_SCRIPT.read_text(encoding="utf-8")
+
+    assert "converter_specs = slurmClient.prepare_converters()" in source
+    assert "extra_image_specs=converter_specs" in source
+    assert "image_array_id = slurmClient.setup_container_images(" in source
+    assert "image_status = slurmClient.get_image_pull_status()" in source
+    assert "get_logfile_from_slurm" not in source
+    assert "sing.log" not in source
