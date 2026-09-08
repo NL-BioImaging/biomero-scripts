@@ -40,6 +40,21 @@ logger = logging.getLogger(__name__)
 VERSION = "2.9.0"
 
 
+def format_image_submission(array_job_id, status):
+    """Format the scheduler-native image initialization summary."""
+    counts = status.get("counts", {})
+    if array_job_id is None:
+        first_line = "Image pull array ID: none (all images already valid)"
+    else:
+        first_line = f"Image pull array ID: {array_job_id}"
+    return (
+        f"{first_line}\n"
+        f"Image status — READY: {counts.get('READY', 0)}, "
+        f"RUNNING: {counts.get('RUNNING', 0)}, "
+        f"FAILED: {counts.get('FAILED', 0)}"
+    )
+
+
 def runScript():
     """Main entry point for SLURM environment initialization script.
     
@@ -122,6 +137,7 @@ def runScript():
             if not configfile:
                 configfile = ''
             with SlurmClient.from_config(configfile=configfile) as slurmClient:
+                image_array_id = None
                 # Override analytics rebuild window if provided via UI
                 if rebuild_days_ago is not None:
                     slurmClient.analytics_rebuild_days_ago = int(rebuild_days_ago)
@@ -138,41 +154,34 @@ def runScript():
                     slurmClient.setup_job_scripts()
                     conn.keepAlive()
 
-                    # 3. Setup converters
-                    slurmClient.setup_converters()
+                    # 3. Stage converters. Their images are submitted together
+                    # with workflow images so one concurrency limit covers all
+                    # container builds.
+                    converter_specs = slurmClient.prepare_converters()
                     conn.keepAlive()
 
-                    # 4. Download workflow images
-                    slurmClient.setup_container_images()
+                    # 4. Submit one bounded workflow + converter image array.
+                    image_array_id = slurmClient.setup_container_images(
+                        extra_image_specs=converter_specs)
                     conn.keepAlive()
                     
                     # 5. Reset db views
                     slurmClient.initialize_analytics_system(reset_tables=reset_view_tables)
                     conn.keepAlive()
-                message = "Slurm is almost set up. " + \
-                    "It will now download and build " + \
-                    "all the requested workflow images." + \
-                    " This might take a while!" + \
-                    " You can check progress with the " + \
-                    "'SLURM check setup' script. "
+                image_status = slurmClient.get_image_pull_status()
+                message = (
+                    "Slurm directories and scripts are set up.\n" +
+                    format_image_submission(image_array_id, image_status) +
+                    "\nUse 'SLURM check setup' for per-image failures and "
+                    "updated state."
+                )
                 models, _ = slurmClient.get_all_image_versions_and_data_files()
-                filtered_models = {key: value for key, value in models.items() if any(v != '' for v in value)}
-                
-                # Initialize pending models dictionary
-                pending = {}
-                # Iterate through slurm_model_repos to identify pending models
-                for model, repo in slurmClient.slurm_model_repos.items():
-                    _, version = slurmClient.extract_parts_from_url(repo)
-                    if model not in models:
-                        pending[model] = version
-                    else:
-                        # Check versions for pending items
-                        if version not in models[model]:
-                            if model not in pending:
-                                pending[model] = [version]
-                            else:
-                                pending[model].append(version)  
-                message += f">> These workflows are already available now: {filtered_models}. \nThese are still pending: {pending}"
+                filtered_models = {
+                    key: value for key, value in models.items() if value}
+                message += (
+                    f"\nValidated workflow versions currently available: "
+                    f"{filtered_models}"
+                )
 
         client.setOutput("Message", rstring(str(message)))
 

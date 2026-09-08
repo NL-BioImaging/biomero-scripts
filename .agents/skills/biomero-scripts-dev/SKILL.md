@@ -79,6 +79,13 @@ The worker selects the result script at runtime:
   for restricted ad-hoc HPC commands. NL-BIOMERO removes it from production
   images by default; do not broaden access or install it by default.
 
+Image initialization has its own structured status and per-task logs. Keep
+`SLURM_Init_environment.py` and `SLURM_check_setup.py` on the
+`setup_container_images()` / `get_image_pull_status()` path, and point operators
+to `<slurm_script_path>/image-pulls`. Never retrieve or upload the removed shared
+`sing.log`. `SLURM_Get_Update.py` is for ordinary workflow-job logs such as
+`omero-<job-id>.log`, not image initialization.
+
 ## Keep releases locked to the BIOMERO library
 
 Treat every script's `VERSION` as locked to the `biomero` library version that
@@ -186,6 +193,9 @@ python -m pytest tests -q
    `BIOMERO_SCRIPTS_ROOT` pointed at the feature worktree. Do not solve the CI
    limitation by copying tests into the production branch. Keep
    `tests/requirements.txt` on `test-suite` aligned with test dependencies.
+   Open feature-specific test pull requests as drafts, with an explicit
+   dependency/merge-order note, until their production change and any
+   cross-repository dependency are available to the canonical harness.
 
 The workflow runs for pull requests and pushes to `master`. Coordinate test
 branch updates with production pull requests so the required check exercises
