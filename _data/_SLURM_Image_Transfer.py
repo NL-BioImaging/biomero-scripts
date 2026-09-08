@@ -65,7 +65,7 @@ import os
 from pathlib import Path
 import glob
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
 from time import monotonic
 import logging
@@ -1781,6 +1781,20 @@ def compress(
     shutil.make_archive(base_name, ext, base)
 
 
+def run_with_keepalive(operation, keepalive, keepalive_interval=60):
+    """Run a blocking non-OMERO operation while preserving the OMERO session."""
+    with ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="biomero-blocking-operation",
+    ) as executor:
+        future = executor.submit(operation)
+        while True:
+            try:
+                return future.result(timeout=keepalive_interval)
+            except FutureTimeoutError:
+                keepalive()
+
+
 def save_plane(image, format, c_name, z_range, project_z, t=0,
                channel=None,
                greyscale=False, zoom_percent=None, folder_name=None):
@@ -2756,7 +2770,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     # Copy to SLURM
     transfer_successful = False
     try:
-        r = slurmClient.transfer_data(Path(export_file))
+        r = run_with_keepalive(
+            lambda: slurmClient.transfer_data(Path(export_file)),
+            conn.keepAlive,
+        )
         logger.debug(r)
         if hasattr(r, 'ok') and not r.ok:
             error_msg = (
@@ -2775,7 +2792,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     unpack_successful = False
     if transfer_successful:
         try:
-            unpack_result = slurmClient.unpack_data(folder_name)
+            unpack_result = run_with_keepalive(
+                lambda: slurmClient.unpack_data(folder_name),
+                conn.keepAlive,
+            )
             logger.debug(unpack_result.stdout)
             if not unpack_result.ok:
                 error_msg = f"Error unpacking data on SLURM: {unpack_result.stderr}"
