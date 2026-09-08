@@ -77,10 +77,17 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 
 ### Optional detached execution
 
+> **New in BIOMERO.scripts 2.9:** `BIOMERO_DETACHED_WORKFLOWS` is an opt-in
+> feature flag. Installing the updated scripts does not change existing
+> workflow behavior while
+> `BIOMERO_DETACHED_WORKFLOWS` is absent or false. Existing and custom
+> deployments remain inline until an administrator enables the feature and
+> provides the required background worker supervisor.
+
 Set `BIOMERO_DETACHED_WORKFLOWS=true` only when the deployment also provides a
 compatible detached workflow supervisor, such as the `biomeroworker` in
 NL-BIOMERO. `SLURM_Run_Workflow.py` and its batched variant then validate and
-durably queue the request before returning. The supervisor performs transfer,
+queue the request before returning. The supervisor performs transfer,
 conversion, Slurm monitoring, and result import in the background.
 
 Once the script reports that the workflow is queued in the background, the run
@@ -92,7 +99,7 @@ OMERO-side transfer or import subprocess. If detached mode is absent, disabled,
 or unsupported by the installed BIOMERO library, the scripts retain their
 established inline behavior and the session must remain active.
 
-See the [NL-BIOMERO detached-workflow administrator guide](https://nl-bioimaging.github.io/NL-BIOMERO/sysadmin/detached-workflows.html)
+See the [NL-BIOMERO detached-workflow administrator guide](https://nl-bioimaging.github.io/NL-BIOMERO/latest/sysadmin/detached-workflows.html)
 for deployment, recovery, and verification details.
 
 ### Dynamic Import Script Selection
