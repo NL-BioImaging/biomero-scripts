@@ -65,6 +65,7 @@ import os
 from pathlib import Path
 import glob
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from time import monotonic
 import logging
@@ -675,6 +676,7 @@ def build_canonical_plate_source(
     identity_provider=None,
     keepalive=None,
     keepalive_interval=60,
+    identity_workers=None,
 ):
     """Hash every declared Plate image and label node into one cache record."""
     root = Path(zarr_path)
@@ -683,19 +685,16 @@ def build_canonical_plate_source(
     if not image_nodes:
         raise ValueError(f"Canonical Plate Zarr has no image nodes: {root}")
     provider = identity_provider or IsccBioIdentityProvider()
-    identities = {}
-    last_keepalive = monotonic()
-    for node in nodes:
-        if (
-            keepalive is not None
-            and monotonic() - last_keepalive >= keepalive_interval
-        ):
-            if not keepalive():
-                raise ConnectionError(
-                    "Lost the OMERO connection while indexing the canonical "
-                    "Plate Zarr"
-                )
-            last_keepalive = monotonic()
+    if identity_workers is None:
+        identity_workers = int(os.getenv("BIOMERO_SHALLOW_ZARR_WORKERS", "4"))
+    if (
+        isinstance(identity_workers, bool)
+        or not isinstance(identity_workers, int)
+        or identity_workers < 1
+    ):
+        raise ValueError("Identity workers must be a positive integer")
+
+    def generate_identity(node):
         guard = read_zarr_v2_semantic_guard(root, node.node_path)
         logger.info(
             "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
@@ -712,7 +711,6 @@ def build_canonical_plate_source(
             axes=guard.axes,
             coordinate_transformations=guard.coordinate_transformations,
         )
-        identities[node.node_path] = identity
         logger.info(
             "Calculated Plate %s %s identity: node=%s, ISCC=%s, "
             "Data-Code=%s, Instance-Code=%s",
@@ -723,6 +721,28 @@ def build_canonical_plate_source(
             identity.data_code,
             identity.instance_code,
         )
+        return node.node_path, identity
+
+    identities = {}
+    last_keepalive = monotonic()
+    with ThreadPoolExecutor(
+        max_workers=min(identity_workers, len(nodes)),
+        thread_name_prefix="biomero-iscc",
+    ) as executor:
+        # map preserves discovery order in the canonical manifest even though
+        # the identity work and its diagnostic logging happen concurrently.
+        for node_path, identity in executor.map(generate_identity, nodes):
+            identities[node_path] = identity
+            if (
+                keepalive is not None
+                and monotonic() - last_keepalive >= keepalive_interval
+            ):
+                if not keepalive():
+                    raise ConnectionError(
+                        "Lost the OMERO connection while indexing the "
+                        "canonical Plate Zarr"
+                    )
+                last_keepalive = monotonic()
 
     # The final annotation write needs the same gateway connection. Refresh it
     # even when a small Plate completed before the periodic interval elapsed.
