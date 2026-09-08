@@ -2807,29 +2807,24 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             logger.error(f"Critical error: Unzipping on SLURM failed: {e}")
             raise Exception(f"Data unpacking on SLURM failed: {e}") from e
     
-    file_annotation, ann_message = script_utils.create_link_file_annotation(
-        conn, export_file, parent, output=output_display_name,
-        namespace=namespace, mimetype=mimetype)
-    message += ann_message
-    
-    # Clean up file annotation if transfer and unpack were successful AND cleanup is enabled
     cleanup_enabled = script_params.get("Cleanup?", True)
-    if transfer_successful and unpack_successful and file_annotation and cleanup_enabled:
-        try:
-            conn.deleteObjects("FileAnnotation", [file_annotation.id],
-                               deleteAnns=True, deleteChildren=True, wait=True)
-            message += ("Temporary file annotation cleaned up after "
-                        "successful transfer.\n")
-            logger.info(f"Cleaned up file annotation {file_annotation.id}")
-            # Return None to indicate cleanup was done
-            file_annotation = None
-        except Exception as cleanup_error:
-            # Cleanup failure is non-critical - log warning but don't fail script
-            logger.warning(f"Failed to cleanup file annotation: "
-                           f"{cleanup_error}")
-            message += (f"Warning: Could not cleanup temporary file "
-                        f"annotation: {cleanup_error}\n")
-    elif transfer_successful and unpack_successful and file_annotation and not cleanup_enabled:
+    file_annotation = None
+    if transfer_successful and unpack_successful and cleanup_enabled:
+        message += (
+            "Temporary OMERO archive attachment skipped because transfer "
+            "and unpack completed and cleanup is enabled.\n"
+        )
+        logger.info(
+            "Skipped temporary OMERO archive attachment after successful "
+            "transfer and unpack because cleanup is enabled"
+        )
+    else:
+        file_annotation, ann_message = script_utils.create_link_file_annotation(
+            conn, export_file, parent, output=output_display_name,
+            namespace=namespace, mimetype=mimetype)
+        message += ann_message
+
+    if transfer_successful and unpack_successful and file_annotation and not cleanup_enabled:
         message += ("File annotation preserved in OMERO as requested. "
                     "You can download the zip/ZARR from the attachments.\n")
         logger.info(f"File annotation {file_annotation.id} preserved for download")
