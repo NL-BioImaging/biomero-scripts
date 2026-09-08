@@ -1648,13 +1648,135 @@ def log(text):
     logger.debug(str(text))
 
 
-def compress(target, base):
+def _write_zip_tree(
+    archive,
+    source,
+    archive_prefix="",
+    keepalive=None,
+    keepalive_interval=60,
+    last_keepalive=None,
+    excluded_names=(),
+):
+    """Write a directory tree to an archive without staging another copy."""
+    source = Path(source).resolve()
+    excluded_names = set(excluded_names)
+    if last_keepalive is None:
+        last_keepalive = monotonic()
+
+    for root, directories, files in os.walk(source):
+        directories[:] = [
+            name for name in directories if name not in excluded_names
+        ]
+        root_path = Path(root)
+        relative_root = root_path.relative_to(source)
+        archive_root = Path(archive_prefix) / relative_root
+
+        if not directories and not files:
+            archive.writestr(
+                archive_root.as_posix().rstrip("/") + "/",
+                b"",
+                compress_type=zipfile.ZIP_STORED,
+            )
+
+        for filename in files:
+            if filename in excluded_names:
+                continue
+            path = root_path / filename
+            archive.write(
+                path,
+                (archive_root / filename).as_posix(),
+                compress_type=zipfile.ZIP_STORED,
+            )
+
+            if (
+                keepalive is not None
+                and monotonic() - last_keepalive >= keepalive_interval
+            ):
+                keepalive()
+                last_keepalive = monotonic()
+
+    return last_keepalive
+
+
+def compress(
+    target,
+    base,
+    direct_directory_sources=None,
+    keepalive=None,
+    keepalive_interval=60,
+):
     """Create a ZIP archive recursively from a given base directory.
     
     Args:
         target (str): Name of the zip file to write (e.g., "folder.zip").
         base (str): Name of folder to zip up (e.g., "folder").
+        direct_directory_sources (dict, optional): Mapping of a directory name
+            in ``base`` to an existing source tree. The source is archived
+            directly and files in the placeholder directory are overlaid on
+            it. This avoids duplicating large managed Zarr stores locally.
+        keepalive (callable, optional): OMERO session keepalive callback used
+            while walking large directory trees.
     """
+    direct_directory_sources = direct_directory_sources or {}
+    if direct_directory_sources:
+        base_path = Path(base).resolve()
+        direct_names = set(direct_directory_sources)
+        last_keepalive = monotonic()
+        archive_started = monotonic()
+        logger.info(
+            "Creating direct ZIP %s from %s managed director%s without a "
+            "local data copy",
+            target,
+            len(direct_directory_sources),
+            "y" if len(direct_directory_sources) == 1 else "ies",
+        )
+        with zipfile.ZipFile(target, "w", allowZip64=True) as archive:
+            for name, source in direct_directory_sources.items():
+                last_keepalive = _write_zip_tree(
+                    archive,
+                    source,
+                    archive_prefix=name,
+                    keepalive=keepalive,
+                    keepalive_interval=keepalive_interval,
+                    last_keepalive=last_keepalive,
+                    excluded_names=(".biomero-canonical.json",),
+                )
+            for entry in base_path.iterdir():
+                if entry.name in direct_names:
+                    if entry.is_dir():
+                        last_keepalive = _write_zip_tree(
+                            archive,
+                            entry,
+                            archive_prefix=entry.name,
+                            keepalive=keepalive,
+                            keepalive_interval=keepalive_interval,
+                            last_keepalive=last_keepalive,
+                        )
+                    continue
+                if entry.is_dir():
+                    last_keepalive = _write_zip_tree(
+                        archive,
+                        entry,
+                        archive_prefix=entry.name,
+                        keepalive=keepalive,
+                        keepalive_interval=keepalive_interval,
+                        last_keepalive=last_keepalive,
+                    )
+                else:
+                    archive.write(
+                        entry,
+                        entry.name,
+                        compress_type=zipfile.ZIP_STORED,
+                    )
+        if keepalive is not None:
+            keepalive()
+        logger.info(
+            "Created direct ZIP %s in %.3f seconds",
+            target,
+            monotonic() - archive_started,
+        )
+        return
+
     base_name, ext = target.rsplit(".", 1)
     shutil.make_archive(base_name, ext, base)
 
@@ -1798,6 +1920,7 @@ def save_plate_as_zarr(
     storage_roots=None,
     shallow_zarr_storage=False,
     reconstruct_shallow_zarr=True,
+    direct_directory_sources=None,
 ):
     """Export plate as ZARR format using omero-cli-zarr.
     
@@ -1824,6 +1947,7 @@ def save_plate_as_zarr(
         storage_roots,
         shallow_zarr_storage,
         reconstruct_shallow_zarr,
+        direct_directory_sources,
     )
 
 
@@ -1837,6 +1961,7 @@ def save_image_as_zarr(
     storage_roots=None,
     shallow_zarr_storage=False,
     reconstruct_shallow_zarr=True,
+    direct_directory_sources=None,
 ):
     """Export image as ZARR format using omero-cli-zarr.
     
@@ -1858,6 +1983,7 @@ def save_image_as_zarr(
         storage_roots,
         shallow_zarr_storage,
         reconstruct_shallow_zarr,
+        direct_directory_sources,
     )
     
 
@@ -1899,6 +2025,7 @@ def save_as_zarr(
     storage_roots=None,
     shallow_zarr_storage=False,
     reconstruct_shallow_zarr=True,
+    direct_directory_sources=None,
 ):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
@@ -2045,13 +2172,19 @@ def save_as_zarr(
                     exc,
                     exc_info=True,
                 )
-        log(" Copying file as: %s" % img_name)
-        shutil.copytree(
-            source_path,
-            img_name,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
-        )
+        if direct_directory_sources is not None:
+            artifact = os.path.basename(img_name)
+            os.makedirs(img_name, exist_ok=True)
+            direct_directory_sources[artifact] = source_path
+            log(" Packaging existing Zarr directly as: %s" % img_name)
+        else:
+            log(" Copying file as: %s" % img_name)
+            shutil.copytree(
+                source_path,
+                img_name,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+            )
     else:
         if canonical_source is None:
             if data_type == constants.transfer.DATA_TYPE_IMAGE:
@@ -2299,6 +2432,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     canonical_inputs = ()
     canonical_sources = {}
     transfer_artifacts = {}
+    direct_directory_sources = {}
     label_components_by_object = {}
     storage_roots = {}
     shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
@@ -2464,6 +2598,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
                 reconstruct_shallow_zarr=reconstruct_shallow_zarr,
+                direct_directory_sources=direct_directory_sources,
             )
             object_id = int(plate.getId())
             transfer_artifacts[object_id] = transfer_artifact
@@ -2502,6 +2637,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
                 reconstruct_shallow_zarr=reconstruct_shallow_zarr,
+                direct_directory_sources=direct_directory_sources,
             )
             object_id = int(img.getId())
             transfer_artifacts[object_id] = transfer_artifact
@@ -2607,7 +2743,12 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         mimetype = 'image/tiff'
     else:
         export_file = "%s.zip" % folder_name
-        compress(export_file, folder_name)
+        compress(
+            export_file,
+            folder_name,
+            direct_directory_sources=direct_directory_sources,
+            keepalive=conn.keepAlive,
+        )
         mimetype = 'application/zip'
         output_display_name = f"Batch export zip '{folder_name}'"
         namespace = NSCREATED + "/omero/export_scripts/Batch_Image_Export"
