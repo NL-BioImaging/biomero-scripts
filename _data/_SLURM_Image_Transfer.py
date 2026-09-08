@@ -66,6 +66,7 @@ from pathlib import Path
 import glob
 import zipfile
 from datetime import datetime
+from time import monotonic
 import logging
 try:
     from PIL import Image  # see ticket:2597
@@ -672,6 +673,8 @@ def build_canonical_plate_source(
     *,
     source_generation=1,
     identity_provider=None,
+    keepalive=None,
+    keepalive_interval=60,
 ):
     """Hash every declared Plate image and label node into one cache record."""
     root = Path(zarr_path)
@@ -681,7 +684,18 @@ def build_canonical_plate_source(
         raise ValueError(f"Canonical Plate Zarr has no image nodes: {root}")
     provider = identity_provider or IsccBioIdentityProvider()
     identities = {}
+    last_keepalive = monotonic()
     for node in nodes:
+        if (
+            keepalive is not None
+            and monotonic() - last_keepalive >= keepalive_interval
+        ):
+            if not keepalive():
+                raise ConnectionError(
+                    "Lost the OMERO connection while indexing the canonical "
+                    "Plate Zarr"
+                )
+            last_keepalive = monotonic()
         guard = read_zarr_v2_semantic_guard(root, node.node_path)
         logger.info(
             "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
@@ -708,6 +722,13 @@ def build_canonical_plate_source(
             identity.iscc_code,
             identity.data_code,
             identity.instance_code,
+        )
+
+    # The final annotation write needs the same gateway connection. Refresh it
+    # even when a small Plate completed before the periodic interval elapsed.
+    if keepalive is not None and not keepalive():
+        raise ConnectionError(
+            "Lost the OMERO connection while indexing the canonical Plate Zarr"
         )
 
     relative_path = Path(relative_path).as_posix()
@@ -1405,6 +1426,7 @@ def index_existing_plate_zarr(
         relative_path,
         source_generation=source_generation,
         identity_provider=identity_provider,
+        keepalive=conn.keepAlive,
     )
     write_indexed_canonical_marker(existing_path, source)
     attach_canonical_plate_source(
@@ -1458,6 +1480,7 @@ def promote_exported_plate_zarr(
         relative_path,
         source_generation=source_generation,
         identity_provider=identity_provider,
+        keepalive=conn.keepAlive,
     )
     committed = store.commit(export_path, source)
     attach_canonical_plate_source(
