@@ -1292,8 +1292,9 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
                     UI_messages += upload_job_log_to_omero(
                         client, conn, slurmClient, slurm_job_id, wf_id,
                         group)
-            conn.keepAlive()  # keep the connection alive
-            timesleep.sleep(10)
+            if slurm_job_id_list:
+                conn.keepAlive()  # keep the connection alive between polls
+                timesleep.sleep(10)
 
     # 7. Script output
     if wf_failed:
