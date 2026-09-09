@@ -1,9 +1,11 @@
 import ast
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
 from pathlib import Path
 import shutil
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -91,6 +93,8 @@ def _load_canonical_functions():
         "logging": logging,
         "logger": logging.getLogger(__name__),
         "log": lambda text: None,
+        "monotonic": monotonic,
+        "ThreadPoolExecutor": ThreadPoolExecutor,
         "load_canonical_marker": lambda _path: None,
         "write_indexed_canonical_marker": lambda *_args: None,
         "pixel_identities_match": lambda left, right: left == right,
@@ -993,13 +997,17 @@ def test_indexes_existing_plate_with_storage_marker_and_compact_annotation(
     })
     marker_writes = []
     annotation_writes = []
-    ns["build_canonical_plate_source"] = lambda *args, **kwargs: canonical
+    build_calls = []
+    connection = SimpleNamespace(keepAlive=lambda: True)
+    ns["build_canonical_plate_source"] = (
+        lambda *args, **kwargs: build_calls.append((args, kwargs)) or canonical
+    )
     ns["write_indexed_canonical_marker"] = (
         lambda path, source: marker_writes.append((Path(path), source))
     )
 
     indexed = ns["index_existing_plate_zarr"](
-        "connection",
+        connection,
         Object(9, []),
         existing,
         {"group-3-data": root},
@@ -1011,6 +1019,7 @@ def test_indexes_existing_plate_with_storage_marker_and_compact_annotation(
     assert indexed == canonical
     assert marker_writes == [(existing, canonical)]
     assert len(annotation_writes) == 1
+    assert build_calls[0][1]["keepalive"] is connection.keepAlive
     assert annotation_writes[0]["object_type"] == "Plate"
     assert annotation_writes[0]["ns"] == CANONICAL_PLATE_SOURCE_NAMESPACE
     assert "images" not in annotation_writes[0]["kv_dict"]
