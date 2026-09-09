@@ -81,6 +81,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -109,6 +110,10 @@ USE_INPLACE_ATTACHMENTS = os.getenv("USE_INPLACE_ATTACHMENTS", "true").lower() =
 logger = logging.getLogger(__name__)
 
 RESULTS_RETRIEVED_MARKER = ".biomero-results-retrieved.json"
+IMPORT_POLL_TIMEOUT_SECONDS = 24 * 60 * 60
+IMPORT_POLL_INTERVAL_SECONDS = 5
+IMPORT_POLL_BACKOFF_AFTER_SECONDS = 60
+IMPORT_POLL_MAX_INTERVAL_SECONDS = 60
 
 # OMERO processors download only the selected script into an isolated working
 # directory. Keep this integration self-contained for remote workers.
@@ -2501,14 +2506,23 @@ def create_upload_order(order_dict: Dict[str, Any]) -> None:
         raise
 
 
-def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600, poll_interval: int = 5) -> Tuple[bool, str]:
+def poll_import_status(
+    uuid: str,
+    conn: BlitzGateway = None,
+    timeout: int = IMPORT_POLL_TIMEOUT_SECONDS,
+    poll_interval: int = IMPORT_POLL_INTERVAL_SECONDS,
+    backoff_after: int = IMPORT_POLL_BACKOFF_AFTER_SECONDS,
+    max_poll_interval: int = IMPORT_POLL_MAX_INTERVAL_SECONDS,
+) -> Tuple[bool, str]:
     """Poll the importer database for import completion status.
 
     Args:
         uuid: The UUID of the import order to monitor
         conn: OMERO BlitzGateway connection (optional, for keepAlive in long polls)
-        timeout: Maximum time to wait in seconds (default: 1 hour)
-        poll_interval: Time between polls in seconds (default: 5 seconds)
+        timeout: Maximum time to wait in seconds (default: 24 hours)
+        poll_interval: Initial time between polls in seconds (default: 5)
+        backoff_after: Seconds without a stage change before polling backs off
+        max_poll_interval: Maximum time between polls in seconds (default: 60)
 
     Returns:
         Tuple of (success: bool, message: str)
@@ -2520,11 +2534,31 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
 
     # Ensure uuid is always a string to avoid PostgreSQL type casting issues
     uuid_str = str(uuid)
-    logger.info(f"Starting import status polling for UUID {uuid_str}")
+    logger.info(
+        "Starting import status polling for UUID %s (timeout=%ss, "
+        "initial interval=%ss, maximum interval=%ss)",
+        uuid_str,
+        timeout,
+        poll_interval,
+        max_poll_interval,
+    )
 
     try:
-        import time
-        start_time = time.time()
+        if timeout <= 0 or poll_interval <= 0 or backoff_after < 0:
+            raise ValueError(
+                "Polling timeout and interval must be positive, and "
+                "backoff_after cannot be negative"
+            )
+        if max_poll_interval < poll_interval:
+            raise ValueError(
+                "Maximum poll interval cannot be shorter than the initial "
+                "poll interval"
+            )
+
+        start_time = time.monotonic()
+        last_stage_change = start_time
+        last_observed_stage = object()
+        current_interval = float(poll_interval)
         tracker = get_ingest_tracker()
 
         if not tracker:
@@ -2532,7 +2566,8 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
 
         Session = tracker.Session
 
-        while (time.time() - start_time) < timeout:
+        while (time.monotonic() - start_time) < timeout:
+            observed_stage = None
             try:
                 with Session() as session:
                     # Get the latest status for this UUID
@@ -2544,22 +2579,28 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
                     if not latest_entry:
                         logger.warning(
                             f"No import entries found for UUID {uuid_str}")
-                        time.sleep(poll_interval)
-                        continue
+                    else:
+                        observed_stage = latest_entry.stage
+                        logger.debug(
+                            f"Current import stage for {uuid_str}: "
+                            f"{observed_stage}")
 
-                    current_stage = latest_entry.stage
-                    logger.debug(
-                        f"Current import stage for {uuid_str}: {current_stage}")
+                        if observed_stage == STAGE_IMPORTED:
+                            elapsed = time.monotonic() - start_time
+                            return True, (
+                                "Import completed successfully after "
+                                f"{elapsed:.1f} seconds"
+                            )
 
-                    if current_stage == STAGE_IMPORTED:
-                        elapsed = time.time() - start_time
-                        return True, f"Import completed successfully after {elapsed:.1f} seconds"
+                        if observed_stage == STAGE_INGEST_FAILED:
+                            error_msg = (
+                                latest_entry.description
+                                or "Import failed with unknown error"
+                            )
+                            return False, f"Import failed: {error_msg}"
 
-                    elif current_stage == STAGE_INGEST_FAILED:
-                        error_msg = latest_entry.description or "Import failed with unknown error"
-                        return False, f"Import failed: {error_msg}"
-
-                    # Still in progress (STAGE_NEW_ORDER, STAGE_INGEST_STARTED, etc.)
+                        # Still in progress (STAGE_NEW_ORDER,
+                        # STAGE_INGEST_STARTED, etc.).
 
             except Exception as db_error:
                 logger.warning(
@@ -2573,11 +2614,31 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
                     logger.warning(
                         f"Failed to keep OMERO connection alive: {keepalive_error}")
 
-            # Wait before next poll
-            time.sleep(poll_interval)
+            now = time.monotonic()
+            if observed_stage != last_observed_stage:
+                # Be responsive again whenever the importer advances.
+                last_observed_stage = observed_stage
+                last_stage_change = now
+                current_interval = float(poll_interval)
+            elif now - last_stage_change >= backoff_after:
+                current_interval = min(
+                    float(max_poll_interval),
+                    current_interval * 2,
+                )
+
+            remaining = timeout - (time.monotonic() - start_time)
+            if remaining <= 0:
+                break
+            sleep_for = min(current_interval, remaining)
+            logger.debug(
+                "Next importer status poll for %s in %.1f seconds",
+                uuid_str,
+                sleep_for,
+            )
+            time.sleep(sleep_for)
 
         # Timeout reached
-        elapsed = time.time() - start_time
+        elapsed = time.monotonic() - start_time
         return False, f"Import polling timed out after {elapsed:.1f} seconds"
 
     except Exception as e:
@@ -2587,8 +2648,8 @@ def poll_import_status(uuid: str, conn: BlitzGateway = None, timeout: int = 3600
 
 def wait_for_import_completion(upload_orders: List[Dict[str, Any]],
                                conn: BlitzGateway = None,
-                               timeout: int = 3600,
-                               poll_interval: int = 5,
+                               timeout: int = IMPORT_POLL_TIMEOUT_SECONDS,
+                               poll_interval: int = IMPORT_POLL_INTERVAL_SECONDS,
                                task_id: UUID = None,
                                slurmClient: SlurmClient = None) -> Tuple[bool, str, List[str]]:
     """Wait for completion of multiple import orders.
@@ -3625,11 +3686,10 @@ def process_importer_workflow(
         logger.info("Waiting for import completion...")
         message += f"\nWaiting for import completion of {len(orders)} orders..."
 
-        # Configure timeout - can be made configurable via script parameters if needed
-        import_timeout = 3600  # 1 hour default
-
         all_successful, summary, failed_uuids = wait_for_import_completion(
-            orders, conn, timeout=import_timeout, poll_interval=10,
+            orders, conn,
+            timeout=IMPORT_POLL_TIMEOUT_SECONDS,
+            poll_interval=IMPORT_POLL_INTERVAL_SECONDS,
             task_id=task_id, slurmClient=slurmClient)
 
         message += f"\n{summary}"
