@@ -114,6 +114,17 @@ IMPORT_POLL_TIMEOUT_SECONDS = 24 * 60 * 60
 IMPORT_POLL_INTERVAL_SECONDS = 5
 IMPORT_POLL_BACKOFF_AFTER_SECONDS = 60
 IMPORT_POLL_MAX_INTERVAL_SECONDS = 60
+SCRIPT_CLIENT_KEEPALIVE_SECONDS = 60
+
+
+def enable_script_client_keepalive(
+    client,
+    seconds: int = SCRIPT_CLIENT_KEEPALIVE_SECONDS,
+) -> None:
+    """Keep the OMERO script session alive during long local I/O stages."""
+    client.enableKeepAlive(seconds)
+    logger.info(
+        "Enabled OMERO script-client keepalive every %s seconds", seconds)
 
 # OMERO processors download only the selected script into an isolated working
 # directory. Keep this integration self-contained for remote workers.
@@ -4655,6 +4666,7 @@ def runScript() -> None:
             contact='cellularimaging@amsterdamumc.nl',
             authorsInstitutions=[[1]]
         )
+        enable_script_client_keepalive(client)
 
         try:
             # Initialize all variables that could be used in exception handling/cleanup
