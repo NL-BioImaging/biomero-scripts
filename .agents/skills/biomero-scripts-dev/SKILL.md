@@ -124,6 +124,22 @@ Run available targeted tests as well. If the checkout contains only cached test
 artifacts and no test source, report that limitation rather than claiming tests
 passed.
 
+## Keep tests off deployable branches
+
+Python tests belong only on the separate `test-suite` branch because OMERO
+recursively scans deployed script branches. Point `BIOMERO_SCRIPTS_ROOT` at the
+production feature worktree and run the complete harness before publishing
+either side.
+
+Tests that execute selected functions through an AST-built namespace must
+supply every imported global and a behaviorally realistic collaborator; a
+placeholder such as a string is not valid once production calls methods on that
+object. Because `test-suite` is shared and moving, make compatibility fixes pass
+against both the current remote source and the feature source. Capability-gate
+new feature assertions until the matching source commit is remotely available.
+After a harness-only push, explicitly rerun the affected production check:
+pushing `test-suite` does not trigger the pull-request workflow by itself.
+
 ## Keep cross-repository documentation aligned
 
 Update this repository's `README.md` when script roles, inputs, security,
