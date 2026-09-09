@@ -502,23 +502,54 @@ def find_supported_image_paths(base_path: str, recursive: bool = True) -> List[s
     Returns:
         List of paths to supported image files and directories.
     """
-    if recursive:
-        all_paths = glob.glob(os.path.join(base_path, "**", "*"), recursive=True)
-    else:
-        all_paths = glob.glob(os.path.join(base_path, "*"))
-    
     image_paths = []
+    supported_extensions = tuple(
+        extension.lower() for extension in SUPPORTED_IMAGE_EXTENSIONS
+    )
     logger.debug(f"Scanning for image files in: {base_path}")
-    logger.debug(f"Found {len(all_paths)} total paths to check")
-    
-    for path in all_paths:
-        for ext in SUPPORTED_IMAGE_EXTENSIONS:
-            if path.endswith(ext):
-                # Check if it's either a file or directory with supported extension
-                if os.path.isfile(path) or os.path.isdir(path):
+    checked_paths = 0
+
+    if not recursive:
+        paths = sorted(glob.glob(os.path.join(base_path, "*")))
+        checked_paths = len(paths)
+        for path in paths:
+            if (
+                path.lower().endswith(supported_extensions)
+                and (os.path.isfile(path) or os.path.isdir(path))
+            ):
+                logger.debug(f"Found supported image: {path}")
+                image_paths.append(path)
+    else:
+        # Zarr stores can contain hundreds of thousands of chunks and nested
+        # label arrays. Treat the outermost store as one image result and do
+        # not enumerate its implementation details. Other supported formats
+        # remain recursively discoverable anywhere outside a Zarr store.
+        for root, dirs, files in os.walk(base_path):
+            dirs.sort()
+            files.sort()
+
+            retained_dirs = []
+            for name in dirs:
+                path = os.path.join(root, name)
+                checked_paths += 1
+                if name.lower().endswith(".zarr"):
                     logger.debug(f"Found supported image: {path}")
                     image_paths.append(path)
-                    break  # Don't check other extensions for this path
+                    continue
+                if name.lower().endswith(supported_extensions):
+                    logger.debug(f"Found supported image: {path}")
+                    image_paths.append(path)
+                retained_dirs.append(name)
+            dirs[:] = retained_dirs
+
+            for name in files:
+                checked_paths += 1
+                if name.lower().endswith(supported_extensions):
+                    path = os.path.join(root, name)
+                    logger.debug(f"Found supported image: {path}")
+                    image_paths.append(path)
+
+    logger.debug(f"Found {checked_paths} total paths to check")
     
     logger.info(f"Found {len(image_paths)} supported image files/directories in {base_path}")            
     return image_paths
