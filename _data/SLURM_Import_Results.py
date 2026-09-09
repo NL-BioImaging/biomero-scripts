@@ -333,7 +333,17 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         return None
 
 
-def build_shallow_import_options(canonical_inputs, client=None):
+def normalize_remote_results(slurm_client, data_path, workflow_id):
+    """Administrator-only filesystem stage before result archiving."""
+    if not (getattr(slurm_client, "remote_shallow_zarr", False)
+            and IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+            and IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
+        return None
+    canonical = load_canonical_input_snapshot(slurm_client, workflow_id)
+    return slurm_client.normalize_results_on_slurm(data_path, workflow_id, canonical)
+
+
+def build_shallow_import_options(canonical_inputs, client=None, remote_receipts=()):
     """Build an importer-owned shallow operation or preserve legacy import."""
     if not (
         IMPORTER_ENABLED
@@ -354,11 +364,13 @@ def build_shallow_import_options(canonical_inputs, client=None):
     plate_label_name = (unwrap(client.getInput(
         constants.results.PLATE_LABEL_PREVIEW_NAME
     )) or "").strip() if client else ""
+    extra = {"remoteReceipts": remote_receipts} if remote_receipts else {}
     operation = ShallowZarrImportOperation(
         canonicalInputs=canonical_inputs,
         importImageLabelViews=True,
         importPlateLabelPreview=import_plate_preview,
         plateLabelName=(plate_label_name or None),
+        **extra,
     )
     envelope = ImportOptionsEnvelope(operations=(operation,))
     logger.info(
@@ -2110,6 +2122,9 @@ def extract_slurm_results_zip(
             f"SLURM output directory still empty after {poll_max_attempts * poll_interval}s: "
             f"{out_dir}. Job may have failed to write output.")
 
+    normalize_remote_results(slurmClient, slurm_data_path, wf_id)
+
+    # Archive-format extension point: normalization is independent of ZIP.
     # Create and copy zip archive from SLURM
     filename = f"{slurm_job_id}_out"
     logger.info(f"Creating and copying data archive from SLURM...")
@@ -2717,6 +2732,7 @@ def create_upload_orders_for_results(
     wf_id: UUID,
     client: Any = None,
     canonical_inputs=None,
+    remote_receipts=(),
 ) -> List[Dict[str, Any]]:
     """Create upload orders for SLURM results (images and optionally label zarrs).
 
@@ -2743,6 +2759,7 @@ def create_upload_orders_for_results(
     lifecycle_options = build_shallow_import_options(
         canonical_inputs,
         client,
+        **({"remote_receipts": remote_receipts} if remote_receipts else {}),
     )
     if lifecycle_options is not None:
         image_files = select_lifecycle_import_paths(results_path)
@@ -3670,9 +3687,13 @@ def process_importer_workflow(
 
     # Create upload order for images only
     logger.info("Creating upload orders for biomero-importer...")
+    remote_receipts = ()
+    if getattr(slurmClient, "remote_shallow_zarr", False) and canonical_inputs is not None:
+        remote_receipts = slurmClient.get_result_normalizer_receipts(wf_id, canonical_inputs)
     orders = create_upload_orders_for_results(
         group_name, username, destination_type, destination_id,
-        permanent_storage_path, wf_id, client, canonical_inputs)
+        permanent_storage_path, wf_id, client, canonical_inputs,
+        **({"remote_receipts": remote_receipts} if remote_receipts else {}))
 
     if orders:
         message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
