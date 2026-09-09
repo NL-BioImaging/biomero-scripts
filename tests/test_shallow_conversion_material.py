@@ -318,3 +318,58 @@ def test_workflow_forwards_zarr_preference_as_reconstruction_policy():
 
     assert "reconstruct_shallow_zarr=use_zarr_format" in source
     assert "constants.transfer.RECONSTRUCT_SHALLOW_ZARR" in source
+
+
+def test_shared_pipeline_owns_the_only_image_export():
+    """Detached launch must queue before shallow-Zarr reconstruction starts."""
+    tree = ast.parse(RUNNER_PATH.read_text(encoding="utf-8"))
+    pipeline = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "execute_workflow_pipeline"
+    )
+    pipeline_nodes = set(ast.walk(pipeline))
+    export_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "exportImageToSLURM"
+    ]
+
+    assert len(export_calls) == 1
+    assert export_calls[0] in pipeline_nodes
+    reconstruction = next(
+        keyword.value for keyword in export_calls[0].keywords
+        if keyword.arg == "reconstruct_shallow_zarr"
+    )
+    assert isinstance(reconstruction, ast.Name)
+    assert reconstruction.id == "use_zarr_format"
+
+
+def test_detached_launcher_records_zarr_execution_policy():
+    """The supervisor must receive the same Zarr choice as inline execution."""
+    tree = ast.parse(RUNNER_PATH.read_text(encoding="utf-8"))
+    run_script = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "runScript"
+    )
+    launcher = next(
+        node for node in ast.walk(run_script)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "detached"
+        and node.func.attr == "register_detached_launcher"
+    )
+    extra_params = launcher.args[6]
+    assert isinstance(extra_params, ast.Dict)
+    recorded = {
+        key.value: value
+        for key, value in zip(extra_params.keys, extra_params.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+
+    assert isinstance(recorded["use_zarr_format"], ast.Name)
+    assert recorded["use_zarr_format"].id == "use_zarr_format"
+    assert isinstance(recorded["ome_zarr_version"], ast.Name)
+    assert recorded["ome_zarr_version"].id == "ome_zarr_version"
