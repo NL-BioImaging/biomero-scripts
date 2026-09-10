@@ -65,7 +65,9 @@ import os
 from pathlib import Path
 import glob
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
+from time import monotonic
 import logging
 try:
     from PIL import Image  # see ticket:2597
@@ -672,6 +674,9 @@ def build_canonical_plate_source(
     *,
     source_generation=1,
     identity_provider=None,
+    keepalive=None,
+    keepalive_interval=60,
+    identity_workers=None,
 ):
     """Hash every declared Plate image and label node into one cache record."""
     root = Path(zarr_path)
@@ -680,8 +685,16 @@ def build_canonical_plate_source(
     if not image_nodes:
         raise ValueError(f"Canonical Plate Zarr has no image nodes: {root}")
     provider = identity_provider or IsccBioIdentityProvider()
-    identities = {}
-    for node in nodes:
+    if identity_workers is None:
+        identity_workers = int(os.getenv("BIOMERO_SHALLOW_ZARR_WORKERS", "4"))
+    if (
+        isinstance(identity_workers, bool)
+        or not isinstance(identity_workers, int)
+        or identity_workers < 1
+    ):
+        raise ValueError("Identity workers must be a positive integer")
+
+    def generate_identity(node):
         guard = read_zarr_v2_semantic_guard(root, node.node_path)
         logger.info(
             "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
@@ -698,7 +711,6 @@ def build_canonical_plate_source(
             axes=guard.axes,
             coordinate_transformations=guard.coordinate_transformations,
         )
-        identities[node.node_path] = identity
         logger.info(
             "Calculated Plate %s %s identity: node=%s, ISCC=%s, "
             "Data-Code=%s, Instance-Code=%s",
@@ -708,6 +720,35 @@ def build_canonical_plate_source(
             identity.iscc_code,
             identity.data_code,
             identity.instance_code,
+        )
+        return node.node_path, identity
+
+    identities = {}
+    last_keepalive = monotonic()
+    with ThreadPoolExecutor(
+        max_workers=min(identity_workers, len(nodes)),
+        thread_name_prefix="biomero-iscc",
+    ) as executor:
+        # map preserves discovery order in the canonical manifest even though
+        # the identity work and its diagnostic logging happen concurrently.
+        for node_path, identity in executor.map(generate_identity, nodes):
+            identities[node_path] = identity
+            if (
+                keepalive is not None
+                and monotonic() - last_keepalive >= keepalive_interval
+            ):
+                if not keepalive():
+                    raise ConnectionError(
+                        "Lost the OMERO connection while indexing the "
+                        "canonical Plate Zarr"
+                    )
+                last_keepalive = monotonic()
+
+    # The final annotation write needs the same gateway connection. Refresh it
+    # even when a small Plate completed before the periodic interval elapsed.
+    if keepalive is not None and not keepalive():
+        raise ConnectionError(
+            "Lost the OMERO connection while indexing the canonical Plate Zarr"
         )
 
     relative_path = Path(relative_path).as_posix()
@@ -1405,6 +1446,7 @@ def index_existing_plate_zarr(
         relative_path,
         source_generation=source_generation,
         identity_provider=identity_provider,
+        keepalive=conn.keepAlive,
     )
     write_indexed_canonical_marker(existing_path, source)
     attach_canonical_plate_source(
@@ -1458,6 +1500,7 @@ def promote_exported_plate_zarr(
         relative_path,
         source_generation=source_generation,
         identity_provider=identity_provider,
+        keepalive=conn.keepAlive,
     )
     committed = store.commit(export_path, source)
     attach_canonical_plate_source(
@@ -1605,15 +1648,151 @@ def log(text):
     logger.debug(str(text))
 
 
-def compress(target, base):
+def _write_zip_tree(
+    archive,
+    source,
+    archive_prefix="",
+    keepalive=None,
+    keepalive_interval=60,
+    last_keepalive=None,
+    excluded_names=(),
+):
+    """Write a directory tree to an archive without staging another copy."""
+    source = Path(source).resolve()
+    excluded_names = set(excluded_names)
+    if last_keepalive is None:
+        last_keepalive = monotonic()
+
+    for root, directories, files in os.walk(source):
+        directories[:] = [
+            name for name in directories if name not in excluded_names
+        ]
+        root_path = Path(root)
+        relative_root = root_path.relative_to(source)
+        archive_root = Path(archive_prefix) / relative_root
+
+        if not directories and not files:
+            archive.writestr(
+                archive_root.as_posix().rstrip("/") + "/",
+                b"",
+                compress_type=zipfile.ZIP_STORED,
+            )
+
+        for filename in files:
+            if filename in excluded_names:
+                continue
+            path = root_path / filename
+            archive.write(
+                path,
+                (archive_root / filename).as_posix(),
+                compress_type=zipfile.ZIP_STORED,
+            )
+
+            if (
+                keepalive is not None
+                and monotonic() - last_keepalive >= keepalive_interval
+            ):
+                keepalive()
+                last_keepalive = monotonic()
+
+    return last_keepalive
+
+
+def compress(
+    target,
+    base,
+    direct_directory_sources=None,
+    keepalive=None,
+    keepalive_interval=60,
+):
     """Create a ZIP archive recursively from a given base directory.
     
     Args:
         target (str): Name of the zip file to write (e.g., "folder.zip").
         base (str): Name of folder to zip up (e.g., "folder").
+        direct_directory_sources (dict, optional): Mapping of a directory name
+            in ``base`` to an existing source tree. The source is archived
+            directly and files in the placeholder directory are overlaid on
+            it. This avoids duplicating large managed Zarr stores locally.
+        keepalive (callable, optional): OMERO session keepalive callback used
+            while walking large directory trees.
     """
+    direct_directory_sources = direct_directory_sources or {}
+    if direct_directory_sources:
+        base_path = Path(base).resolve()
+        direct_names = set(direct_directory_sources)
+        last_keepalive = monotonic()
+        archive_started = monotonic()
+        logger.info(
+            "Creating direct ZIP %s from %s managed director%s without a "
+            "local data copy",
+            target,
+            len(direct_directory_sources),
+            "y" if len(direct_directory_sources) == 1 else "ies",
+        )
+        with zipfile.ZipFile(target, "w", allowZip64=True) as archive:
+            for name, source in direct_directory_sources.items():
+                last_keepalive = _write_zip_tree(
+                    archive,
+                    source,
+                    archive_prefix=name,
+                    keepalive=keepalive,
+                    keepalive_interval=keepalive_interval,
+                    last_keepalive=last_keepalive,
+                    excluded_names=(".biomero-canonical.json",),
+                )
+            for entry in base_path.iterdir():
+                if entry.name in direct_names:
+                    if entry.is_dir():
+                        last_keepalive = _write_zip_tree(
+                            archive,
+                            entry,
+                            archive_prefix=entry.name,
+                            keepalive=keepalive,
+                            keepalive_interval=keepalive_interval,
+                            last_keepalive=last_keepalive,
+                        )
+                    continue
+                if entry.is_dir():
+                    last_keepalive = _write_zip_tree(
+                        archive,
+                        entry,
+                        archive_prefix=entry.name,
+                        keepalive=keepalive,
+                        keepalive_interval=keepalive_interval,
+                        last_keepalive=last_keepalive,
+                    )
+                else:
+                    archive.write(
+                        entry,
+                        entry.name,
+                        compress_type=zipfile.ZIP_STORED,
+                    )
+        if keepalive is not None:
+            keepalive()
+        logger.info(
+            "Created direct ZIP %s in %.3f seconds",
+            target,
+            monotonic() - archive_started,
+        )
+        return
+
     base_name, ext = target.rsplit(".", 1)
     shutil.make_archive(base_name, ext, base)
+
+
+def run_with_keepalive(operation, keepalive, keepalive_interval=60):
+    """Run a blocking non-OMERO operation while preserving the OMERO session."""
+    with ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="biomero-blocking-operation",
+    ) as executor:
+        future = executor.submit(operation)
+        while True:
+            try:
+                return future.result(timeout=keepalive_interval)
+            except FutureTimeoutError:
+                keepalive()
 
 
 def save_plane(image, format, c_name, z_range, project_z, t=0,
@@ -1755,6 +1934,7 @@ def save_plate_as_zarr(
     storage_roots=None,
     shallow_zarr_storage=False,
     reconstruct_shallow_zarr=True,
+    direct_directory_sources=None,
 ):
     """Export plate as ZARR format using omero-cli-zarr.
     
@@ -1781,6 +1961,7 @@ def save_plate_as_zarr(
         storage_roots,
         shallow_zarr_storage,
         reconstruct_shallow_zarr,
+        direct_directory_sources,
     )
 
 
@@ -1794,6 +1975,7 @@ def save_image_as_zarr(
     storage_roots=None,
     shallow_zarr_storage=False,
     reconstruct_shallow_zarr=True,
+    direct_directory_sources=None,
 ):
     """Export image as ZARR format using omero-cli-zarr.
     
@@ -1815,6 +1997,7 @@ def save_image_as_zarr(
         storage_roots,
         shallow_zarr_storage,
         reconstruct_shallow_zarr,
+        direct_directory_sources,
     )
     
 
@@ -1856,6 +2039,7 @@ def save_as_zarr(
     storage_roots=None,
     shallow_zarr_storage=False,
     reconstruct_shallow_zarr=True,
+    direct_directory_sources=None,
 ):
     """Export OMERO object as ZARR using subprocess call to omero-cli-zarr.
     
@@ -2002,13 +2186,19 @@ def save_as_zarr(
                     exc,
                     exc_info=True,
                 )
-        log(" Copying file as: %s" % img_name)
-        shutil.copytree(
-            source_path,
-            img_name,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
-        )
+        if direct_directory_sources is not None:
+            artifact = os.path.basename(img_name)
+            os.makedirs(img_name, exist_ok=True)
+            direct_directory_sources[artifact] = source_path
+            log(" Packaging existing Zarr directly as: %s" % img_name)
+        else:
+            log(" Copying file as: %s" % img_name)
+            shutil.copytree(
+                source_path,
+                img_name,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+            )
     else:
         if canonical_source is None:
             if data_type == constants.transfer.DATA_TYPE_IMAGE:
@@ -2256,6 +2446,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     canonical_inputs = ()
     canonical_sources = {}
     transfer_artifacts = {}
+    direct_directory_sources = {}
     label_components_by_object = {}
     storage_roots = {}
     shallow_zarr_storage = is_shallow_zarr_storage_enabled(format)
@@ -2421,6 +2612,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
                 reconstruct_shallow_zarr=reconstruct_shallow_zarr,
+                direct_directory_sources=direct_directory_sources,
             )
             object_id = int(plate.getId())
             transfer_artifacts[object_id] = transfer_artifact
@@ -2459,6 +2651,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
                 storage_roots=storage_roots,
                 shallow_zarr_storage=shallow_zarr_storage,
                 reconstruct_shallow_zarr=reconstruct_shallow_zarr,
+                direct_directory_sources=direct_directory_sources,
             )
             object_id = int(img.getId())
             transfer_artifacts[object_id] = transfer_artifact
@@ -2564,7 +2757,12 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         mimetype = 'image/tiff'
     else:
         export_file = "%s.zip" % folder_name
-        compress(export_file, folder_name)
+        compress(
+            export_file,
+            folder_name,
+            direct_directory_sources=direct_directory_sources,
+            keepalive=conn.keepAlive,
+        )
         mimetype = 'application/zip'
         output_display_name = f"Batch export zip '{folder_name}'"
         namespace = NSCREATED + "/omero/export_scripts/Batch_Image_Export"
@@ -2572,7 +2770,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     # Copy to SLURM
     transfer_successful = False
     try:
-        r = slurmClient.transfer_data(Path(export_file))
+        r = run_with_keepalive(
+            lambda: slurmClient.transfer_data(Path(export_file)),
+            conn.keepAlive,
+        )
         logger.debug(r)
         if hasattr(r, 'ok') and not r.ok:
             error_msg = (
@@ -2591,7 +2792,10 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
     unpack_successful = False
     if transfer_successful:
         try:
-            unpack_result = slurmClient.unpack_data(folder_name)
+            unpack_result = run_with_keepalive(
+                lambda: slurmClient.unpack_data(folder_name),
+                conn.keepAlive,
+            )
             logger.debug(unpack_result.stdout)
             if not unpack_result.ok:
                 error_msg = f"Error unpacking data on SLURM: {unpack_result.stderr}"
@@ -2603,29 +2807,24 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             logger.error(f"Critical error: Unzipping on SLURM failed: {e}")
             raise Exception(f"Data unpacking on SLURM failed: {e}") from e
     
-    file_annotation, ann_message = script_utils.create_link_file_annotation(
-        conn, export_file, parent, output=output_display_name,
-        namespace=namespace, mimetype=mimetype)
-    message += ann_message
-    
-    # Clean up file annotation if transfer and unpack were successful AND cleanup is enabled
     cleanup_enabled = script_params.get("Cleanup?", True)
-    if transfer_successful and unpack_successful and file_annotation and cleanup_enabled:
-        try:
-            conn.deleteObjects("FileAnnotation", [file_annotation.id],
-                               deleteAnns=True, deleteChildren=True, wait=True)
-            message += ("Temporary file annotation cleaned up after "
-                        "successful transfer.\n")
-            logger.info(f"Cleaned up file annotation {file_annotation.id}")
-            # Return None to indicate cleanup was done
-            file_annotation = None
-        except Exception as cleanup_error:
-            # Cleanup failure is non-critical - log warning but don't fail script
-            logger.warning(f"Failed to cleanup file annotation: "
-                           f"{cleanup_error}")
-            message += (f"Warning: Could not cleanup temporary file "
-                        f"annotation: {cleanup_error}\n")
-    elif transfer_successful and unpack_successful and file_annotation and not cleanup_enabled:
+    file_annotation = None
+    if transfer_successful and unpack_successful and cleanup_enabled:
+        message += (
+            "Temporary OMERO archive attachment skipped because transfer "
+            "and unpack completed and cleanup is enabled.\n"
+        )
+        logger.info(
+            "Skipped temporary OMERO archive attachment after successful "
+            "transfer and unpack because cleanup is enabled"
+        )
+    else:
+        file_annotation, ann_message = script_utils.create_link_file_annotation(
+            conn, export_file, parent, output=output_display_name,
+            namespace=namespace, mimetype=mimetype)
+        message += ann_message
+
+    if transfer_successful and unpack_successful and file_annotation and not cleanup_enabled:
         message += ("File annotation preserved in OMERO as requested. "
                     "You can download the zip/ZARR from the attachments.\n")
         logger.info(f"File annotation {file_annotation.id} preserved for download")

@@ -12,6 +12,7 @@ These scripts provide a comprehensive OMERO integration for running bioimage ana
 - Comprehensive workflow tracking and monitoring
 - Automatic result import back to OMERO
 - Configurable output organization options
+- Optional detached execution that survives browser and requesting-session expiry
 
 These scripts work together with the [BIOMERO library](https://github.com/NL-BioImaging/biomero) to enable seamless bioimage analysis workflows directly from OMERO.
 
@@ -73,6 +74,33 @@ For new users, we recommend the NL-BIOMERO stack with the web interface for the 
 4. **Monitor**: Job progress tracking and status updates (with real-time polling when SlurmClient is available)
 5. **Import**: Results imported back to OMERO — via `SLURM_Import_Results.py` (importer-enabled) or `SLURM_Get_Results.py` (standard), selected automatically based on `IMPORTER_ENABLED`
 6. **Cleanup**: Temporary artifacts automatically removed (non-critical cleanup errors are logged but do not fail the workflow)
+
+### Optional detached execution
+
+> **New in BIOMERO.scripts 2.9:** `BIOMERO_DETACHED_WORKFLOWS` is an opt-in
+> feature flag. Installing the updated scripts does not change existing
+> workflow behavior while
+> `BIOMERO_DETACHED_WORKFLOWS` is absent or false. Existing and custom
+> deployments remain inline until an administrator enables the feature and
+> provides the required background worker supervisor.
+
+Set `BIOMERO_DETACHED_WORKFLOWS=true` only when the deployment also provides a
+compatible detached workflow supervisor, such as the `biomeroworker` in
+NL-BIOMERO. `SLURM_Run_Workflow.py` and its batched variant then validate and
+queue the request before returning. The supervisor performs transfer,
+conversion, Slurm monitoring, and result import in the background.
+
+Once the script reports that the workflow is queued in the background, the run
+no longer depends on the browser tab or the OMERO session that submitted it.
+Administrators do not need seven-day or infinite OMERO sessions, an unusually
+large OMERO.web cookie age, or an open browser merely to cover the total Slurm
+runtime. Ordinary timeouts must still cover the initial queue hand-off and each
+OMERO-side transfer or import subprocess. If detached mode is absent, disabled,
+or unsupported by the installed BIOMERO library, the scripts retain their
+established inline behavior and the session must remain active.
+
+See the [NL-BIOMERO detached-workflow administrator guide](https://nl-bioimaging.github.io/NL-BIOMERO/latest/sysadmin/detached-workflows.html)
+for deployment, recovery, and verification details.
 
 ### Dynamic Import Script Selection
 

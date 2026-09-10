@@ -188,6 +188,17 @@ python -m pytest tests -q
 ```
 
 5. Commit and push production and test changes to their respective branches.
+   Before either push, run the complete harness against the feature worktree.
+   Tests that execute selected functions through an AST-built namespace must
+   supply every imported global and a behaviorally realistic collaborator; a
+   placeholder such as a string is not valid once production calls methods on
+   that object.
+   Because `test-suite` is shared and moving, make harness compatibility fixes
+   pass against both the current remote source and the feature source before
+   publishing them. Capability-gate new feature assertions until the matching
+   source commit is available remotely. After a harness-only update, explicitly
+   rerun the affected production check: pushing `test-suite` does not trigger a
+   pull-request workflow by itself.
    If CI cannot select feature-specific tests yet, keep those tests on
    `test-suite` and run the relevant files manually with
    `BIOMERO_SCRIPTS_ROOT` pointed at the feature worktree. Do not solve the CI
