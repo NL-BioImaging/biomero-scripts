@@ -439,3 +439,17 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
+
+
+### Optional remote Zarr shallower
+
+With administrator `BIOMERO_REMOTE_SHALLOW_ZARR=true`, importer enablement and
+the existing shallow capability, `SLURM_Import_Results.py` runs the configured
+CPU result normalizer before ZIP creation. It uses the canonical input manifest
+already persisted by image transfer. Detached retries adopt the helper job or
+completed receipt. Successful receipts come from workflow tracking and travel
+in the ordinary lifecycle import order; the importer validates them without
+repeating pixel hashing. Unsupported results and safe failures retain the local
+importer path. The flag defaults to false and is not an OMERO script parameter.
+Matching core, schema, importer, and helper versions are required; see the
+NL-BIOMERO administrator documentation for deployment settings and recovery.
