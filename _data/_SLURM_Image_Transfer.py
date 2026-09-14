@@ -152,9 +152,20 @@ GROUP_MAPPINGS_FILE = os.getenv(
 IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
 IMPORT_MOUNT_STORAGE_ROOT = "import-mount-data"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
+SCRIPT_CLIENT_KEEPALIVE_SECONDS = 60
 
 # keep track of log strings.
 log_strings = []
+
+
+def enable_script_client_keepalive(
+    client,
+    seconds=SCRIPT_CLIENT_KEEPALIVE_SECONDS,
+):
+    """Keep the OMERO script client alive during long export operations."""
+    client.enableKeepAlive(seconds)
+    logger.info(
+        "Enabled OMERO script-client keepalive every %s seconds", seconds)
 
 
 def is_shallow_zarr_storage_enabled(export_format):
@@ -1648,6 +1659,13 @@ def log(text):
     logger.debug(str(text))
 
 
+def _require_keepalive(keepalive, operation="a long-running operation"):
+    """Raise when the gateway reports that its OMERO connection was lost."""
+    if keepalive is not None and keepalive() is False:
+        raise ConnectionError(
+            "Lost the OMERO connection while %s" % operation)
+
+
 def _write_zip_tree(
     archive,
     source,
@@ -1692,7 +1710,7 @@ def _write_zip_tree(
                 keepalive is not None
                 and monotonic() - last_keepalive >= keepalive_interval
             ):
-                keepalive()
+                _require_keepalive(keepalive, "creating the transfer archive")
                 last_keepalive = monotonic()
 
     return last_keepalive
@@ -1769,7 +1787,7 @@ def compress(
                         compress_type=zipfile.ZIP_STORED,
                     )
         if keepalive is not None:
-            keepalive()
+            _require_keepalive(keepalive, "creating the transfer archive")
         logger.info(
             "Created direct ZIP %s in %.3f seconds",
             target,
@@ -1792,7 +1810,7 @@ def run_with_keepalive(operation, keepalive, keepalive_interval=60):
             try:
                 return future.result(timeout=keepalive_interval)
             except FutureTimeoutError:
-                keepalive()
+                _require_keepalive(keepalive)
 
 
 def save_plane(image, format, c_name, z_range, project_z, t=0,
@@ -3020,6 +3038,7 @@ def run_script():
             authorsInstitutions=[[1], [2]],
             namespaces=[omero.constants.namespaces.NSDYNAMIC],
         )
+        enable_script_client_keepalive(client)
 
         try:
             start_time = datetime.now()
@@ -3041,6 +3060,7 @@ def run_script():
             log("Duration: %s" % str(stop_time-start_time))
 
             # return this fileAnnotation to the client.
+            _require_keepalive(conn.keepAlive, "writing Image Transfer outputs")
             client.setOutput("Message", rstring(message))
             client.setOutput(
                 CANONICAL_INPUTS_OUTPUT,
