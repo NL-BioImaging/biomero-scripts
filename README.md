@@ -234,6 +234,20 @@ plus bounded image- and label-node records. This keeps large Plate metadata
 below OMERO/PostgreSQL MapAnnotation value limits; existing monolithic records
 remain readable.
 
+When Image Transfer reuses an existing managed backing Zarr (including imported
+`.processed` stores), its pixels are authoritative for both Images and Plates.
+The canonical record therefore has `canonicalPixelVerified=true` without an
+additional pixel read through OMERO. Pixel identities are still calculated for
+matching workflow results. Previously unverified records are upgraded on reuse
+when the recorded import path identifies that same backing store; this creates
+a new metadata generation without copying or rehashing its pixels.
+
+Freshly exported canonical Zarrs follow a different path: their pixel identities
+must match the source OMERO Images before promotion. Plate exports are checked
+field-by-field using the exporter's well/field mapping, with connection keepalive
+throughout verification. A mismatch prevents canonical promotion. Merely placing
+an unrelated Zarr under a managed storage root does not make it authoritative.
+
 Eligible Image results expose their labels as ordinary OMERO Image projections
 until label-aware viewers are generally available. Eligible HCS results remain
 one derived OMERO Plate: its WellSample pixels are served from the canonical
@@ -251,6 +265,32 @@ Importer-disabled deployments continue to use `SLURM_Get_Results.py` and do not
 load BIOMERO.importer Zarr helpers. The worker processor must forward this
 environment variable to downloaded scripts; current NL-BIOMERO deployments do
 that dynamically through `biomero.constants.slurm_env`.
+
+### Workflow provenance files and searchable metadata
+
+Both result scripts always attach `metadata_<workflow UUID>.csv` (or the job
+ID when no workflow UUID is available), independently of ZIP and individual
+file-output options. Importer results attach it to the discovered result Plates
+or destination Dataset; classic pixel uploads attach it to the result Dataset.
+For attachment-only workflows, the existing result/log targets are used.
+Explicitly selected legacy attachment targets continue to receive the CSV.
+
+The importer route uses the existing in-place upload helper when enabled and
+available, with regular upload otherwise. The classic route uploads the file
+before cleaning temporary storage. The full `metadata.csv` beside importer
+results remains unchanged for re-importing an analyzed directory, including its
+existing `csv_` key prefix in importer annotations. This change does not alter
+the importer's independent metadata reader or its error handling.
+
+MapAnnotations remain a searchable view of the full CSV and workflow history.
+The scripts first try all existing fields and values. Only after an index-size
+rejection do they retry with large fields represented by the CSV filename,
+UTF-8 value size and SHA-256 checksum. Smaller fields remain searchable;
+accepted large values are unchanged. One rejected annotation does not prevent
+later task/job annotations. Reports distinguish complete, reduced and incomplete
+views, and CSV link failures are counted per target. No database changes or
+feature flag are required. Files are snapshots of the workflow state available
+at export time, rather than the eventual final lifecycle state.
 
 ### Optional ROI postprocessing
 
@@ -439,3 +479,17 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
+
+
+### Optional remote Zarr shallower
+
+With administrator `BIOMERO_REMOTE_SHALLOW_ZARR=true`, importer enablement and
+the existing shallow capability, `SLURM_Import_Results.py` runs the configured
+CPU result normalizer before ZIP creation. It uses the canonical input manifest
+already persisted by image transfer. Detached retries adopt the helper job or
+completed receipt. Successful receipts come from workflow tracking and travel
+in the ordinary lifecycle import order; the importer validates them without
+repeating pixel hashing. Unsupported results and safe failures retain the local
+importer path. The flag defaults to false and is not an OMERO script parameter.
+Matching core, schema, importer, and helper versions are required; see the
+NL-BIOMERO administrator documentation for deployment settings and recovery.
