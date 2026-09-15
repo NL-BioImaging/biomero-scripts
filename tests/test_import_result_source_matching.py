@@ -37,7 +37,7 @@ def load_functions(*names):
         "Optional": Optional,
         "SlurmClient": object,
         "Tuple": Tuple,
-        "add_image_annotations": lambda *_args, **_kwargs: None,
+        "add_image_annotations": lambda *_args, **_kwargs: "complete",
         "add_metadata_to_imported_plates": lambda *_args, **_kwargs: "",
         "difflib": difflib,
         "logger": logging.getLogger("import-result-source-matching"),
