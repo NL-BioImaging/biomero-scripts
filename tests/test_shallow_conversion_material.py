@@ -91,6 +91,7 @@ def load_save_as_zarr(
             promotions.append((_args, _kwargs))
         ),
         "select_zarr_source_path": select_source,
+        "upgrade_reused_canonical": lambda conn, obj, source, path: source,
         "SHALLOW_ZARR_RESTORE_AVAILABLE": restore_available,
         "SHALLOW_ZARR_RESTORE_IMPORT_ERROR": ImportError(
             "BIOMERO.importer unavailable"

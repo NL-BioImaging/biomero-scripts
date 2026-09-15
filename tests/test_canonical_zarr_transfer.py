@@ -69,7 +69,9 @@ def _load_canonical_functions():
     }
     nodes = [
         node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in wanted
+        if isinstance(node, ast.FunctionDef) and node.name in wanted | {
+            "verified_plate_source", "upgrade_reused_canonical",
+            "verify_exported_plate_source"}
     ]
     namespace = {
         "CANONICAL_PLATE_IMAGE_NAMESPACE": CANONICAL_PLATE_IMAGE_NAMESPACE,
@@ -949,6 +951,8 @@ def test_indexes_verified_existing_image_without_copying(
             return pixel_identity
 
         def generate_omero(self, conn, **guard):
+            if "verified_plate_source" in ns:
+                raise AssertionError("Reused backing Zarr must not read OMERO pixels")
             return pixel_identity
 
     class Indexing:
@@ -1016,8 +1020,10 @@ def test_indexes_existing_plate_with_storage_marker_and_compact_annotation(
         ),
     )
 
-    assert indexed == canonical
-    assert marker_writes == [(existing, canonical)]
+    expected = (ns["verified_plate_source"](canonical)
+                if "verified_plate_source" in ns else canonical)
+    assert indexed == expected
+    assert marker_writes == [(existing, expected)]
     assert len(annotation_writes) == 1
     assert build_calls[0][1]["keepalive"] is connection.keepAlive
     assert annotation_writes[0]["object_type"] == "Plate"
