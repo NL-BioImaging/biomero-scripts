@@ -23,6 +23,21 @@ Do not assume that the environment visible to OMERO.web is the environment of
 the worker. Runtime environment variables that affect analysis normally need
 to be configured on `biomeroworker`.
 
+## Pull-request branch workflow
+
+On an existing non-default branch intended for a pull request, make focused,
+coherent commits and push them as normal completion of authorized development
+work. Do not hold the branch locally merely to run a slow full suite: run cheap,
+relevant checks that catch immediate mistakes, inspect the diff, then let the
+required GitHub Actions checks be the full-suite gate. If CI fails, inspect it
+and push a follow-up fix. Incremental branch commits may stay small because the
+pull request will normally be squash-merged.
+
+Use proportionate local verification before a direct default-branch push,
+release, change without suitable CI coverage, or higher-risk operation. This
+workflow does not authorize unrelated publication, merging, deployment, or
+destructive actions.
+
 ## Follow the script hierarchy
 
 ### Main workflow orchestration
@@ -188,7 +203,10 @@ python -m pytest tests -q
 ```
 
 5. Commit and push production and test changes to their respective branches.
-   Before either push, run the complete harness against the feature worktree.
+   For a production pull-request branch, run focused checks locally and let its
+   GitHub pull-request workflow execute the complete harness. Run the complete
+   harness locally before a direct `master` push or a `test-suite`-only push,
+   because the latter does not trigger the production pull-request workflow.
    Tests that execute selected functions through an AST-built namespace must
    supply every imported global and a behaviorally realistic collaborator; a
    placeholder such as a string is not valid once production calls methods on
