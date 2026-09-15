@@ -234,6 +234,20 @@ plus bounded image- and label-node records. This keeps large Plate metadata
 below OMERO/PostgreSQL MapAnnotation value limits; existing monolithic records
 remain readable.
 
+When Image Transfer reuses an existing managed backing Zarr (including imported
+`.processed` stores), its pixels are authoritative for both Images and Plates.
+The canonical record therefore has `canonicalPixelVerified=true` without an
+additional pixel read through OMERO. Pixel identities are still calculated for
+matching workflow results. Previously unverified records are upgraded on reuse
+when the recorded import path identifies that same backing store; this creates
+a new metadata generation without copying or rehashing its pixels.
+
+Freshly exported canonical Zarrs follow a different path: their pixel identities
+must match the source OMERO Images before promotion. Plate exports are checked
+field-by-field using the exporter's well/field mapping, with connection keepalive
+throughout verification. A mismatch prevents canonical promotion. Merely placing
+an unrelated Zarr under a managed storage root does not make it authoritative.
+
 Eligible Image results expose their labels as ordinary OMERO Image projections
 until label-aware viewers are generally available. Eligible HCS results remain
 one derived OMERO Plate: its WellSample pixels are served from the canonical
