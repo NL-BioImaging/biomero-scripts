@@ -252,6 +252,32 @@ load BIOMERO.importer Zarr helpers. The worker processor must forward this
 environment variable to downloaded scripts; current NL-BIOMERO deployments do
 that dynamically through `biomero.constants.slurm_env`.
 
+### Workflow provenance files and searchable metadata
+
+Both result scripts always attach `metadata_<workflow UUID>.csv` (or the job
+ID when no workflow UUID is available), independently of ZIP and individual
+file-output options. Importer results attach it to the discovered result Plates
+or destination Dataset; classic pixel uploads attach it to the result Dataset.
+For attachment-only workflows, the existing result/log targets are used.
+Explicitly selected legacy attachment targets continue to receive the CSV.
+
+The importer route uses the existing in-place upload helper when enabled and
+available, with regular upload otherwise. The classic route uploads the file
+before cleaning temporary storage. The full `metadata.csv` beside importer
+results remains unchanged for re-importing an analyzed directory, including its
+existing `csv_` key prefix in importer annotations. This change does not alter
+the importer's independent metadata reader or its error handling.
+
+MapAnnotations remain a searchable view of the full CSV and workflow history.
+The scripts first try all existing fields and values. Only after an index-size
+rejection do they retry with large fields represented by the CSV filename,
+UTF-8 value size and SHA-256 checksum. Smaller fields remain searchable;
+accepted large values are unchanged. One rejected annotation does not prevent
+later task/job annotations. Reports distinguish complete, reduced and incomplete
+views, and CSV link failures are counted per target. No database changes or
+feature flag are required. Files are snapshots of the workflow state available
+at export time, rather than the eventual final lifecycle state.
+
 ### Optional ROI postprocessing
 
 `SLURM_Run_Workflow.py` can optionally turn imported grayscale label images
