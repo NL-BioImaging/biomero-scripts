@@ -88,7 +88,10 @@ def test_bulk_refresh_limits_processing_to_selected_workflow():
     refresh = Mock(return_value={'annotations': []})
     with patch.dict(adapter.__dict__, discover_metadata_targets=Mock(return_value=targets),
                     refresh_workflow_metadata=refresh):
-        report = adapter.refresh_all_metadata(conn, object(), workflow_id=chosen)
+        selection = ({'workflow_ids': [chosen]}
+                     if 'workflow_ids' in adapter.refresh_all_metadata.__code__.co_varnames
+                     else {'workflow_id': chosen})
+        report = adapter.refresh_all_metadata(conn, object(), **selection)
     assert report['discovered'] == 1
     assert refresh.call_count == 1
     assert refresh.call_args.args[2:] == ('Image', 751, chosen)
@@ -99,8 +102,45 @@ def test_bulk_refresh_rejects_bad_uuid_before_discovery():
     discovery = Mock()
     with patch.dict(adapter.__dict__, discover_metadata_targets=discovery):
         with pytest.raises(ValueError):
-            adapter.refresh_all_metadata(Mock(), object(), workflow_id='not-a-uuid')
+            selection = ({'workflow_ids': ['not-a-uuid']}
+                         if 'workflow_ids' in adapter.refresh_all_metadata.__code__.co_varnames
+                         else {'workflow_id': 'not-a-uuid'})
+            adapter.refresh_all_metadata(Mock(), object(), **selection)
     discovery.assert_not_called()
+
+
+@pytest.mark.skipif('workflow_ids' not in adapter.refresh_all_metadata.__code__.co_varnames,
+                    reason='Multiple UUID selection unavailable')
+def test_bulk_refresh_selects_multiple_workflows_without_duplicates():
+    first = '11111111-1111-4111-8111-111111111111'
+    second = '22222222-2222-4222-8222-222222222222'
+    targets = [('Image', 1, first), ('Plate', 2, second), ('Plate', 3, 'other')]
+    refresh = Mock(return_value={'annotations': []})
+    with patch.dict(adapter.__dict__, discover_metadata_targets=Mock(return_value=targets),
+                    refresh_workflow_metadata=refresh):
+        report = adapter.refresh_all_metadata(
+            Mock(), object(), workflow_ids=[second, first, first])
+    assert report['discovered'] == 2
+    assert refresh.call_count == 2
+    assert {call.args[4] for call in refresh.call_args_list} == {first, second}
+
+
+@pytest.mark.skipif('workflow_ids' not in adapter.refresh_all_metadata.__code__.co_varnames,
+                    reason='Multiple UUID selection unavailable')
+def test_init_forwards_all_selected_workflow_uuids():
+    chosen = ['11111111-1111-4111-8111-111111111111',
+              '22222222-2222-4222-8222-222222222222']
+    inputs = {'Refresh OMERO Metadata': True, 'Metadata Workflow UUIDs': chosen}
+    client = Mock()
+    client.getInput.side_effect = inputs.get
+    tracker = Mock()
+    context = Mock(__enter__=Mock(return_value=tracker), __exit__=Mock(return_value=False))
+    refresh = Mock()
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value,
+                    WorkflowTracker=Mock(return_value=context), refresh_all_metadata=refresh):
+        adapter.refresh_metadata_from_init(client, Mock())
+    assert refresh.call_args.kwargs['workflow_ids'] == chosen
+    assert refresh.call_args.kwargs['dry_run'] is True
 
 
 @pytest.mark.skipif(not hasattr(adapter, 'refresh_all_metadata'), reason='bulk refresh not present')
