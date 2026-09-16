@@ -48,7 +48,7 @@ refresh_workflow_metadata = adapter.refresh_workflow_metadata
 @pytest.mark.parametrize('enabled,dry_run', [(False, None), (True, None), (True, False)])
 def test_init_refresh_is_optional_and_defaults_to_preview(enabled, dry_run):
     inputs = {'Refresh OMERO Metadata': enabled, 'Metadata Dry Run': dry_run,
-              'Metadata View Version': 'v1', 'Metadata Backup Directory': '/private/new'}
+              'Metadata View Version': 'v0', 'Metadata Backup Directory': '/private/new'}
     client = Mock()
     client.getInput.side_effect = inputs.get
     conn = Mock()
@@ -61,7 +61,7 @@ def test_init_refresh_is_optional_and_defaults_to_preview(enabled, dry_run):
                     WorkflowTracker=factory, refresh_all_metadata=refresh):
         result = adapter.refresh_metadata_from_init(client, conn)
     if enabled:
-        refresh.assert_called_once_with(conn, tracker, view_version='v1',
+        refresh.assert_called_once_with(conn, tracker, view_version='v0',
             dry_run=True if dry_run is None else dry_run, backup_directory='/private/new')
         client.enableKeepAlive.assert_called_once_with(60)
     else:
@@ -188,12 +188,24 @@ def test_bulk_refresh_skips_missing_history_and_continues():
     refresh = Mock(side_effect=[MissingHistory(), {'annotations': []}])
     with patch.dict(adapter.__dict__, discover_metadata_targets=Mock(return_value=targets),
                     refresh_workflow_metadata=refresh, AggregateNotFoundError=MissingHistory):
-        result = adapter.refresh_all_metadata(conn, object(), view_version='v1')
+        result = adapter.refresh_all_metadata(conn, object(), view_version='v0')
     assert result['counts'] == {'planned': 1, 'updated': 0, 'unchanged': 0,
                                 'skipped': 1, 'failed': 0}
     assert result['results'][0]['reason'] == 'missing event-store history'
     assert refresh.call_count == 2
     assert all(call.kwargs['dry_run'] for call in refresh.call_args_list)
+
+
+@pytest.mark.skipif(not hasattr(adapter, 'discover_metadata_targets'), reason='bulk refresh not present')
+@pytest.mark.parametrize('view', ['v1', 'latest'])
+def test_bulk_refresh_rejects_unsupported_views_before_discovery(view):
+    conn = Mock()
+    conn.isAdmin.return_value = True
+    discover = Mock()
+    with patch.dict(adapter.__dict__, discover_metadata_targets=discover):
+        with pytest.raises(ValueError, match='View_Version must be v0'):
+            adapter.refresh_all_metadata(conn, object(), view_version=view)
+    discover.assert_not_called()
 
 
 @pytest.mark.skipif(not hasattr(adapter, 'discover_metadata_targets'), reason='bulk refresh not present')
