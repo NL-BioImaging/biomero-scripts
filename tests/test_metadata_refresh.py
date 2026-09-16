@@ -11,15 +11,17 @@ import sys
 from types import ModuleType
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
-source = ROOT / "_data" / "SLURM_Import_Results.py"
+source = ROOT / 'admin' / 'SLURM_Refresh_Metadata.py'
+if not source.exists():
+    source = ROOT / "_data" / "SLURM_Import_Results.py"
 tree = ast.parse(source.read_text(encoding="utf-8"))
 if not any(isinstance(n, ast.FunctionDef) and n.name == 'refresh_workflow_metadata'
            for n in tree.body):
     pytest.skip('refresh adapter is not available in this source revision',
                 allow_module_level=True)
-names = {"metadata_pairs", "_read_values", "refresh_workflow_metadata"}
+names = {"metadata_pairs", "_read_values", "refresh_workflow_metadata", "runScript"}
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
-assert len(nodes) == 3, "Refresh adapter must live in the scripts layer"
+assert len(nodes) >= 3, "Refresh adapter must live in the scripts layer"
 
 def MetadataAnnotation(namespace, values):
     return SimpleNamespace(namespace=namespace, values=values)
@@ -35,6 +37,53 @@ exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
      adapter.__dict__)
 metadata_pairs = adapter.metadata_pairs
 refresh_workflow_metadata = adapter.refresh_workflow_metadata
+
+
+@pytest.mark.skipif(source.parent.name != 'admin', reason='admin script not present')
+def test_standalone_admin_entrypoint_denies_nonadmin_before_tracker():
+    assert hasattr(adapter, 'runScript'), 'Refresh needs its own admin entrypoint'
+    client = Mock()
+    conn = Mock()
+    conn.isAdmin.return_value = False
+    tracker = Mock()
+    with patch.dict(adapter.__dict__, scripts=Mock(client=Mock(return_value=client)),
+                    BlitzGateway=Mock(return_value=conn), WorkflowTracker=tracker,
+                    rstring=lambda value: value, VERSION='2.9.0',
+                    NSDYNAMIC='dynamic'):
+        adapter.runScript()
+    tracker.assert_not_called()
+    client.closeSession.assert_called_once()
+    assert 'denied' in client.setOutput.call_args.args[1].lower()
+
+
+@pytest.mark.skipif(source.parent.name != 'admin', reason='admin script not present')
+def test_admin_entrypoint_defaults_to_dry_run_and_only_refreshes_metadata():
+    from uuid import UUID
+    client = Mock()
+    client.getInputs.return_value = {
+        'Data_Type': 'Plate', 'ID': 10,
+        'Workflow_ID': '00000000-0000-0000-0000-000000000001'}
+    conn = Mock()
+    conn.isAdmin.return_value = True
+    tracker = Mock()
+    context = Mock()
+    context.__enter__ = Mock(return_value=tracker)
+    context.__exit__ = Mock(return_value=False)
+    refresh = Mock(return_value={'dry_run': True})
+    with patch.dict(adapter.__dict__, scripts=Mock(client=Mock(return_value=client)),
+                    BlitzGateway=Mock(return_value=conn),
+                    WorkflowTracker=Mock(return_value=context), UUID=UUID,
+                    rstring=lambda value: value, VERSION='2.9.0',
+                    NSDYNAMIC='dynamic', refresh_workflow_metadata=refresh):
+        adapter.runScript()
+    refresh.assert_called_once_with(
+        conn, tracker, 'Plate', 10, client.getInputs.return_value['Workflow_ID'],
+        view_version='v0', dry_run=True, backup_path=None)
+    client.closeSession.assert_called_once()
+    importer = ast.parse((ROOT / '_data' / 'SLURM_Import_Results.py').read_text(encoding='utf-8'))
+    assert not any(isinstance(n, ast.FunctionDef) and n.name in
+                   {'metadata_pairs', '_read_values', 'refresh_workflow_metadata'}
+                   for n in importer.body)
 
 
 @pytest.fixture
