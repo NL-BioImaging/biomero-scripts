@@ -51,10 +51,10 @@ def format_metadata_summary(report):
     """Summarize result/workflow pairs; detailed plans stay in the worker log."""
     counts = report['counts']
     if report['dry_run']:
-        plans = [item['plan'] for item in report['results'] if item['status'] == 'planned']
-        changed = sum(any(a['action'] != 'unchanged' for a in plan['annotations'])
-                      for plan in plans)
-        outcomes = f'Would update: {changed}; Unchanged: {len(plans) - changed}'
+        planned = [item for item in report['results'] if item['status'] == 'planned']
+        changed = sum(item.get('changed', any(a['action'] != 'unchanged'
+                      for a in item.get('plan', {}).get('annotations', []))) for item in planned)
+        outcomes = f'Would update: {changed}; Unchanged: {len(planned) - changed}'
         mode = 'dry run'
         note = 'No OMERO metadata was changed.'
     else:
@@ -62,12 +62,12 @@ def format_metadata_summary(report):
         mode = 'apply'
         directory = report.get('backup_directory')
         note = (f'Backup run directory: {directory}' if directory else
-                'Backups were explicitly disabled.' if report.get('backup_enabled') is False else
+                'Backups were not requested.' if report.get('backup_enabled') is False else
                 'See the backup directory for per-target backups and report.json.')
     return (f"Metadata refresh ({report['view_version']}, {mode}): "
             f"{report['discovered']} result/workflow pairs.\n"
             f"{outcomes}; Skipped: {counts.get('skipped', 0)}; Failed: {counts.get('failed', 0)}.\n"
-            f"{note}\nFull report and skip/failure details: activity log (i button).")
+            f"{note}\nProgress and skip/failure details: activity log (i button).")
 
 
 def format_image_submission(array_job_id, status):
@@ -162,6 +162,8 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
                                    for a in actions]}
         if dry_run:
             return summary
+        if all(action['action'] == 'unchanged' for action in actions):
+            return summary
         if backup_enabled and not backup_path:
             raise ValueError('An unused backup_path is required to apply')
         # Preflight all changes before writing any map. Across-group admin
@@ -188,32 +190,33 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
             with Path(backup_path).open('x', encoding='utf-8') as stream:
                 json.dump({**summary, 'actions': actions}, stream, indent=2)
             logger.info('Metadata backup saved: %s', backup_path)
-        else:
-            logger.warning('Metadata backups explicitly disabled for %s %s, workflow %s',
-                           object_type, object_id, workflow_id)
         conn.SERVICE_OPTS.setOmeroGroup(str(target.getDetails().group.id.val))
         # Update retained maps before removing links. No global annotation delete.
-        for action in actions:
-            if action['action'] != 'update':
-                continue
-            ann = conn.getObject('MapAnnotation', action['annotation_id'])
-            if [list(p) for p in ann.getValue()] != action['pairs']:
-                raise ValueError('Annotation changed after preflight')
-            ann.setValue(action['new_pairs'])
-            ann.save()
-        unlink_ids = [links[a['annotation_id']] for a in actions
-                      if a['action'] == 'unlink']
-        if unlink_ids:
-            from omero.cmd import Delete2
-            from omero.cmd.graphs import ChildOption
-            request = Delete2(
-                targetObjects={object_type + 'AnnotationLink': unlink_ids},
-                childOptions=[ChildOption(excludeType=['MapAnnotation'])])
-            handle = conn.c.sf.submit(request, conn.SERVICE_OPTS)
-            try:
-                conn._waitOnCmd(handle)
-            finally:
-                handle.close()
+        try:
+            for action in actions:
+                if action['action'] != 'update':
+                    continue
+                ann = conn.getObject('MapAnnotation', action['annotation_id'])
+                if [list(p) for p in ann.getValue()] != action['pairs']:
+                    raise ValueError('Annotation changed after preflight')
+                ann.setValue(action['new_pairs'])
+                ann.save()
+            unlink_ids = [links[a['annotation_id']] for a in actions
+                          if a['action'] == 'unlink']
+            if unlink_ids:
+                from omero.cmd import Delete2
+                from omero.cmd.graphs import ChildOption
+                request = Delete2(
+                    targetObjects={object_type + 'AnnotationLink': unlink_ids},
+                    childOptions=[ChildOption(excludeType=['MapAnnotation'])])
+                handle = conn.c.sf.submit(request, conn.SERVICE_OPTS)
+                try:
+                    conn._waitOnCmd(handle)
+                finally:
+                    handle.close()
+        except Exception as error:
+            # Never classify a failure after writing starts as a safe skip.
+            raise RuntimeError('Metadata write failed; target may be partially updated') from error
         return summary
     finally:
         conn.SERVICE_OPTS.setOmeroGroup(original_group)
@@ -243,8 +246,71 @@ def discover_metadata_targets(conn):
     return sorted(targets)
 
 
+def metadata_refresh_log_diff(kind, ident, workflow_id, plan):
+    """Log changed fields only; never dump entire metadata maps as JSON."""
+    def fields(pairs):
+        result = {}
+        for key, value in pairs:
+            result.setdefault(key, []).append(value)
+        return result
+
+    def display(values):
+        text = '; '.join(str(value) for value in values)
+        return text if len(text) <= 200 else text[:200] + f' ... ({len(text)} characters)'
+
+    for annotation in plan['annotations']:
+        if annotation['action'] == 'unchanged':
+            continue
+        logger.info('Dry-run diff: %s %s, workflow %s, %s (%s)',
+                    kind, ident, workflow_id, annotation['namespace'], annotation['action'])
+        before = fields(annotation.get('before_pairs', []))
+        after = fields(annotation.get('after_pairs', []))
+        for key in sorted(before.keys() | after.keys()):
+            if before.get(key) == after.get(key):
+                continue
+            if key not in before:
+                logger.info('  + %s: %s', key, display(after[key]))
+            elif key not in after:
+                logger.info('  - %s: %s', key, display(before[key]))
+            else:
+                logger.info('  ~ %s: %s -> %s', key, display(before[key]), display(after[key]))
+
+
+def metadata_refresh_target(conn, tracker, kind, ident, workflow_id, *, view_version,
+                            dry_run, backup_path, backup_enabled, detailed):
+    """Plan once, preflight and apply once, then discard full bulk metadata."""
+    item = {'object_type': kind, 'object_id': ident, 'workflow_id': workflow_id}
+    try:
+        plan = refresh_workflow_metadata(
+            conn, tracker, kind, ident, workflow_id, view_version=view_version,
+            dry_run=dry_run, backup_path=backup_path, backup_enabled=backup_enabled)
+    except AggregateNotFoundError:
+        item.update(status='skipped', reason='missing event-store history')
+    except ValueError as error:
+        item.update(status='skipped', reason=str(error))
+    except Exception as error:
+        logger.exception('Metadata refresh failed: %s %s, workflow %s', kind, ident, workflow_id)
+        item.update(status='failed', reason=str(error) or type(error).__name__,
+                    possibly_partial=not dry_run)
+    else:
+        changed = any(a['action'] != 'unchanged' for a in plan['annotations'])
+        if dry_run:
+            item.update(status='planned', changed=changed)
+            if detailed:
+                metadata_refresh_log_diff(kind, ident, workflow_id, plan)
+                item['plan'] = plan
+        else:
+            item.update(status='updated' if changed else 'unchanged')
+        if backup_path and changed and not dry_run:
+            item['backup'] = str(backup_path)
+    if item['status'] == 'skipped':
+        logger.info('Metadata refresh skipped: %s %s, workflow %s: %s',
+                    kind, ident, workflow_id, item['reason'])
+    return item
+
+
 def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
-                         backup_directory=None, workflow_ids=None, backup_enabled=True):
+                         backup_directory=None, workflow_ids=None, backup_enabled=False):
     """Refresh discoverable views, reporting unavailable histories separately."""
     if not conn.isAdmin():
         raise ValueError('Metadata refresh requires an administrator')
@@ -269,49 +335,27 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
         directory.mkdir(mode=0o700, parents=True, exist_ok=False)
         logger.info('Metadata backups and report will be stored in: %s', directory)
     elif not dry_run:
-        logger.warning('Metadata backups explicitly disabled. Changes will have no on-disk backup.')
+        logger.info('Metadata backups not requested. No on-disk backups will be created.')
+    detailed = dry_run and (0 < len(selected_workflows) <= 3 or len(targets) <= 3)
     report = {'view_version': view_version, 'dry_run': dry_run,
               'backup_enabled': backup_enabled,
               'backup_directory': str(directory) if directory else None,
               'discovered': len(targets), 'results': [],
               'counts': dict(planned=0, updated=0, unchanged=0, skipped=0, failed=0)}
     for index, (kind, ident, workflow_id) in enumerate(targets):
-        item = {'object_type': kind, 'object_id': ident, 'workflow_id': workflow_id}
-        try:
-            plan = refresh_workflow_metadata(
-                conn, tracker, kind, ident, workflow_id,
-                view_version=view_version, dry_run=True)
-        except AggregateNotFoundError:
-            item.update(status='skipped', reason='missing event-store history')
-        except ValueError as error:
-            item.update(status='skipped', reason=str(error))
-        except Exception as error:
-            item.update(status='failed', reason=type(error).__name__)
-        else:
-            if dry_run:
-                item.update(status='planned', plan=plan)
-            elif all(a['action'] == 'unchanged' for a in plan['annotations']):
-                item.update(status='unchanged')
-            else:
-                backup = directory / f'{index:06d}-{kind}-{ident}.json' if directory else None
-                backup_options = {} if backup_enabled else {'backup_enabled': False}
-                try:
-                    result = refresh_workflow_metadata(
-                        conn, tracker, kind, ident, workflow_id,
-                        view_version=view_version, dry_run=False, backup_path=backup,
-                        **backup_options)
-                    item.update(status='updated', result=result,
-                                backup=str(backup) if backup else None)
-                except Exception as error:
-                    # A write failure may follow earlier writes on this target.
-                    # Never report it as an untouched/skipped view.
-                    item.update(status='failed', reason=type(error).__name__,
-                                backup=str(backup) if backup else None, possibly_partial=True)
+        backup = directory / f'{index:06d}-{kind}-{ident}.json' if directory else None
+        item = metadata_refresh_target(
+            conn, tracker, kind, ident, workflow_id, view_version=view_version,
+            dry_run=dry_run, backup_path=backup, backup_enabled=backup_enabled, detailed=detailed)
         report['results'].append(item)
         report['counts'][item['status']] += 1
-        if directory:
-            with (directory / 'report.json').open('w', encoding='utf-8') as stream:
-                json.dump(report, stream, indent=2)
+        if (index + 1) % 25 == 0 or index + 1 == len(targets):
+            logger.info('Metadata refresh progress: %s/%s; updated=%s, unchanged=%s, planned=%s, skipped=%s, failed=%s',
+                        index + 1, len(targets), report['counts']['updated'], report['counts']['unchanged'],
+                        report['counts']['planned'], report['counts']['skipped'], report['counts']['failed'])
+    if directory:
+        with (directory / 'report.json').open('x', encoding='utf-8') as stream:
+            json.dump(report, stream, indent=2)
     return report
 
 
@@ -328,7 +372,7 @@ def refresh_metadata_from_init(client, conn):
     backup = unwrap(client.getInput('Metadata Backup Directory'))
     backup_enabled = unwrap(client.getInput('Save Metadata Backups'))
     if backup_enabled is None:
-        backup_enabled = True
+        backup_enabled = False
     selection = {}
     if unwrap(client.getInput('Filter Metadata by Workflow UUIDs')):
         workflow_ids = unwrap(client.getInput('Metadata Workflow UUIDs'))
@@ -338,8 +382,7 @@ def refresh_metadata_from_init(client, conn):
         logger.info('Metadata refresh scope: selected workflow UUIDs %s', selection['workflow_ids'])
     else:
         logger.info('Metadata refresh scope: all workflows; UUID dropdown values are ignored')
-    if not backup_enabled:
-        selection['backup_enabled'] = False
+    selection['backup_enabled'] = backup_enabled
     client.enableKeepAlive(60)
     with WorkflowTracker() as tracker:
         return refresh_all_metadata(conn, tracker, view_version=version,
@@ -418,8 +461,8 @@ def runScript():
                      description='Preview changes without writing. Inspect the report before disabling.'),
         scripts.String('Metadata View Version', grouping='02.2', default='v0',
                        values=[rstring('v0')]),
-        scripts.Bool('Save Metadata Backups', grouping='02.3', default=True,
-                     description='Save original metadata and the report before applying. Uncheck to explicitly apply without backups.'),
+        scripts.Bool('Save Metadata Backups', grouping='02.3', default=False,
+                     description='Optionally save original metadata before applying. These are manual-recovery snapshots; no automated restore is provided.'),
         scripts.String('Metadata Backup Directory', optional=True, grouping='02.3.1',
                        description='Optional new absolute worker directory. Leave empty for an automatically created run directory under /data/biomero-metadata-backups. The activity log reports the exact location.'),
         scripts.Bool('Filter Metadata by Workflow UUIDs', grouping='02.4', default=False,
@@ -512,9 +555,6 @@ def runScript():
 
         metadata_report = refresh_metadata_from_init(client, conn)
         if metadata_report is not None:
-            logger.info('Full metadata refresh report (before_pairs = current metadata; '
-                        'after_pairs = complete proposed metadata; unlink = remove link only):\n%s',
-                        json.dumps(metadata_report, indent=2))
             message += '\n' + format_metadata_summary(metadata_report)
         logger.info('%s', message)
         client.setOutput("Message", rstring(str(message)))

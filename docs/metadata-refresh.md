@@ -13,9 +13,9 @@ Run **Slurm Init (Admin Only)** with these inputs:
   workflow metadata across groups.
 - `Metadata View Version`: `v0` (the only supported view).
 - `Metadata Dry Run`: true by default; inspect the report before disabling it.
-- `Save Metadata Backups`: true by default. Applying saves the original
-  annotation values and links before changing each target. Uncheck this option
-  to explicitly apply without backups; the activity log records a warning.
+- `Save Metadata Backups`: false by default. Enable it to save the original
+  annotation values and links before changing each target. These are optional
+  inspection/manual-recovery snapshots, not an automated restore mechanism.
 - `Metadata Backup Directory`: optional override for a new absolute worker
   directory. Leave empty to create a unique run directory under
   `/data/biomero-metadata-backups` on the worker's durable shared storage.
@@ -33,8 +33,9 @@ Uncheck `Init Slurm` for metadata-only maintenance, without cluster setup or
 analytics rebuilding. Analytics projections and OMERO annotations are separate
 views of the event store, controlled by separate options.
 
-For a deployment-wide update, select `Refresh OMERO Metadata`, choose the desired
-view version, and inspect the dry-run report first. Discovery uses existing
+Before a deployment-wide update, dry-run one to three selected workflow UUIDs
+and inspect their field diffs. Then disable filtering and dry-run mode to apply
+the same view across OMERO. Discovery uses existing
 `biomero/workflow` annotations; it does not create metadata on unannotated objects.
 Each object/workflow pair is processed independently. Missing event-store
 history or ambiguous/incomplete snapshots are skipped and reported, leaving
@@ -44,19 +45,21 @@ not modified automatically.
 
 The activity Message shows a compact summary, including how many
 result/workflow pairs would change, are unchanged, were skipped or failed.
-The full per-target report and detailed logger output are available in the
-activity log behind the info button and in the worker's `biomero.log`. Each
-annotation includes its namespace, proposed action, current `before_pairs`
-and complete proposed `after_pairs`. For an `unlink` action, the annotation
-will no longer be attached to that result; its `after_pairs` is empty. Dry runs
-write neither OMERO metadata nor backup files.
+The activity log behind the info button and the worker's `biomero.log` show
+human-readable field diffs for dry runs of up to three selected workflows
+(or up to three result/workflow pairs). Only added, removed and changed fields
+are logged; unchanged fields are omitted. Long values are abbreviated.
+An `unlink` removes only the result's link, not the annotation itself.
+Bulk sweeps log progress counts and skip/failure outcomes rather than full
+metadata maps. Dry runs write neither OMERO metadata nor backup files.
 
 When backups are enabled, applying bulk changes creates separate per-target JSON
-snapshots and a cumulative `report.json` in the new run directory. The exact
+snapshots and a compact outcome `report.json`, written once on completion, in
+the new run directory. The exact
 directory is reported in both the activity Message and detailed log; each saved
 snapshot is logged. Reusing an explicitly supplied existing directory is
-refused. With backups disabled, no snapshot or report file is written, but the
-full report remains in the normal activity and worker logs. Bulk scope never
+refused. With backups disabled, no snapshot or report file is written;
+progress and outcomes remain in the normal activity and worker logs. Bulk scope never
 implies permission to reconstruct missing history,
 advance historical snapshots to current state, or discard unknown annotations.
 

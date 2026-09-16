@@ -517,14 +517,16 @@ provenance and event history are unchanged. Batching retains its existing result
 namespace and discovery fields.
 
 BIOMERO's developer documentation, **Workflow metadata views**, describes the
-legacy-compatible `v0` view and the administrator API for a backed-up, dry-run-first
+legacy-compatible `v0` view and the administrator API for a dry-run-first
 refresh of existing annotations. The refresh changes the view, not the recorded
 execution history. The scripts-layer [metadata refresh guide](docs/metadata-refresh.md)
 describes how administrators can apply a new view safely through Slurm Init.
 Slurm Init shows a compact summary in the activity result. Detailed commands,
 workflow versions and per-target metadata plans are available behind the activity's
 info button and in the worker's `biomero.log`.
-Dry-run plans show each annotation's namespace and complete before/after
-key/value pairs. Applying saves inspection/manual-recovery snapshots in a unique
-directory under `/data/biomero-metadata-backups` by default and reports its path.
-Administrators can override the location or explicitly disable backups.
+Dry runs of one to three selected workflows show human-readable field diffs,
+omitting unchanged fields. Bulk sweeps log progress counts and skip/failure
+outcomes rather than full metadata maps. Backups are opt-in: when enabled,
+inspection/manual-recovery snapshots are saved in a unique directory under
+`/data/biomero-metadata-backups`, with its path reported in the activity result.
+Administrators can override the location; no automated restore is provided.
