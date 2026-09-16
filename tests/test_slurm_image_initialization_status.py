@@ -1,5 +1,6 @@
 import ast
 import os
+import pytest
 from pathlib import Path
 
 
@@ -47,6 +48,35 @@ def sample_status():
         "counts": {"READY": 15, "RUNNING": 0, "FAILED": 1},
         "images": ready + failed,
     }
+
+
+@pytest.mark.skipif('def format_metadata_summary' not in INIT_SCRIPT.read_text(encoding='utf-8'),
+                    reason='compact Init summary not present')
+def test_metadata_summary_is_compact_and_counts_actual_changes():
+    formatter = load_function(INIT_SCRIPT, 'format_metadata_summary')
+    report = {'dry_run': True, 'view_version': 'v0', 'discovered': 4,
+              'counts': {'skipped': 1, 'failed': 0}, 'results': [
+                  {'status': 'planned', 'plan': {'annotations': [{'action': 'update'}]}},
+                  {'status': 'planned', 'plan': {'annotations': [{'action': 'unchanged'}]}},
+                  {'status': 'planned', 'plan': {'annotations': [{'action': 'unlink'}]}},
+                  {'status': 'skipped', 'reason': 'private detailed reason'}]}
+    result = formatter(report)
+    assert 'Would update: 2' in result
+    assert 'Unchanged: 1' in result
+    assert 'Skipped: 1' in result
+    assert 'No OMERO metadata was changed' in result
+    assert 'private detailed reason' not in result
+    assert len(result) < 500
+
+
+@pytest.mark.skipif('def ui_log_filter' not in INIT_SCRIPT.read_text(encoding='utf-8'),
+                    reason='Init stdout filter not present')
+def test_init_stdout_excludes_library_info_but_keeps_warnings():
+    from types import SimpleNamespace
+    accept = load_function(INIT_SCRIPT, 'ui_log_filter')
+    assert not accept(SimpleNamespace(levelno=20))
+    assert accept(SimpleNamespace(levelno=20, ui_summary=True))
+    assert accept(SimpleNamespace(levelno=30))
 
 
 def test_check_setup_formats_exact_ready_running_failed_counts():
