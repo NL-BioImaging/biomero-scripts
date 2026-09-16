@@ -493,3 +493,17 @@ repeating pixel hashing. Unsupported results and safe failures retain the local
 importer path. The flag defaults to false and is not an OMERO script parameter.
 Matching core, schema, importer, and helper versions are required; see the
 NL-BIOMERO administrator documentation for deployment settings and recovery.
+# Workflow metadata views
+
+Result scripts use the matching BIOMERO core's versioned metadata renderer.
+New OMERO key/value annotations default to the legacy-compatible `v0` view:
+scientific task parameters and existing job fields are retained, while detached
+coordination tasks and duplicated output settings are excluded. Full CSV
+provenance and event history are unchanged. Batching retains its existing result
+namespace and discovery fields.
+
+BIOMERO's developer documentation, **Workflow metadata views**, describes the
+explicit `v1` slim view and the administrator API for a backed-up, dry-run-first
+refresh of existing annotations. The refresh changes the view, not the recorded
+execution history. Deploy these scripts together with a core revision providing
+`biomero.provenance`; this API is currently on the feature branch.
