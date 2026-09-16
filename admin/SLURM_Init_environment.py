@@ -46,6 +46,31 @@ logger = logging.getLogger(__name__)
 VERSION = "2.9.0"
 
 
+def ui_log_filter(record):
+    """Keep selected summaries and warnings in stdout, not library INFO dumps."""
+    return record.levelno >= 30 or getattr(record, 'ui_summary', False)
+
+
+def format_metadata_summary(report):
+    """Summarize result/workflow pairs; detailed plans stay in the worker log."""
+    counts = report['counts']
+    if report['dry_run']:
+        plans = [item['plan'] for item in report['results'] if item['status'] == 'planned']
+        changed = sum(any(a['action'] != 'unchanged' for a in plan['annotations'])
+                      for plan in plans)
+        outcomes = f'Would update: {changed}; Unchanged: {len(plans) - changed}'
+        mode = 'dry run'
+        note = 'No OMERO metadata was changed.'
+    else:
+        outcomes = f"Updated: {counts.get('updated', 0)}; Unchanged: {counts.get('unchanged', 0)}"
+        mode = 'apply'
+        note = 'See the backup directory for per-target backups and report.json.'
+    return (f"Metadata refresh ({report['view_version']}, {mode}): "
+            f"{report['discovered']} result/workflow pairs.\n"
+            f"{outcomes}; Skipped: {counts.get('skipped', 0)}; Failed: {counts.get('failed', 0)}.\n"
+            f"{note}\nFull report and skip/failure details: worker biomero.log.")
+
+
 def format_image_submission(array_job_id, status):
     """Format the scheduler-native image initialization summary."""
     counts = status.get("counts", {})
@@ -371,6 +396,9 @@ def runScript():
             if not configfile:
                 configfile = ''
             with SlurmClient.from_config(configfile=configfile) as slurmClient:
+                # Fabric otherwise echoes remote directory listings directly to
+                # stdout, bypassing logging filters. Core still logs the results.
+                slurmClient.config.run.hide = 'stdout'
                 image_array_id = None
                 # Override analytics rebuild window if provided via UI
                 if rebuild_days_ago is not None:
@@ -412,14 +440,14 @@ def runScript():
                 models, _ = slurmClient.get_all_image_versions_and_data_files()
                 filtered_models = {
                     key: value for key, value in models.items() if value}
-                message += (
-                    f"\nValidated workflow versions currently available: "
-                    f"{filtered_models}"
-                )
+                logger.info('Validated workflow versions currently available: %s', filtered_models)
+                message += f'\nWorkflows with available versions: {len(filtered_models)}.'
 
         metadata_report = refresh_metadata_from_init(client, conn)
         if metadata_report is not None:
-            message += '\nMetadata refresh:\n' + json.dumps(metadata_report, indent=2)
+            logger.info('Full metadata refresh report: %s', json.dumps(metadata_report))
+            message += '\n' + format_metadata_summary(metadata_report)
+        logger.info('%s', message, extra={'ui_summary': True})
         client.setOutput("Message", rstring(str(message)))
 
     finally:
@@ -440,6 +468,7 @@ if __name__ == '__main__':
     # Create a stream handler with INFO level (for OMERO.web output)
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(logging.INFO)
+    stream_handler.addFilter(ui_log_filter)
     # Create DEBUG logging to rotating logfile at var/log
     logging.basicConfig(level=logging.DEBUG,
                         format=LOGFORMAT,

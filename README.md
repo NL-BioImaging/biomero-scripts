@@ -520,4 +520,7 @@ BIOMERO's developer documentation, **Workflow metadata views**, describes the
 explicit `v1` slim view and the administrator API for a backed-up, dry-run-first
 refresh of existing annotations. The refresh changes the view, not the recorded
 execution history. The scripts-layer [metadata refresh guide](docs/metadata-refresh.md)
-describes how administrators can apply a new view safely.
+describes how administrators can apply a new view safely through Slurm Init.
+Slurm Init shows compact summaries and warnings in the activity output; detailed
+commands, workflow versions and per-target metadata plans remain in the worker's
+`biomero.log`.
