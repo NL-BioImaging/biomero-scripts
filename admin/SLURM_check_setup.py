@@ -49,9 +49,11 @@ License: GPL v2+ (see LICENSE.txt)
 import omero
 import omero.gateway
 from omero import scripts
-from omero.rtypes import rstring
+from omero.rtypes import rstring, unwrap
 from omero.gateway import BlitzGateway
-from biomero import SlurmClient
+from biomero import SlurmClient, WorkflowTracker
+from biomero.detached import detached_mode_enabled
+from biomero.maintenance import metadata_refresh_statuses
 import logging
 import os
 import sys
@@ -89,6 +91,35 @@ def format_image_pull_status(status):
     return "\n".join(lines)
 
 
+def format_metadata_maintenance_status(requests):
+    """Short Activities status; timestamps, scope and backup details in the log."""
+    if not requests:
+        return 'No metadata maintenance requests.'
+    lines = ['Metadata maintenance (active and 5 recent completed/failed requests):']
+    for request in requests:
+        report = request['report']
+        counts = report.get('counts', {})
+        outcomes = ', '.join(f'{key}={value}' for key, value in counts.items())
+        total = report.get('discovered')
+        processed = report.get('processed', sum(counts.values()))
+        progress = f'{processed}/{total}' if total is not None else 'awaiting discovery'
+        lines.append(f"  {request['request_id']}: {request['status']}; {progress}"
+                     + (f'; {outcomes}' if outcomes else ''))
+        if request.get('error'):
+            lines.append(f"    Failure: {request['error'][:200]}")
+        logger.info('Metadata maintenance request %s: %s; %s; %s; created=%s; modified=%s; view=%s; backups=%s',
+                    request['request_id'], request['status'], progress, outcomes,
+                    request['created_on'], request['modified_on'],
+                    request.get('options', {}).get('view_version', 'v0'),
+                    report.get('backup_directory') or 'not recorded')
+        if request.get('error'):
+            logger.warning('Metadata maintenance request %s: %s', request['request_id'], request['error'])
+    if not detached_mode_enabled() and any(r['status'] in ('QUEUED', 'RUNNING') for r in requests):
+        lines.append('  Detached mode is disabled; unfinished requests cannot progress.')
+    lines.append('Detailed progress and outcomes: worker biomero.log, using the request ID.')
+    return '\n'.join(lines)
+
+
 def runScript():
     """Main entry point for SLURM setup validation script.
     
@@ -113,6 +144,8 @@ def runScript():
         
         **ADMIN ONLY**: Requires OMERO administrator privileges.
         ''',
+        scripts.Bool('Check Slurm', default=True,
+                     description='Uncheck for metadata maintenance status only, without an HPC connection.'),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
         version=VERSION,
         authors=["Torec Luik"],
@@ -139,7 +172,20 @@ def runScript():
             return
         
         logger.info("Admin access confirmed, proceeding with setup check")
-        message = ""
+        client.enableKeepAlive(60)
+        try:
+            with WorkflowTracker() as tracker:
+                message = format_metadata_maintenance_status(metadata_refresh_statuses(tracker))
+        except Exception:
+            logger.exception('Could not read metadata maintenance status')
+            message = 'Metadata maintenance status unavailable; see activity log for details.'
+        check_slurm = unwrap(client.getInput('Check Slurm'))
+        if check_slurm is None:
+            check_slurm = True
+        if not check_slurm:
+            client.setOutput('Message', rstring(message))
+            return
+        maintenance_message = message
         with SlurmClient.from_config() as slurmClient:
             bio_version = pkg_resources.get_distribution("biomero").version
             message = f"== BIOMERO v{bio_version} =="
@@ -162,7 +208,7 @@ def runScript():
             
             logger.info(message)
 
-        client.setOutput("Message", rstring(str(message)))
+        client.setOutput("Message", rstring(str(message) + '\n' + maintenance_message))
 
     finally:
         client.closeSession()

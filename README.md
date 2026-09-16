@@ -531,3 +531,10 @@ by default (`Metadata Workers`, 1-8). Backups are opt-in: when enabled,
 inspection/manual-recovery snapshots are saved in a unique directory under
 `/data/biomero-metadata-backups`, with its path reported in the activity result.
 Administrators can override the location; no automated restore is provided.
+With `BIOMERO_DETACHED_WORKFLOWS` enabled, metadata apply runs execute in the
+processor's background maintenance lane. The activity reports a request ID;
+progress, backup locations and final counts are in `biomeroworker`'s
+`biomero.log`. Dry runs remain inline. An absent or false flag preserves inline
+execution for all refreshes.
+Slurm Check Setup reports active and recent maintenance requests and their
+counts. Uncheck `Check Slurm` to check maintenance without an HPC connection.

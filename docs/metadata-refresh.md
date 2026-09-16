@@ -37,12 +37,28 @@ Uncheck `Init Slurm` for metadata-only maintenance, without cluster setup or
 analytics rebuilding. Analytics projections and OMERO annotations are separate
 views of the event store, controlled by separate options.
 
+When `BIOMERO_DETACHED_WORKFLOWS` is enabled, apply runs are handed to the
+processor. The activity returns a durable maintenance request ID; progress,
+backup locations and final counts are in the worker's existing `biomero.log`,
+identified by that ID. You can close the browser tab after this handoff.
+Run **Slurm Check Setup (Admin Only)** to see all active and five recent
+finished requests, their status, processed/total counts, outcomes and failure
+reasons. Uncheck `Check Slurm` for maintenance status only, without connecting
+to HPC. Maintenance status comes directly from the event store rather than
+the analysis projection tables.
+Dry runs remain inline so their field diffs stay behind the activity's info
+button. With the flag absent or false, apply runs also remain inline.
+Maintenance is separate from the analysis workflow overview and submits no
+Slurm jobs. One sweep runs at a time. An interrupted sweep is retried after
+worker restart, rechecking already processed targets idempotently; previous
+backups are not overwritten. Failed sweeps require inspection and a new request.
+
 Before a deployment-wide update, dry-run one to three selected workflow UUIDs
 and inspect their field diffs. Then disable filtering and dry-run mode to apply
 the same view across OMERO. Discovery uses existing
 `biomero/workflow` annotations; it does not create metadata on unannotated objects.
 Each object/workflow pair is planned once, then preflighted before writing.
-Workers join the administrative script session and keep their clients alive;
+Workers join the administrative execution session and keep their clients alive;
 they detach on completion without terminating the parent session. Event-store
 sessions and connections owned by each worker are released when its lane ends.
 Missing event-store
@@ -64,11 +80,12 @@ metadata maps. Dry runs write neither OMERO metadata nor backup files.
 
 When backups are enabled, applying bulk changes creates separate per-target JSON
 snapshots and a compact outcome `report.json`, written once on completion, in
-the new run directory. The exact
-directory is reported in both the activity Message and detailed log; each saved
+the new run directory. For inline runs, the exact
+directory is reported in both the activity Message and detailed log; detached
+runs report it in the worker log and maintenance outcome. Each saved
 snapshot is logged. Reusing an explicitly supplied existing directory is
 refused. With backups disabled, no snapshot or report file is written;
-progress and outcomes remain in the normal activity and worker logs. Bulk scope never
+progress and outcomes remain in the normal execution logs. Bulk scope never
 implies permission to reconstruct missing history,
 advance historical snapshots to current state, or discard unknown annotations.
 

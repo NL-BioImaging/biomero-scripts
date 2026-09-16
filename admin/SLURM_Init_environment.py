@@ -39,6 +39,8 @@ from uuid import UUID, uuid4
 from eventsourcing.application import AggregateNotFoundError
 from omero.sys import ParametersI
 from biomero import WorkflowTracker
+from biomero.detached import detached_mode_enabled
+from biomero.maintenance import queue_metadata_refresh
 from biomero.provenance import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
 import os
 import sys
@@ -53,6 +55,12 @@ VERSION = "2.9.0"
 
 def format_metadata_summary(report):
     """Summarize result/workflow pairs; detailed plans stay in the worker log."""
+    if report.get('queued'):
+        return (f"Metadata refresh ({report['view_version']}, apply) queued.\n"
+                f"Maintenance request: {report['request_id']}\n"
+                "Runs in the background; you can close this browser tab.\n"
+                "Status: Slurm Check Setup (uncheck Check Slurm for maintenance only).\n"
+                "Detailed progress: biomeroworker biomero.log, using this request ID.")
     counts = report['counts']
     if report['dry_run']:
         planned = [item for item in report['results'] if item['status'] == 'planned']
@@ -398,7 +406,7 @@ def metadata_refresh_outcomes(conn, tracker, targets, directory, options,
 
 def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
                          backup_directory=None, workflow_ids=None, backup_enabled=False,
-                         workers=1, worker_factory=None):
+                         workers=1, worker_factory=None, progress_callback=None):
     """Refresh discoverable views, reporting unavailable histories separately."""
     if not conn.isAdmin():
         raise ValueError('Metadata refresh requires an administrator')
@@ -447,6 +455,9 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
         if item['status'] == 'planned' and item['changed']:
             would_update += 1
         if len(results) % 25 == 0 or len(results) == len(targets):
+            if progress_callback:
+                progress_callback({'discovered': len(targets), 'processed': len(results),
+                                   'counts': dict(report['counts'])})
             if dry_run:
                 logger.info('Metadata refresh progress: %s/%s; would update=%s, unchanged=%s, skipped=%s, failed=%s',
                             len(results), len(targets), would_update,
@@ -473,6 +484,8 @@ def refresh_metadata_from_init(client, conn):
     if dry_run is None:
         dry_run = True
     version = unwrap(client.getInput('Metadata View Version')) or 'v0'
+    if version != 'v0':
+        raise ValueError('View_Version must be v0')
     workers = unwrap(client.getInput('Metadata Workers'))
     if workers is None:
         workers = 4
@@ -492,8 +505,18 @@ def refresh_metadata_from_init(client, conn):
     else:
         logger.info('Metadata refresh scope: all workflows; UUID dropdown values are ignored')
     selection['backup_enabled'] = backup_enabled
+    if backup_enabled and backup and not Path(backup).is_absolute():
+        raise ValueError('Metadata Backup Directory must be an absolute worker path')
     client.enableKeepAlive(60)
     with WorkflowTracker() as tracker:
+        if detached_mode_enabled() and not dry_run:
+            options = dict(selection, view_version=version, dry_run=False,
+                           backup_directory=backup, workers=workers)
+            request_id = queue_metadata_refresh(
+                tracker, conn.getUserId(), conn.getGroupFromContext().getId(), options)
+            logger.info('Metadata refresh queued for the processor: request %s; version=%s, workers=%s, backups=%s',
+                        request_id, version, workers, backup_enabled)
+            return {'queued': True, 'request_id': str(request_id), 'view_version': version}
         if workers > 1:
             selection.update(workers=workers, worker_factory=partial(
                 metadata_refresh_worker, conn, tracker, client.getSessionId()))
