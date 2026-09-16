@@ -345,14 +345,16 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         return None
 
 
-def normalize_remote_results(slurm_client, data_path, workflow_id):
+def normalize_remote_results(slurm_client, data_path, workflow_id, omero_conn=None):
     """Administrator-only filesystem stage before result archiving."""
     if not (getattr(slurm_client, "remote_shallow_zarr", False)
             and IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
             and IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
         return None
     canonical = load_canonical_input_snapshot(slurm_client, workflow_id)
-    return slurm_client.normalize_results_on_slurm(data_path, workflow_id, canonical)
+    kwargs = {'omero_conn': omero_conn} if omero_conn is not None else {}
+    return slurm_client.normalize_results_on_slurm(
+        data_path, workflow_id, canonical, **kwargs)
 
 
 def build_shallow_import_options(canonical_inputs, client=None, remote_receipts=()):
@@ -2045,6 +2047,7 @@ def extract_or_reuse_slurm_results(
     wf_id: UUID,
     message: str,
     permanent_storage_path: Optional[str],
+    omero_conn=None,
 ) -> Tuple[Optional[str], str, Optional[str], str, str]:
     """Reuse durable staged results or perform the initial Slurm retrieval."""
     if permanent_storage_path:
@@ -2067,6 +2070,7 @@ def extract_or_reuse_slurm_results(
         group_name,
         wf_id,
         message,
+        omero_conn=omero_conn,
     )
 
 
@@ -2077,6 +2081,7 @@ def extract_slurm_results_zip(
     group_name: str,
     wf_id: UUID,
     message: str,
+    omero_conn=None,
 ) -> Tuple[str, str, str, str, str]:
     """Extract and copy SLURM results zip once for reuse by multiple workflows.
 
@@ -2090,6 +2095,7 @@ def extract_slurm_results_zip(
         group_name: Name of the OMERO group.
         wf_id: Workflow ID.
         message: Message to be returned in the tuple.
+        omero_conn: Workflow connection kept alive while remote normalization runs.
 
     Returns:
         slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message
@@ -2145,7 +2151,8 @@ def extract_slurm_results_zip(
             f"SLURM output directory still empty after {poll_max_attempts * poll_interval}s: "
             f"{out_dir}. Job may have failed to write output.")
 
-    normalize_remote_results(slurmClient, slurm_data_path, wf_id)
+    normalize_remote_results(slurmClient, slurm_data_path, wf_id,
+                             omero_conn=omero_conn)
 
     # Archive-format extension point: normalization is independent of ZIP.
     # Create and copy zip archive from SLURM
@@ -4922,7 +4929,7 @@ def runScript() -> None:
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_or_reuse_slurm_results(
                     slurmClient, slurm_job_id, local_tmp_storage, group_name,
-                    wf_id, message, permanent_storage_path)
+                    wf_id, message, permanent_storage_path, omero_conn=conn)
                 message += f"\nSuccessfully extracted SLURM results: {permanent_storage_path}"
                 logger.info(
                     f"SLURM results extracted and available: {permanent_storage_path}")

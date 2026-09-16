@@ -483,6 +483,14 @@ They show how to use the library to run workflows directly from OMERO on a Slurm
 
 ### Optional remote Zarr shallower
 
+Remote normalization uses BIOMERO's shared Slurm job monitor and keeps the
+import script's OMERO connection alive during image acquisition, normalization
+and recovery. This applies to inline and detached workflows. Helper resources
+inherit generic Slurm settings, with optional partition, memory and time
+overrides in `[SLURM]` (`result_normalizer_partition`,
+`result_normalizer_mem`, `result_normalizer_time`). GPU and job-array settings
+are not inherited. Use matching BIOMERO core and scripts versions.
+
 With administrator `BIOMERO_REMOTE_SHALLOW_ZARR=true`, importer enablement and
 the existing shallow capability, `SLURM_Import_Results.py` runs the configured
 CPU result normalizer before ZIP creation. It uses the canonical input manifest
