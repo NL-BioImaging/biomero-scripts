@@ -13,7 +13,7 @@ from types import ModuleType
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 source = ROOT / 'admin' / 'SLURM_Refresh_Metadata.py'
 if not source.exists():
-    source = ROOT / "_data" / "SLURM_Import_Results.py"
+    source = ROOT / 'admin' / 'SLURM_Init_environment.py'
 tree = ast.parse(source.read_text(encoding="utf-8"))
 if not any(isinstance(n, ast.FunctionDef) and n.name == 'refresh_workflow_metadata'
            for n in tree.body):
@@ -21,6 +21,7 @@ if not any(isinstance(n, ast.FunctionDef) and n.name == 'refresh_workflow_metada
                 allow_module_level=True)
 names = {"metadata_pairs", "_read_values", "refresh_workflow_metadata", "runScript"}
 names.update({'discover_metadata_targets', 'refresh_all_metadata'})
+names.add('refresh_metadata_from_init')
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
 assert len(nodes) >= 3, "Refresh adapter must live in the scripts layer"
 
@@ -38,6 +39,43 @@ exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
      adapter.__dict__)
 metadata_pairs = adapter.metadata_pairs
 refresh_workflow_metadata = adapter.refresh_workflow_metadata
+
+
+@pytest.mark.skipif(not hasattr(adapter, 'refresh_metadata_from_init'), reason='Init option unavailable')
+@pytest.mark.parametrize('enabled,dry_run', [(False, None), (True, None), (True, False)])
+def test_init_refresh_is_optional_and_defaults_to_preview(enabled, dry_run):
+    inputs = {'Refresh OMERO Metadata': enabled, 'Metadata Dry Run': dry_run,
+              'Metadata View Version': 'v1', 'Metadata Backup Directory': '/private/new'}
+    client = Mock()
+    client.getInput.side_effect = inputs.get
+    conn = Mock()
+    conn.isAdmin.return_value = True
+    tracker = Mock()
+    context = Mock(__enter__=Mock(return_value=tracker), __exit__=Mock(return_value=False))
+    factory = Mock(return_value=context)
+    refresh = Mock(return_value={'counts': {}})
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value,
+                    WorkflowTracker=factory, refresh_all_metadata=refresh):
+        result = adapter.refresh_metadata_from_init(client, conn)
+    if enabled:
+        refresh.assert_called_once_with(conn, tracker, view_version='v1',
+            dry_run=True if dry_run is None else dry_run, backup_directory='/private/new')
+        client.enableKeepAlive.assert_called_once_with(60)
+    else:
+        assert result is None
+        factory.assert_not_called()
+        refresh.assert_not_called()
+
+
+@pytest.mark.skipif(not hasattr(adapter, 'refresh_metadata_from_init'), reason='Init option unavailable')
+def test_init_refresh_denies_nonadmin_before_opening_tracker():
+    client, conn, factory = Mock(), Mock(), Mock()
+    client.getInput.return_value = True
+    conn.isAdmin.return_value = False
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value, WorkflowTracker=factory):
+        with pytest.raises(ValueError, match='administrator'):
+            adapter.refresh_metadata_from_init(client, conn)
+    factory.assert_not_called()
 
 
 @pytest.mark.skipif(not hasattr(adapter, 'refresh_all_metadata'), reason='bulk refresh not present')
@@ -95,7 +133,7 @@ def test_bulk_apply_reports_partial_failure_and_preserves_per_target_backups(tmp
     assert json.loads((backup / 'report.json').read_text()) == result
 
 
-@pytest.mark.skipif(source.parent.name != 'admin', reason='admin script not present')
+@pytest.mark.skipif(source.name != 'SLURM_Refresh_Metadata.py', reason='standalone entrypoint replaced by Init')
 def test_standalone_admin_entrypoint_denies_nonadmin_before_tracker():
     assert hasattr(adapter, 'runScript'), 'Refresh needs its own admin entrypoint'
     client = Mock()
@@ -112,7 +150,7 @@ def test_standalone_admin_entrypoint_denies_nonadmin_before_tracker():
     assert 'denied' in client.setOutput.call_args.args[1].lower()
 
 
-@pytest.mark.skipif(source.parent.name != 'admin', reason='admin script not present')
+@pytest.mark.skipif(source.name != 'SLURM_Refresh_Metadata.py', reason='standalone entrypoint replaced by Init')
 def test_admin_entrypoint_defaults_to_dry_run_and_only_refreshes_metadata():
     from uuid import UUID
     client = Mock()
