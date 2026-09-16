@@ -73,7 +73,8 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
             records.append({'annotation_id': ann.getId(), 'namespace': ns,
                             'pairs': [list(p) for p in pairs]})
         plan = plan_metadata_refresh(tracker, workflow_id, rows,
-                                     view_version=view_version)
+                                     view_version=view_version,
+                                     target_key=f'{object_type}:{object_id}')
         actions = []
         for record, change in zip(records, plan):
             pairs = metadata_pairs(change.after.values) if change.after else None

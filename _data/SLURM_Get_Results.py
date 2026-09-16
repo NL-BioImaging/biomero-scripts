@@ -52,6 +52,7 @@ License: GPL v2+ (see LICENSE.txt)
 """
 
 import difflib
+import json
 import fnmatch
 import shutil
 import sys
@@ -1242,6 +1243,11 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
             for tid in wf.tasks:
                 task = slurmClient.workflowTracker.repository.get(tid)
                 task_prefix = f"Task_{task.task_name}_"
+
+                if getattr(task, 'storage_provenance', None):
+                    metadata_rows.append([
+                        f'{task_prefix}Storage_Provenance',
+                        json.dumps(task.storage_provenance, sort_keys=True)])
 
                 metadata_rows.extend([
                     [f'{task_prefix}ID', str(task._id)],

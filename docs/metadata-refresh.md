@@ -60,6 +60,11 @@ result = refresh_workflow_metadata(
 The default is a dry run and the legacy-compatible `v0` view. The explicit `v1`
 view additionally omits verbose job command, environment and result-message
 fields. Neither policy reduces full CSV provenance or changes event history.
+Both retain recorded per-result shallow/full storage provenance alongside the
+import-task metadata, including execution location, tool/container identity and
+canonical biocodes or a manifest reference. Import Results records these facts
+on new imports; this admin script only re-renders the historical snapshot. Older
+snapshots lacking those facts cannot acquire them through a view refresh alone.
 See BIOMERO's developer documentation, **Workflow metadata views**, for the
 rendering policies and historical snapshot resolution.
 

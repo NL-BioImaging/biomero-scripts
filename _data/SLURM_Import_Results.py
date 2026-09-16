@@ -2370,6 +2370,11 @@ def create_metadata_csv(
                 task = slurmClient.workflowTracker.repository.get(tid)
                 task_prefix = f"Task_{task.task_name}_"
 
+                if getattr(task, 'storage_provenance', None):
+                    metadata_rows.append([
+                        f'{task_prefix}Storage_Provenance',
+                        json.dumps(task.storage_provenance, sort_keys=True)])
+
                 metadata_rows.extend([
                     [f'{task_prefix}ID', str(task._id)],
                     [f'{task_prefix}Name', task.task_name],
@@ -3547,6 +3552,104 @@ def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
 
 
 
+def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
+    """Read the imported result's managed storage evidence, never feature flags."""
+    import hashlib
+
+    target = conn.getObject(object_type, object_id)
+    refs, paths = [], set()
+    for ann in target.listAnnotations():
+        ns = ann.getNs()
+        if ns not in ('biomero.zarr.shallow',
+                      (IMPORTER_CONFIG or {}).get('annotation_namespace', 'biomero.import')):
+            continue
+        values = dict(ann.getValue())
+        if ns == 'biomero.zarr.shallow':
+            if values.get('workflowId') == str(wf_id):
+                refs.append(values)
+        else:
+            path = values.get('Imported_from') or values.get('Filepath')
+            if path:
+                paths.add(path)
+    mount = Path(os.getenv('IMPORT_MOUNT_PATH', '/data')).resolve()
+    reference = None
+    if refs:
+        if len(refs) != 1 or refs[0].get('storageRoot') != 'import-mount-data':
+            raise ValueError('Ambiguous or unsupported shallow storage reference')
+        reference = refs[0]
+        root = (mount / reference['relativePath']).resolve()
+        root.relative_to(mount)
+    else:
+        roots = set()
+        for path in paths:
+            candidate = Path(path).resolve()
+            if not candidate.is_relative_to(mount):
+                continue
+            nearest = None
+            for parent in (candidate, *candidate.parents):
+                if not parent.is_relative_to(mount):
+                    break
+                if (parent / '.biomero-shallow.json').is_file():
+                    nearest = parent
+                    break
+                if nearest is None and any((parent / name).is_file()
+                                           for name in ('.zgroup', 'zarr.json')):
+                    nearest = parent
+            if nearest:
+                roots.add(nearest)
+        if not roots:
+            return None  # Non-Zarr or unavailable evidence; do not invent an outcome.
+        if len(roots) != 1:
+            raise ValueError('Ambiguous imported storage paths')
+        root = roots.pop()
+    manifest = root / '.biomero-shallow.json'
+    shallow = manifest.is_file()
+    if reference and not shallow:
+        raise ValueError('Shallow reference has no readable manifest')
+    evidence = {'schema': 1, 'storage': 'shallow-zarr' if shallow else 'full-zarr'}
+    outcome = root / '.biomero-import-storage.json'
+    if outcome.is_file():
+        recorded = json.loads(outcome.read_text(encoding='utf-8'))
+        if (recorded.get('schema') != 1 or recorded.get('workflow_id') != str(wf_id)
+                or recorded.get('storage') != evidence['storage']):
+            raise ValueError('Storage outcome does not match imported result')
+        evidence.update(recorded)
+    elif shallow:
+        evidence['location'] = 'unknown'
+    if shallow:
+        raw = manifest.read_bytes()
+        collection = json.loads(raw)
+        if collection.get('workflowId') != str(wf_id):
+            raise ValueError('Shallow manifest belongs to another workflow')
+        images = collection['images']
+        if reference and 'imageNodePath' in reference:
+            images = [image for image in images
+                      if image['imageNodePath'] == reference['imageNodePath']]
+        if not images:
+            raise ValueError('Result missing from shallow manifest')
+        evidence.update(
+            manifest='import-mount-data/' + manifest.relative_to(mount).as_posix(),
+            manifest_sha256=hashlib.sha256(raw).hexdigest(),
+            source_biocodes=sorted({image['source']['pixelIdentity']['iscc']
+                                   for image in images}))
+    return evidence
+
+
+def record_import_storage_provenance(conn, slurm_client, object_type, object_id, wf_id):
+    """Persist observed result facts before the import-task metadata snapshot."""
+    evidence = collect_import_storage_provenance(conn, object_type, object_id, wf_id)
+    if evidence is None:
+        return
+    tracker = slurm_client.workflowTracker
+    workflow = tracker.repository.get(uuid.UUID(str(wf_id)))
+    tasks = [tracker.repository.get(tid) for tid in workflow.tasks]
+    imports = [task for task in tasks if task.task_name == 'SLURM_Import_Results.py']
+    if len(imports) != 1:
+        raise ValueError('Cannot identify a unique import task for storage provenance')
+    tracker.record_storage_provenance(
+        imports[0].id, f'{object_type}:{object_id}', evidence)
+
+
 def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf_id=None):
     """Generic function to add workflow metadata annotations to any OMERO object (Image, Plate, etc.)"""
     outcomes = []
@@ -3559,8 +3662,16 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
     ns_wf = "biomero/workflow"
     if slurmClient.track_workflows and wf_id:
         try:
+            try:
+                record_import_storage_provenance(
+                    conn, slurmClient, object_type, object_id, wf_id)
+            except Exception as error:
+                outcomes.append('failed')
+                logger.warning('Storage provenance unavailable for %s %s: %s',
+                               object_type, object_id, error)
             for annotation in render_workflow_metadata(
-                    slurmClient.workflowTracker, wf_id):
+                    slurmClient.workflowTracker, wf_id,
+                    target_key=f'{object_type}:{object_id}'):
                 write_map(
                     conn=conn, object_type=object_type, object_id=object_id,
                     kv_dict=annotation.values, ns=annotation.namespace,
