@@ -5,10 +5,11 @@ import pytest
 
 import ast
 import json
+import logging
 import os
 from pathlib import Path
 import sys
-from uuid import UUID
+from uuid import UUID, uuid4
 from types import ModuleType
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
@@ -34,7 +35,8 @@ def MetadataChange(before, after):
 
 adapter = ModuleType("metadata_refresh_test_adapter")
 adapter.__dict__.update(json=json, Path=Path, MetadataAnnotation=MetadataAnnotation,
-                        UUID=UUID, NAMESPACE="biomero/workflow", plan_metadata_refresh=Mock())
+                        UUID=UUID, uuid4=uuid4, logger=logging.getLogger(__name__),
+                        NAMESPACE="biomero/workflow", plan_metadata_refresh=Mock())
 sys.modules[adapter.__name__] = adapter
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
      adapter.__dict__)
@@ -335,3 +337,110 @@ def test_unlink_explicitly_excludes_map_annotations(connection, planner, tmp_pat
     delete.assert_called_once_with(targetObjects={'PlateAnnotationLink': [123]},
                                    childOptions=[option.return_value])
     ann.save.assert_not_called()
+
+
+BACKUP_OPTIONS_AVAILABLE = ('backup_enabled' in refresh_workflow_metadata.__code__.co_varnames
+                            or os.environ.get('BIOMERO_TEST_METADATA_BACKUPS'))
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+def test_bulk_apply_automatically_creates_unique_durable_backup_directories(tmp_path, caplog):
+    root = tmp_path / 'durable-backups'
+    path = lambda value: root if value == '/data/biomero-metadata-backups' else Path(value)
+    refresh = Mock(return_value={'annotations': [{'action': 'update'}]})
+    with patch.dict(adapter.__dict__, Path=path,
+                    discover_metadata_targets=Mock(return_value=[('Plate', 10, 'wf')]),
+                    refresh_workflow_metadata=refresh), caplog.at_level(logging.INFO):
+        first = adapter.refresh_all_metadata(Mock(), object(), dry_run=False)
+        second = adapter.refresh_all_metadata(Mock(), object(), dry_run=False)
+    directories = [Path(report['backup_directory']) for report in (first, second)]
+    assert directories[0] != directories[1]
+    for directory, report in zip(directories, (first, second)):
+        assert directory.parent == root
+        assert json.loads((directory / 'report.json').read_text()) == report
+        assert str(directory) in caplog.text
+    assert all(call.kwargs['backup_path'].parent in directories
+               for call in refresh.call_args_list if not call.kwargs['dry_run'])
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+def test_apply_without_backup_remains_preflighted(connection, planner, caplog):
+    conn, ann = connection
+    with caplog.at_level(logging.WARNING):
+        refresh_workflow_metadata(conn, object(), 'Plate', 10, 'wf',
+                                  dry_run=False, backup_enabled=False)
+    ann.save.assert_called_once()
+    assert conn.getAnnotationLinks.called
+    assert 'disabled' in caplog.text.lower()
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+def test_shared_maps_still_refused_without_backup(connection, planner):
+    conn, ann = connection
+    conn.getAnnotationLinks.side_effect = lambda *a, **kw: [Mock()]
+    with pytest.raises(ValueError, match='Shared'):
+        refresh_workflow_metadata(conn, object(), 'Plate', 10, 'wf',
+                                  dry_run=False, backup_enabled=False)
+    ann.save.assert_not_called()
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+def test_bulk_backup_opt_out_creates_no_files_and_is_reported(tmp_path, caplog):
+    directory = tmp_path / 'unused'
+    refresh = Mock(return_value={'annotations': [{'action': 'update'}]})
+    with patch.dict(adapter.__dict__,
+                    discover_metadata_targets=Mock(return_value=[('Plate', 10, 'wf')]),
+                    refresh_workflow_metadata=refresh), caplog.at_level(logging.WARNING):
+        report = adapter.refresh_all_metadata(Mock(), object(), dry_run=False,
+                                             backup_enabled=False, backup_directory=directory)
+    assert not directory.exists()
+    assert report['backup_directory'] is None
+    assert report['counts']['updated'] == 1
+    assert refresh.call_args.kwargs['backup_enabled'] is False
+    assert refresh.call_args.kwargs['backup_path'] is None
+    assert 'disabled' in caplog.text.lower()
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+def test_dry_run_shows_exact_namespace_and_final_pairs_without_backups(connection, planner):
+    conn, ann = connection
+    report = refresh_workflow_metadata(conn, object(), 'Plate', 10, 'wf')
+    planned = report['annotations'][0]
+    assert planned['namespace'] == 'biomero/workflow'
+    assert planned['before_pairs'] == [['Workflow_ID', 'wf'], ['Name', 'run']]
+    assert planned['after_pairs'] == [['Workflow_ID', 'wf'], ['Name', 'run'],
+                                     ['Metadata_View_Version', 'v0']]
+    planner.return_value[0].after = None
+    unlinked = refresh_workflow_metadata(conn, object(), 'Plate', 10, 'wf')['annotations'][0]
+    assert unlinked['action'] == 'unlink'
+    assert unlinked['after_pairs'] == []
+    ann.save.assert_not_called()
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+@pytest.mark.parametrize('save_backups', [None, True, False])
+def test_init_backup_default_and_explicit_opt_out(save_backups):
+    inputs = {'Refresh OMERO Metadata': True, 'Metadata Dry Run': False,
+              'Save Metadata Backups': save_backups}
+    client = Mock()
+    client.getInput.side_effect = inputs.get
+    tracker = Mock()
+    context = Mock(__enter__=Mock(return_value=tracker), __exit__=Mock(return_value=False))
+    refresh = Mock()
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value,
+                    WorkflowTracker=Mock(return_value=context), refresh_all_metadata=refresh):
+        adapter.refresh_metadata_from_init(client, Mock())
+    assert refresh.call_args.kwargs['backup_directory'] is None
+    assert refresh.call_args.kwargs.get('backup_enabled', True) is (save_backups is not False)
+    assert refresh.call_args.kwargs['dry_run'] is False
+
+
+@pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
+def test_bulk_dry_run_never_creates_backup_directory(tmp_path):
+    directory = tmp_path / 'unused'
+    with patch.dict(adapter.__dict__,
+                    discover_metadata_targets=Mock(return_value=[('Plate', 10, 'wf')]),
+                    refresh_workflow_metadata=Mock(return_value={'annotations': []})):
+        report = adapter.refresh_all_metadata(Mock(), object(), backup_directory=directory)
+    assert not directory.exists()
+    assert report['backup_directory'] is None
