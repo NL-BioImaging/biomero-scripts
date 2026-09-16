@@ -36,8 +36,35 @@ def load(route):
               NSCREATED="test", Any=object, BlitzGateway=object, SlurmClient=object,
               List=list, Dict=dict, Optional=__import__("typing").Optional,
               Tuple=tuple)
+    # The renderer is tested in core. This harness tests its writer contract,
+    # without requiring an unpublished core branch in shared CI.
+    def render(tracker, workflow_id):
+        rows = [SimpleNamespace(namespace="biomero/workflow", values={
+            "Workflow_ID": workflow_id})]
+        for key in tracker.repository.get(workflow_id).tasks:
+            task = tracker.repository.get(key)
+            values = {"Task_ID": key, "Workflow_ID": workflow_id}
+            values.update({"Param_" + k: str(v) for k, v in task.params.items()})
+            namespace = "biomero/workflow/task/" + key
+            rows.append(SimpleNamespace(namespace=namespace, values=values))
+            rows.append(SimpleNamespace(namespace=namespace + "/job",
+                                        values={"Task_ID": key, "Job_ID": key}))
+        return rows
+    ns["render_workflow_metadata"] = Mock(side_effect=render)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), ns)
     return ns
+
+
+@pytest.mark.parametrize("route", ["Get", "Import"])
+def test_annotations_delegate_to_core_renderer(route):
+    source = (ROOT / '_data' / f'SLURM_{route}_Results.py').read_text(encoding='utf-8')
+    if 'from biomero.provenance import render_workflow_metadata' not in source:
+        pytest.skip('versioned renderer is not available in this source revision')
+    ns = load(route)
+    client = tracker()
+    ns["add_image_annotations"](object(), client, 401, 23, "wf")
+    ns["render_workflow_metadata"].assert_called_once_with(
+        client.workflowTracker, "wf")
 
 
 def tracker():
