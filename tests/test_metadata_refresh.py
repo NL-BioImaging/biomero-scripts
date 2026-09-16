@@ -9,6 +9,10 @@ import logging
 import os
 from pathlib import Path
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from queue import Queue, Empty
+from functools import partial
 from uuid import UUID, uuid4
 from types import ModuleType
 
@@ -35,9 +39,16 @@ def MetadataAnnotation(namespace, values):
 def MetadataChange(before, after):
     return SimpleNamespace(before=before, after=after)
 
+class AggregateNotFoundError(Exception):
+    """Stand-in for the event-store boundary's missing-history exception."""
+
+
 adapter = ModuleType("metadata_refresh_test_adapter")
 adapter.__dict__.update(json=json, Path=Path, MetadataAnnotation=MetadataAnnotation,
                         UUID=UUID, uuid4=uuid4, logger=logging.getLogger(__name__),
+                        ThreadPoolExecutor=ThreadPoolExecutor, contextmanager=contextmanager,
+                        Queue=Queue, Empty=Empty, partial=partial,
+                        AggregateNotFoundError=AggregateNotFoundError,
                         NAMESPACE="biomero/workflow", plan_metadata_refresh=Mock())
 sys.modules[adapter.__name__] = adapter
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
