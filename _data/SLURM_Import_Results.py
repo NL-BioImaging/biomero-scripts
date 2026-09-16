@@ -345,7 +345,7 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         return None
 
 
-def normalize_remote_results(slurm_client, data_path, workflow_id, omero_conn=None):
+def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None):
     """Administrator-only filesystem stage before result archiving."""
     if not (getattr(slurm_client, "remote_shallow_zarr", False)
             and IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
@@ -358,7 +358,7 @@ def normalize_remote_results(slurm_client, data_path, workflow_id, omero_conn=No
             if omero_conn.keepAlive() is False:
                 raise RuntimeError('OMERO connection is no longer active')
         kwargs['heartbeat'] = heartbeat
-    return slurm_client.normalize_results_on_slurm(
+    return slurm_client.shallow_results_on_slurm(
         data_path, workflow_id, canonical, **kwargs)
 
 
@@ -2100,7 +2100,7 @@ def extract_slurm_results_zip(
         group_name: Name of the OMERO group.
         wf_id: Workflow ID.
         message: Message to be returned in the tuple.
-        omero_conn: Workflow connection kept alive while remote normalization runs.
+        omero_conn: Workflow connection kept alive while remote shallowing runs.
 
     Returns:
         slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message
@@ -2156,10 +2156,10 @@ def extract_slurm_results_zip(
             f"SLURM output directory still empty after {poll_max_attempts * poll_interval}s: "
             f"{out_dir}. Job may have failed to write output.")
 
-    normalize_remote_results(slurmClient, slurm_data_path, wf_id,
+    shallow_remote_results(slurmClient, slurm_data_path, wf_id,
                              omero_conn=omero_conn)
 
-    # Archive-format extension point: normalization is independent of ZIP.
+    # Archive-format extension point: shallowing is independent of ZIP.
     # Create and copy zip archive from SLURM
     filename = f"{slurm_job_id}_out"
     logger.info(f"Creating and copying data archive from SLURM...")
@@ -3851,7 +3851,7 @@ def process_importer_workflow(
     logger.info("Creating upload orders for biomero-importer...")
     remote_receipts = ()
     if getattr(slurmClient, "remote_shallow_zarr", False) and canonical_inputs is not None:
-        remote_receipts = slurmClient.get_result_normalizer_receipts(wf_id, canonical_inputs)
+        remote_receipts = slurmClient.get_remote_shallower_receipts(wf_id, canonical_inputs)
     orders = create_upload_orders_for_results(
         group_name, username, destination_type, destination_id,
         permanent_storage_path, wf_id, client, canonical_inputs,
