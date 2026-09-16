@@ -35,6 +35,7 @@ from biomero import SlurmClient
 import logging
 import json
 from pathlib import Path
+from uuid import UUID
 from eventsourcing.application import AggregateNotFoundError
 from omero.sys import ParametersI
 from biomero import WorkflowTracker
@@ -235,13 +236,16 @@ def discover_metadata_targets(conn):
 
 
 def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
-                         backup_directory=None):
+                         backup_directory=None, workflow_id=None):
     """Refresh discoverable views, reporting unavailable histories separately."""
     if not conn.isAdmin():
         raise ValueError('Metadata refresh requires an administrator')
     if view_version not in ('v0', 'v1'):
         raise ValueError('View_Version must be v0 or v1')
+    selected_workflow = str(UUID(str(workflow_id).strip())) if workflow_id else None
     targets = discover_metadata_targets(conn)
+    if selected_workflow:
+        targets = [target for target in targets if target[2] == selected_workflow]
     directory = None
     if not dry_run:
         if not backup_directory or not Path(backup_directory).is_absolute():
@@ -300,10 +304,12 @@ def refresh_metadata_from_init(client, conn):
         dry_run = True
     version = unwrap(client.getInput('Metadata View Version')) or 'v0'
     backup = unwrap(client.getInput('Metadata Backup Directory'))
+    workflow_id = unwrap(client.getInput('Metadata Workflow UUID'))
+    selection = {'workflow_id': str(UUID(workflow_id.strip()))} if workflow_id and workflow_id.strip() else {}
     client.enableKeepAlive(60)
     with WorkflowTracker() as tracker:
         return refresh_all_metadata(conn, tracker, view_version=version,
-                                    dry_run=dry_run, backup_directory=backup)
+                                    dry_run=dry_run, backup_directory=backup, **selection)
 
 
 def runScript():
@@ -357,6 +363,8 @@ def runScript():
                        values=[rstring('v0'), rstring('v1')]),
         scripts.String('Metadata Backup Directory', optional=True, grouping='02.3',
                        description='New absolute directory on private durable worker storage, required when applying changes.'),
+        scripts.String('Metadata Workflow UUID', optional=True, grouping='02.4',
+                       description='Only refresh existing Image and Plate metadata for this workflow UUID. Leave blank for all workflows.'),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
         version=VERSION,
         authors=["Torec Luik"],
