@@ -15,8 +15,9 @@ Run **Slurm Init (Admin Only)** with these inputs:
 - `Metadata Dry Run`: true by default; inspect the report before disabling it.
 - `Metadata Backup Directory`: a new absolute directory on private, durable
   worker storage; required when applying. Its parent must already exist.
-- `Metadata Workflow UUID`: optional; restrict refresh to existing Image and Plate
-  annotations for one workflow. Leave blank for all workflows. Discovery still
+- `Metadata Workflow UUIDs`: optional searchable multi-select populated from
+  existing Image and Plate workflow metadata. Select one or more workflows, or
+  leave the selection empty (the default) for all workflows. Discovery still
   scans workflow annotations, but only matching results are replayed and planned.
 
 Uncheck `Init Slurm` for metadata-only maintenance, without cluster setup or
