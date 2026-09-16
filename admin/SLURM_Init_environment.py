@@ -61,7 +61,7 @@ def format_metadata_summary(report):
         outcomes = f"Updated: {counts.get('updated', 0)}; Unchanged: {counts.get('unchanged', 0)}"
         mode = 'apply'
         directory = report.get('backup_directory')
-        note = (f'Backups and report: {directory}' if directory else
+        note = (f'Backup run directory: {directory}' if directory else
                 'Backups were explicitly disabled.' if report.get('backup_enabled') is False else
                 'See the backup directory for per-target backups and report.json.')
     return (f"Metadata refresh ({report['view_version']}, {mode}): "
@@ -329,8 +329,15 @@ def refresh_metadata_from_init(client, conn):
     backup_enabled = unwrap(client.getInput('Save Metadata Backups'))
     if backup_enabled is None:
         backup_enabled = True
-    workflow_ids = unwrap(client.getInput('Metadata Workflow UUIDs'))
-    selection = {'workflow_ids': [str(UUID(value.strip())) for value in workflow_ids]} if workflow_ids else {}
+    selection = {}
+    if unwrap(client.getInput('Filter Metadata by Workflow UUIDs')):
+        workflow_ids = unwrap(client.getInput('Metadata Workflow UUIDs'))
+        if not workflow_ids:
+            raise ValueError('Select at least one workflow UUID when filtering metadata')
+        selection['workflow_ids'] = [str(UUID(value.strip())) for value in workflow_ids]
+        logger.info('Metadata refresh scope: selected workflow UUIDs %s', selection['workflow_ids'])
+    else:
+        logger.info('Metadata refresh scope: all workflows; UUID dropdown values are ignored')
     if not backup_enabled:
         selection['backup_enabled'] = False
     client.enableKeepAlive(60)
@@ -415,9 +422,11 @@ def runScript():
                      description='Save original metadata and the report before applying. Uncheck to explicitly apply without backups.'),
         scripts.String('Metadata Backup Directory', optional=True, grouping='02.3.1',
                        description='Optional new absolute worker directory. Leave empty for an automatically created run directory under /data/biomero-metadata-backups. The activity log reports the exact location.'),
-        scripts.List('Metadata Workflow UUIDs', optional=True, grouping='02.4',
+        scripts.Bool('Filter Metadata by Workflow UUIDs', grouping='02.4', default=False,
+                     description='Restrict the refresh to selected workflows. Leave unchecked for all workflows, regardless of the prefilled UUID dropdown.'),
+        scripts.List('Metadata Workflow UUIDs', optional=True, grouping='02.4.1',
                      values=get_metadata_workflow_choices(),
-                     description='Select existing workflow UUIDs; type to filter the choices. Leave empty for all workflows with Image or Plate metadata.').ofType(rstring('')),
+                     description='Used only when Filter Metadata by Workflow UUIDs is checked. Select existing workflows; use [+]/[-] to add/remove selectors and type to search.').ofType(rstring('')),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
         version=VERSION,
         authors=["Torec Luik"],

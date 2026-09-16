@@ -21,9 +21,12 @@ Run **Slurm Init (Admin Only)** with these inputs:
   `/data/biomero-metadata-backups` on the worker's durable shared storage.
   Missing parent directories are created automatically. No directory needs
   to be supplied for normal use.
-- `Metadata Workflow UUIDs`: optional searchable multi-select populated from
-  existing Image and Plate workflow metadata. Select one or more workflows, or
-  leave the selection empty (the default) for all workflows. Discovery still
+- `Filter Metadata by Workflow UUIDs`: false by default. Leave unchecked to
+  refresh all workflows; the UUID dropdown's preselected value is ignored.
+- `Metadata Workflow UUIDs`: searchable selectors populated from
+  existing Image and Plate workflow metadata. When filtering is enabled,
+  select one or more workflows; use `[+]`/`[-]` to add or remove selectors.
+  At least one UUID is required when filtering is enabled. Discovery still
   scans workflow annotations, but only matching results are replayed and planned.
 
 Uncheck `Init Slurm` for metadata-only maintenance, without cluster setup or
