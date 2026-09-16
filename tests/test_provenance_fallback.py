@@ -2,6 +2,7 @@
 import ast
 import csv
 import glob
+import json
 import logging
 import os
 import re
@@ -30,7 +31,7 @@ def load(route):
              "add_metadata_to_imported_plates", "upload_contents_to_omero"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
              and (n.name in names or "provenance" in n.name)]
-    ns = dict(os=os, re=re, csv=csv, glob=glob,
+    ns = dict(os=os, re=re, csv=csv, glob=glob, json=json,
               SUPPORTED_IMAGE_EXTENSIONS=(".tif",), logger=logging.getLogger("test"),
               ezomero=SimpleNamespace(post_map_annotation=Mock(return_value=19)),
               NSCREATED="test", Any=object, BlitzGateway=object, SlurmClient=object,
@@ -38,7 +39,7 @@ def load(route):
               Tuple=tuple)
     # The renderer is tested in core. This harness tests its writer contract,
     # without requiring an unpublished core branch in shared CI.
-    def render(tracker, workflow_id):
+    def render(tracker, workflow_id, **kwargs):
         rows = [SimpleNamespace(namespace="biomero/workflow", values={
             "Workflow_ID": workflow_id})]
         for key in tracker.repository.get(workflow_id).tasks:
@@ -52,6 +53,7 @@ def load(route):
         return rows
     ns["render_workflow_metadata"] = Mock(side_effect=render)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), ns)
+    ns['record_import_storage_provenance'] = Mock()
     return ns
 
 
@@ -63,8 +65,11 @@ def test_annotations_delegate_to_core_renderer(route):
     ns = load(route)
     client = tracker()
     ns["add_image_annotations"](object(), client, 401, 23, "wf")
+    kwargs = {'target_key': 'Image:401'} if route == 'Import' and 'target_key=' in source else {}
     ns["render_workflow_metadata"].assert_called_once_with(
-        client.workflowTracker, "wf")
+        client.workflowTracker, "wf", **kwargs)
+    if route == 'Import' and 'def record_import_storage_provenance' in source:
+        ns['record_import_storage_provenance'].assert_called_once()
 
 
 def tracker():
@@ -164,13 +169,19 @@ def test_full_csv_preserves_schema_and_selected_values(route, tmp_path):
     conn = Mock()
     conn.getUser.return_value.getName.return_value = "user"
     conn.getGroupFromContext.return_value.getName.return_value = "group"
-    files = ns["create_metadata_csv"](conn, tracker(), str(tmp_path), 23, "wf")
+    client = tracker()
+    evidence = {'Plate:12': {'storage': 'shallow-zarr', 'source_biocodes': ['ISCC:SOURCE']}}
+    client.workflowTracker.repository.get('a').storage_provenance = evidence
+    files = ns["create_metadata_csv"](conn, client, str(tmp_path), 23, "wf")
     with open(files[0], newline="", encoding="utf-8") as stream:
         rows = dict(csv.reader(stream))
     assert rows["Task_a_Param_schema"] == "λ" * 5000
     assert rows["Task_a_Param_selected"] == "False"
     assert rows["Task_a_Job_a_Command"] == "run"
     assert rows["Task_a_Job_a_Env_VALUE"] == "ok"
+    source = (ROOT / '_data' / f'SLURM_{route}_Results.py').read_text(encoding='utf-8')
+    if 'Storage_Provenance' in source:
+        assert json.loads(rows['Task_a_Storage_Provenance']) == evidence
 
 
 @pytest.mark.parametrize("route", ["Get", "Import"])
