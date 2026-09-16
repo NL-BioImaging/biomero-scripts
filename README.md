@@ -524,3 +524,7 @@ describes how administrators can apply a new view safely through Slurm Init.
 Slurm Init shows a compact summary in the activity result. Detailed commands,
 workflow versions and per-target metadata plans are available behind the activity's
 info button and in the worker's `biomero.log`.
+Dry-run plans show each annotation's namespace and complete before/after
+key/value pairs. Applying saves inspection/manual-recovery snapshots in a unique
+directory under `/data/biomero-metadata-backups` by default and reports its path.
+Administrators can override the location or explicitly disable backups.

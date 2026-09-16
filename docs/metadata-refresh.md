@@ -13,8 +13,14 @@ Run **Slurm Init (Admin Only)** with these inputs:
   workflow metadata across groups.
 - `Metadata View Version`: `v0` (default) or `v1`.
 - `Metadata Dry Run`: true by default; inspect the report before disabling it.
-- `Metadata Backup Directory`: a new absolute directory on private, durable
-  worker storage; required when applying. Its parent must already exist.
+- `Save Metadata Backups`: true by default. Applying saves the original
+  annotation values and links before changing each target. Uncheck this option
+  to explicitly apply without backups; the activity log records a warning.
+- `Metadata Backup Directory`: optional override for a new absolute worker
+  directory. Leave empty to create a unique run directory under
+  `/data/biomero-metadata-backups` on the worker's durable shared storage.
+  Missing parent directories are created automatically. No directory needs
+  to be supplied for normal use.
 - `Metadata Workflow UUIDs`: optional searchable multi-select populated from
   existing Image and Plate workflow metadata. Select one or more workflows, or
   leave the selection empty (the default) for all workflows. Discovery still
@@ -36,12 +42,19 @@ not modified automatically.
 The activity Message shows a compact summary, including how many
 result/workflow pairs would change, are unchanged, were skipped or failed.
 The full per-target report and detailed logger output are available in the
-activity log behind the info button and in the worker's `biomero.log`. Applying
-changes also writes `report.json` in the backup directory.
+activity log behind the info button and in the worker's `biomero.log`. Each
+annotation includes its namespace, proposed action, current `before_pairs`
+and complete proposed `after_pairs`. For an `unlink` action, the annotation
+will no longer be attached to that result; its `after_pairs` is empty. Dry runs
+write neither OMERO metadata nor backup files.
 
-Applying bulk changes creates separate per-target backup files and a cumulative
-`report.json` in the new backup directory. Reusing an existing directory is
-refused. Bulk scope never implies permission to reconstruct missing history,
+When backups are enabled, applying bulk changes creates separate per-target JSON
+snapshots and a cumulative `report.json` in the new run directory. The exact
+directory is reported in both the activity Message and detailed log; each saved
+snapshot is logged. Reusing an explicitly supplied existing directory is
+refused. With backups disabled, no snapshot or report file is written, but the
+full report remains in the normal activity and worker logs. Bulk scope never
+implies permission to reconstruct missing history,
 advance historical snapshots to current state, or discard unknown annotations.
 
 Administrator privileges are checked before accessing workflow history. The
@@ -80,8 +93,10 @@ namespaces and creation events. Obsolete internal-task annotations are unlinked
 from the selected object, not globally deleted. Reapplying a view is idempotent.
 The backup contains original key/value pairs and annotation IDs, including
 unlinked annotations; protect it like other provenance containing execution
-details. Restore retained values with `MapAnnotationWrapper.setValue` and
-`save`; unlinked original annotations can be linked to the object again.
+details. There is currently no automated restore script. These are inspection
+and manual-recovery snapshots: retained values can be restored with
+`MapAnnotationWrapper.setValue` and `save`, and unlinked original annotations
+can be linked to the object again.
 
 Ambiguous or incomplete snapshots, conflicting identities, shared annotations,
 or duplicate non-list keys are refused rather than guessed. Repeated

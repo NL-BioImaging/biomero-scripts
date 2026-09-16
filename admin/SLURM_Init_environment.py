@@ -35,7 +35,7 @@ from biomero import SlurmClient
 import logging
 import json
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 from eventsourcing.application import AggregateNotFoundError
 from omero.sys import ParametersI
 from biomero import WorkflowTracker
@@ -60,7 +60,10 @@ def format_metadata_summary(report):
     else:
         outcomes = f"Updated: {counts.get('updated', 0)}; Unchanged: {counts.get('unchanged', 0)}"
         mode = 'apply'
-        note = 'See the backup directory for per-target backups and report.json.'
+        directory = report.get('backup_directory')
+        note = (f'Backups and report: {directory}' if directory else
+                'Backups were explicitly disabled.' if report.get('backup_enabled') is False else
+                'See the backup directory for per-target backups and report.json.')
     return (f"Metadata refresh ({report['view_version']}, {mode}): "
             f"{report['discovered']} result/workflow pairs.\n"
             f"{outcomes}; Skipped: {counts.get('skipped', 0)}; Failed: {counts.get('failed', 0)}.\n"
@@ -104,10 +107,12 @@ def _read_values(pairs):
 
 
 def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id,
-                              *, view_version='v0', dry_run=True, backup_path=None):
+                              *, view_version='v0', dry_run=True, backup_path=None,
+                              backup_enabled=True):
     """Refresh existing maps in place; unlink obsolete internal-task maps.
 
-    Default is a dry run. Applying requires a new backup file and administrator
+    Default is a dry run. Applying normally saves a new backup file; disabling
+    backups is explicit. Applying always requires administrator
     access so cross-group shared links can be checked. No CSV, canonical/shallow
     annotation, image data or event is modified. Shared annotations are refused.
     Writes are not one transaction: errors propagate and the backup remains.
@@ -148,13 +153,16 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
         summary = {'object_type': object_type, 'object_id': int(object_id),
                    'workflow_id': str(workflow_id), 'view_version': view_version,
                    'dry_run': dry_run,
-                   'annotations': [{'id': a['annotation_id'], 'action': a['action'],
+                   'annotations': [{'id': a['annotation_id'], 'namespace': a['namespace'],
+                                    'action': a['action'],
                                     'before': len(a['pairs']),
-                                    'after': len(a['new_pairs'] or [])}
+                                    'after': len(a['new_pairs'] or []),
+                                    'before_pairs': a['pairs'],
+                                    'after_pairs': a['new_pairs'] or []}
                                    for a in actions]}
         if dry_run:
             return summary
-        if not backup_path:
+        if backup_enabled and not backup_path:
             raise ValueError('An unused backup_path is required to apply')
         # Preflight all changes before writing any map. Across-group admin
         # visibility prevents accidentally modifying another target's view.
@@ -176,8 +184,13 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
             if ([list(p) for p in current.getValue()] != action['pairs'] or
                     current.getNs() != action['namespace']):
                 raise ValueError(f'Annotation changed during planning: {aid}')
-        with Path(backup_path).open('x', encoding='utf-8') as stream:
-            json.dump({**summary, 'actions': actions}, stream, indent=2)
+        if backup_enabled:
+            with Path(backup_path).open('x', encoding='utf-8') as stream:
+                json.dump({**summary, 'actions': actions}, stream, indent=2)
+            logger.info('Metadata backup saved: %s', backup_path)
+        else:
+            logger.warning('Metadata backups explicitly disabled for %s %s, workflow %s',
+                           object_type, object_id, workflow_id)
         conn.SERVICE_OPTS.setOmeroGroup(str(target.getDetails().group.id.val))
         # Update retained maps before removing links. No global annotation delete.
         for action in actions:
@@ -231,7 +244,7 @@ def discover_metadata_targets(conn):
 
 
 def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
-                         backup_directory=None, workflow_ids=None):
+                         backup_directory=None, workflow_ids=None, backup_enabled=True):
     """Refresh discoverable views, reporting unavailable histories separately."""
     if not conn.isAdmin():
         raise ValueError('Metadata refresh requires an administrator')
@@ -243,13 +256,23 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
     if selected_workflows:
         targets = [target for target in targets if target[2] in selected_workflows]
     directory = None
-    if not dry_run:
-        if not backup_directory or not Path(backup_directory).is_absolute():
-            raise ValueError('Applying all views requires an absolute Backup_Directory')
-        directory = Path(backup_directory)
+    if not dry_run and backup_enabled:
+        if backup_directory:
+            directory = Path(backup_directory)
+            if not directory.is_absolute():
+                raise ValueError('Metadata Backup Directory must be an absolute worker path')
+        else:
+            root = Path('/data/biomero-metadata-backups')
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory = root / f'refresh-{uuid4()}'
         # Exclusive directory creation protects previous backups and reports.
-        directory.mkdir(mode=0o700, exist_ok=False)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+        logger.info('Metadata backups and report will be stored in: %s', directory)
+    elif not dry_run:
+        logger.warning('Metadata backups explicitly disabled. Changes will have no on-disk backup.')
     report = {'view_version': view_version, 'dry_run': dry_run,
+              'backup_enabled': backup_enabled,
+              'backup_directory': str(directory) if directory else None,
               'discovered': len(targets), 'results': [],
               'counts': dict(planned=0, updated=0, unchanged=0, skipped=0, failed=0)}
     for index, (kind, ident, workflow_id) in enumerate(targets):
@@ -270,17 +293,20 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
             elif all(a['action'] == 'unchanged' for a in plan['annotations']):
                 item.update(status='unchanged')
             else:
-                backup = directory / f'{index:06d}-{kind}-{ident}.json'
+                backup = directory / f'{index:06d}-{kind}-{ident}.json' if directory else None
+                backup_options = {} if backup_enabled else {'backup_enabled': False}
                 try:
                     result = refresh_workflow_metadata(
                         conn, tracker, kind, ident, workflow_id,
-                        view_version=view_version, dry_run=False, backup_path=backup)
-                    item.update(status='updated', result=result, backup=str(backup))
+                        view_version=view_version, dry_run=False, backup_path=backup,
+                        **backup_options)
+                    item.update(status='updated', result=result,
+                                backup=str(backup) if backup else None)
                 except Exception as error:
                     # A write failure may follow earlier writes on this target.
                     # Never report it as an untouched/skipped view.
                     item.update(status='failed', reason=type(error).__name__,
-                                backup=str(backup), possibly_partial=True)
+                                backup=str(backup) if backup else None, possibly_partial=True)
         report['results'].append(item)
         report['counts'][item['status']] += 1
         if directory:
@@ -300,8 +326,13 @@ def refresh_metadata_from_init(client, conn):
         dry_run = True
     version = unwrap(client.getInput('Metadata View Version')) or 'v0'
     backup = unwrap(client.getInput('Metadata Backup Directory'))
+    backup_enabled = unwrap(client.getInput('Save Metadata Backups'))
+    if backup_enabled is None:
+        backup_enabled = True
     workflow_ids = unwrap(client.getInput('Metadata Workflow UUIDs'))
     selection = {'workflow_ids': [str(UUID(value.strip())) for value in workflow_ids]} if workflow_ids else {}
+    if not backup_enabled:
+        selection['backup_enabled'] = False
     client.enableKeepAlive(60)
     with WorkflowTracker() as tracker:
         return refresh_all_metadata(conn, tracker, view_version=version,
@@ -380,8 +411,10 @@ def runScript():
                      description='Preview changes without writing. Inspect the report before disabling.'),
         scripts.String('Metadata View Version', grouping='02.2', default='v0',
                        values=[rstring('v0'), rstring('v1')]),
-        scripts.String('Metadata Backup Directory', optional=True, grouping='02.3',
-                       description='New absolute directory on private durable worker storage, required when applying changes.'),
+        scripts.Bool('Save Metadata Backups', grouping='02.3', default=True,
+                     description='Save original metadata and the report before applying. Uncheck to explicitly apply without backups.'),
+        scripts.String('Metadata Backup Directory', optional=True, grouping='02.3.1',
+                       description='Optional new absolute worker directory. Leave empty for an automatically created run directory under /data/biomero-metadata-backups. The activity log reports the exact location.'),
         scripts.List('Metadata Workflow UUIDs', optional=True, grouping='02.4',
                      values=get_metadata_workflow_choices(),
                      description='Select existing workflow UUIDs; type to filter the choices. Leave empty for all workflows with Image or Plate metadata.').ofType(rstring('')),
@@ -470,7 +503,9 @@ def runScript():
 
         metadata_report = refresh_metadata_from_init(client, conn)
         if metadata_report is not None:
-            logger.info('Full metadata refresh report:\n%s', json.dumps(metadata_report, indent=2))
+            logger.info('Full metadata refresh report (before_pairs = current metadata; '
+                        'after_pairs = complete proposed metadata; unlink = remove link only):\n%s',
+                        json.dumps(metadata_report, indent=2))
             message += '\n' + format_metadata_summary(metadata_report)
         logger.info('%s', message)
         client.setOutput("Message", rstring(str(message)))
