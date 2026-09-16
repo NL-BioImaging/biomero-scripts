@@ -269,6 +269,19 @@ logging, installation, or result selection changes. Also inspect sibling repos:
   when a change affects worker environment variables, mounts, permissions,
   processor routing, importer enablement, or installed script selection.
 
-Remember that scripts use DEBUG rotating-file logging and INFO stdout logging
-by default. Preserve useful operational diagnostics while avoiding secrets in
-logs.
+## Script result summaries and activity logs
+
+`client.setOutput("Message", rstring(message))` supplies the concise, informative
+summary shown in the OMERO Activities result. Summarize outcomes, warnings,
+counts, and where to find details; do not put full reports in `Message`.
+
+The standard processor captures script stdout/stderr in the activity log behind
+the **i** button. Normal `logger.info()`, `logger.debug()`, `logger.warning()`,
+and other logger calls provide the detailed diagnostics there, subject to the
+configured handler levels, and in `biomero.log`. Scripts normally use DEBUG
+rotating-file logging and INFO stdout logging. Preserve detailed reports and
+operational context in logger output, while avoiding secrets.
+
+Shortening the activity summary means shortening `Message`, not filtering or
+summarizing logger output. Follow the existing scripts' logging infrastructure;
+do not create a separate log attachment to replace the standard activity log.
