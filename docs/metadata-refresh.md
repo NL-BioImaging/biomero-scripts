@@ -11,7 +11,7 @@ Run **Slurm Init (Admin Only)** with these inputs:
 
 - `Refresh OMERO Metadata`: off by default; discover existing Image and Plate
   workflow metadata across groups.
-- `Metadata View Version`: `v0` (default) or `v1`.
+- `Metadata View Version`: `v0` (the only supported view).
 - `Metadata Dry Run`: true by default; inspect the report before disabling it.
 - `Save Metadata Backups`: true by default. Applying saves the original
   annotation values and links before changing each target. Uncheck this option
@@ -72,18 +72,18 @@ from SLURM_Init_environment import refresh_workflow_metadata
 
 # conn is an administrator's BlitzGateway; tracker is WorkflowTracker.
 plan = refresh_workflow_metadata(
-    conn, tracker, "Plate", plate_id, workflow_uuid, view_version="v1")
+    conn, tracker, "Plate", plate_id, workflow_uuid, view_version="v0")
 # Inspect the dry-run plan before applying. Use a private backup location.
 result = refresh_workflow_metadata(
     conn, tracker, "Plate", plate_id, workflow_uuid,
-    view_version="v1", dry_run=False,
+    view_version="v0", dry_run=False,
     backup_path="/private/backups/plate-metadata-before-refresh.json")
 ```
 
-The default is a dry run and the legacy-compatible `v0` view. The explicit `v1`
-view additionally omits verbose job command, environment and result-message
-fields. Neither policy reduces full CSV provenance or changes event history.
-Both retain recorded per-result shallow/full storage provenance alongside the
+The default is a dry run and the legacy-compatible `v0` view, which is the only
+supported view. Job command, environment and result-message fields are retained.
+The view does not reduce full CSV provenance or change event history.
+It retains recorded per-result shallow/full storage provenance alongside the
 import-task metadata, including execution location, tool/container identity and
 canonical biocodes or a manifest reference. Import Results records these facts
 on new imports; this admin script only re-renders the historical snapshot. Older

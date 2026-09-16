@@ -248,8 +248,8 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
     """Refresh discoverable views, reporting unavailable histories separately."""
     if not conn.isAdmin():
         raise ValueError('Metadata refresh requires an administrator')
-    if view_version not in ('v0', 'v1'):
-        raise ValueError('View_Version must be v0 or v1')
+    if view_version != 'v0':
+        raise ValueError('View_Version must be v0')
     selected_workflows = {str(UUID(str(value).strip()))
                           for value in (workflow_ids or [])}
     targets = discover_metadata_targets(conn)
@@ -417,7 +417,7 @@ def runScript():
         scripts.Bool('Metadata Dry Run', grouping='02.1', default=True,
                      description='Preview changes without writing. Inspect the report before disabling.'),
         scripts.String('Metadata View Version', grouping='02.2', default='v0',
-                       values=[rstring('v0'), rstring('v1')]),
+                       values=[rstring('v0')]),
         scripts.Bool('Save Metadata Backups', grouping='02.3', default=True,
                      description='Save original metadata and the report before applying. Uncheck to explicitly apply without backups.'),
         scripts.String('Metadata Backup Directory', optional=True, grouping='02.3.1',
