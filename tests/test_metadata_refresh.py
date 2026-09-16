@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from uuid import UUID
 from types import ModuleType
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
@@ -33,7 +34,7 @@ def MetadataChange(before, after):
 
 adapter = ModuleType("metadata_refresh_test_adapter")
 adapter.__dict__.update(json=json, Path=Path, MetadataAnnotation=MetadataAnnotation,
-                        NAMESPACE="biomero/workflow", plan_metadata_refresh=Mock())
+                        UUID=UUID, NAMESPACE="biomero/workflow", plan_metadata_refresh=Mock())
 sys.modules[adapter.__name__] = adapter
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
      adapter.__dict__)
@@ -76,6 +77,30 @@ def test_init_refresh_denies_nonadmin_before_opening_tracker():
         with pytest.raises(ValueError, match='administrator'):
             adapter.refresh_metadata_from_init(client, conn)
     factory.assert_not_called()
+
+
+@pytest.mark.skipif('Metadata Workflow UUID' not in source.read_text(encoding='utf-8'), reason='UUID filter unavailable')
+def test_bulk_refresh_limits_processing_to_selected_workflow():
+    conn = Mock()
+    conn.isAdmin.return_value = True
+    chosen = 'c329bc34-af12-4a65-a9f5-8efb62417f53'
+    targets = [('Image', 751, chosen), ('Plate', 10, 'other')]
+    refresh = Mock(return_value={'annotations': []})
+    with patch.dict(adapter.__dict__, discover_metadata_targets=Mock(return_value=targets),
+                    refresh_workflow_metadata=refresh):
+        report = adapter.refresh_all_metadata(conn, object(), workflow_id=chosen)
+    assert report['discovered'] == 1
+    assert refresh.call_count == 1
+    assert refresh.call_args.args[2:] == ('Image', 751, chosen)
+
+
+@pytest.mark.skipif('Metadata Workflow UUID' not in source.read_text(encoding='utf-8'), reason='UUID filter unavailable')
+def test_bulk_refresh_rejects_bad_uuid_before_discovery():
+    discovery = Mock()
+    with patch.dict(adapter.__dict__, discover_metadata_targets=discovery):
+        with pytest.raises(ValueError):
+            adapter.refresh_all_metadata(Mock(), object(), workflow_id='not-a-uuid')
+    discovery.assert_not_called()
 
 
 @pytest.mark.skipif(not hasattr(adapter, 'refresh_all_metadata'), reason='bulk refresh not present')
