@@ -57,7 +57,8 @@ The activity log behind the info button and the worker's `biomero.log` show
 human-readable field diffs for dry runs of up to three selected workflows
 (or up to three result/workflow pairs). Only added, removed and changed fields
 are logged; unchanged fields are omitted. Long values are abbreviated.
-An `unlink` removes only the result's link, not the annotation itself.
+An `unlink` removes only the result's link, not the annotation itself; its
+namespace and field count are summarized without listing every removed field.
 Bulk sweeps log progress counts and skip/failure outcomes rather than full
 metadata maps. Dry runs write neither OMERO metadata nor backup files.
 

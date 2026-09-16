@@ -267,6 +267,10 @@ def metadata_refresh_log_diff(kind, ident, workflow_id, plan):
             continue
         logger.info('Dry-run diff: %s %s, workflow %s, %s (%s)',
                     kind, ident, workflow_id, annotation['namespace'], annotation['action'])
+        if annotation['action'] == 'unlink':
+            logger.info('  %s %s | unlink annotation (%s fields); original annotation is retained',
+                        kind, ident, len(annotation.get('before_pairs', [])))
+            continue
         before = fields(annotation.get('before_pairs', []))
         after = fields(annotation.get('after_pairs', []))
         for key in sorted(before.keys() | after.keys()):
@@ -433,16 +437,25 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
     options = dict(view_version=view_version, dry_run=dry_run,
                    backup_enabled=backup_enabled, detailed=detailed)
     results = {}
+    would_update = 0
     logger.info('Metadata refresh started: %s result/workflow pairs; workers=%s; mode=%s; field diffs=%s',
                 len(targets), workers, 'dry run' if dry_run else 'apply', detailed)
     for index, item in metadata_refresh_outcomes(
             conn, tracker, targets, directory, options, workers, worker_factory):
         results[index] = item
         report['counts'][item['status']] += 1
+        if item['status'] == 'planned' and item['changed']:
+            would_update += 1
         if len(results) % 25 == 0 or len(results) == len(targets):
-            logger.info('Metadata refresh progress: %s/%s; updated=%s, unchanged=%s, planned=%s, skipped=%s, failed=%s',
-                        len(results), len(targets), report['counts']['updated'], report['counts']['unchanged'],
-                        report['counts']['planned'], report['counts']['skipped'], report['counts']['failed'])
+            if dry_run:
+                logger.info('Metadata refresh progress: %s/%s; would update=%s, unchanged=%s, skipped=%s, failed=%s',
+                            len(results), len(targets), would_update,
+                            report['counts']['planned'] - would_update,
+                            report['counts']['skipped'], report['counts']['failed'])
+            else:
+                logger.info('Metadata refresh progress: %s/%s; updated=%s, unchanged=%s, skipped=%s, failed=%s',
+                            len(results), len(targets), report['counts']['updated'], report['counts']['unchanged'],
+                            report['counts']['skipped'], report['counts']['failed'])
     report['results'] = [results[index] for index in sorted(results)]
     if directory:
         with (directory / 'report.json').open('x', encoding='utf-8') as stream:
