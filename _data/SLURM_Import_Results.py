@@ -352,7 +352,12 @@ def normalize_remote_results(slurm_client, data_path, workflow_id, omero_conn=No
             and IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
         return None
     canonical = load_canonical_input_snapshot(slurm_client, workflow_id)
-    kwargs = {'omero_conn': omero_conn} if omero_conn is not None else {}
+    kwargs = {}
+    if omero_conn is not None:
+        def heartbeat():
+            if omero_conn.keepAlive() is False:
+                raise RuntimeError('OMERO connection is no longer active')
+        kwargs['heartbeat'] = heartbeat
     return slurm_client.normalize_results_on_slurm(
         data_path, workflow_id, canonical, **kwargs)
 

@@ -483,9 +483,11 @@ They show how to use the library to run workflows directly from OMERO on a Slurm
 
 ### Optional remote Zarr shallower
 
-Remote normalization uses BIOMERO's shared Slurm job monitor and keeps the
-import script's OMERO connection alive during image acquisition, normalization
-and recovery. This applies to inline and detached workflows. Helper resources
+Remote normalization uses BIOMERO's shared Slurm job monitor with a script-owned
+heartbeat callback that keeps the OMERO connection alive during image acquisition,
+normalization and recovery. Conversion uses the same callback interface.
+Connection failures stop monitoring; they are not treated as an image fallback.
+This applies to inline and detached workflows. Helper resources
 inherit generic Slurm settings, with optional partition, memory and time
 overrides in `[SLURM]` (`result_normalizer_partition`,
 `result_normalizer_mem`, `result_normalizer_time`). GPU and job-array settings

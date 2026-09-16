@@ -313,7 +313,12 @@ def runScript():
                             f"Conversion job submission failed: "
                             f"{slurmJob.get_error()}")
                     else:
-                        slurmJob.wait_for_completion(slurmClient, conn)
+                        def heartbeat():
+                            if conn.keepAlive() is False:
+                                raise RuntimeError('OMERO connection is no longer active')
+
+                        slurmJob.wait_for_completion(
+                            slurmClient, heartbeat=heartbeat)
                         # Always pull the conversion log into OMERO BEFORE any
                         # cleanup removes it from Slurm - especially important
                         # when the conversion failed.
