@@ -49,12 +49,50 @@ adapter.__dict__.update(json=json, Path=Path, MetadataAnnotation=MetadataAnnotat
                         ThreadPoolExecutor=ThreadPoolExecutor, contextmanager=contextmanager,
                         Queue=Queue, Empty=Empty, partial=partial,
                         AggregateNotFoundError=AggregateNotFoundError,
+                        detached_mode_enabled=lambda: False,
                         NAMESPACE="biomero/workflow", plan_metadata_refresh=Mock())
 sys.modules[adapter.__name__] = adapter
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"),
      adapter.__dict__)
 metadata_pairs = adapter.metadata_pairs
 refresh_workflow_metadata = adapter.refresh_workflow_metadata
+
+
+@pytest.mark.skipif('queue_metadata_refresh' not in source.read_text(encoding='utf-8')
+                   and not os.environ.get('BIOMERO_TEST_METADATA_DETACHED'),
+                   reason='Detached maintenance handoff unavailable')
+@pytest.mark.parametrize('detached,dry_run', [(True, False), (True, True), (False, False)])
+def test_init_detaches_apply_only_and_records_plain_options(detached, dry_run):
+    chosen = '11111111-1111-4111-8111-111111111111'
+    inputs = {'Refresh OMERO Metadata': True, 'Metadata Dry Run': dry_run,
+              'Metadata View Version': 'v0', 'Metadata Workers': 4,
+              'Filter Metadata by Workflow UUIDs': True,
+              'Metadata Workflow UUIDs': [chosen]}
+    client, conn, tracker = Mock(), Mock(), Mock()
+    client.getInput.side_effect = inputs.get
+    conn.isAdmin.return_value = True
+    conn.getUserId.return_value = 7
+    conn.getGroupFromContext.return_value.getId.return_value = 2
+    context = Mock(__enter__=Mock(return_value=tracker), __exit__=Mock(return_value=False))
+    queue, refresh = Mock(return_value=UUID(chosen)), Mock()
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value,
+                    WorkflowTracker=Mock(return_value=context),
+                    detached_mode_enabled=lambda: detached,
+                    queue_metadata_refresh=queue, refresh_all_metadata=refresh):
+        result = adapter.refresh_metadata_from_init(client, conn)
+    if detached and not dry_run:
+        refresh.assert_not_called()
+        assert queue.call_args.args[:3] == (tracker, 7, 2)
+        options = queue.call_args.args[3]
+        assert options == {'view_version': 'v0', 'workers': 4, 'dry_run': False,
+                           'backup_directory': None, 'backup_enabled': False,
+                           'workflow_ids': [chosen]}
+        assert result['request_id'] == chosen
+        assert result['queued'] is True
+        assert 'worker_factory' not in options
+    else:
+        queue.assert_not_called()
+        refresh.assert_called_once()
 
 
 @pytest.mark.skipif(not hasattr(adapter, 'refresh_metadata_from_init'), reason='Init option unavailable')
