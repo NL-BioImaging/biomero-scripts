@@ -44,8 +44,32 @@ def test_normalizer_receives_workflow_connection():
     client = SimpleNamespace(remote_shallow_zarr=True, normalize_results_on_slurm=Mock())
     conn = Mock()
     function(client, '/data', 'workflow', omero_conn=conn)
-    client.normalize_results_on_slurm.assert_called_once_with(
-        '/data', 'workflow', 'canonical', omero_conn=conn)
+    if 'heartbeat' in function.__code__.co_varnames:
+        callback = client.normalize_results_on_slurm.call_args.kwargs['heartbeat']
+        callback()
+        conn.keepAlive.assert_called_once()
+        assert 'omero_conn' not in client.normalize_results_on_slurm.call_args.kwargs
+    else:
+        client.normalize_results_on_slurm.assert_called_once_with(
+            '/data', 'workflow', 'canonical', omero_conn=conn)
+
+
+def test_heartbeat_owns_connection_and_detects_expiry():
+    function = load()
+    if 'heartbeat' not in function.__code__.co_varnames and not os.environ.get('BIOMERO_TEST_HEARTBEAT'):
+        pytest.skip('Heartbeat callback requires updated feature source')
+    client = SimpleNamespace(remote_shallow_zarr=True, normalize_results_on_slurm=Mock())
+    conn = Mock()
+    conn.keepAlive.return_value = False
+    function(client, '/data', 'workflow', omero_conn=conn)
+    callback = client.normalize_results_on_slurm.call_args.kwargs['heartbeat']
+    with pytest.raises(RuntimeError, match='OMERO connection'):
+        callback()
+    failure = RuntimeError('transport lost')
+    conn.keepAlive.side_effect = failure
+    with pytest.raises(RuntimeError) as error:
+        callback()
+    assert error.value is failure
 
 
 def test_normalizer_runs_before_zip_creation():
