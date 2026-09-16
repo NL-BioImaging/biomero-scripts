@@ -48,14 +48,39 @@ def test_discovery_failure_keeps_init_available_and_closes_session(caplog):
     assert 'UUID' in caplog.text
 
 
-def test_uuid_field_uses_choices_and_explicit_empty_default():
+def uuid_field():
     field = next(node for node in ast.walk(TREE) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Attribute) and node.func.attr == 'List'
                  and node.args and isinstance(node.args[0], ast.Constant)
                  and node.args[0].value == 'Metadata Workflow UUIDs')
+    return field
+
+
+def test_uuid_field_uses_choices_without_an_explicit_default():
+    field = uuid_field()
     kwargs = {item.arg: item.value for item in field.keywords}
     assert field.func.attr == 'List'
-    assert ast.literal_eval(kwargs['default']) == []
+    assert 'default' not in kwargs
     assert ast.literal_eval(kwargs['optional']) is True
     assert isinstance(kwargs['values'], ast.Call)
     assert kwargs['values'].func.id == 'get_metadata_workflow_choices'
+
+
+@pytest.mark.parametrize('choices', [[], ['11111111-1111-4111-8111-111111111111']])
+def test_uuid_parameter_constructs_with_real_omero_api(choices):
+    scripts = pytest.importorskip('omero.scripts')
+    from omero.rtypes import rstring, unwrap
+
+    field = uuid_field()
+    # Evaluate the complete declaration, including its explicit string type.
+    declaration = next((node for node in ast.walk(TREE)
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'ofType' and node.func.value is field), field)
+    parameter = eval(compile(ast.Expression(body=declaration), str(SOURCE), 'eval'),
+                     dict(scripts=scripts, rstring=rstring,
+                          get_metadata_workflow_choices=lambda: [rstring(x) for x in choices]))
+    assert parameter.optional is True
+    assert parameter.useDefault is False
+    assert unwrap(parameter.values) == choices
+    assert isinstance(parameter.prototype.val[0], type(rstring('')))
