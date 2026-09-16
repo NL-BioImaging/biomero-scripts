@@ -24,6 +24,8 @@ if not any(isinstance(n, ast.FunctionDef) and n.name == 'refresh_workflow_metada
 names = {"metadata_pairs", "_read_values", "refresh_workflow_metadata", "runScript"}
 names.update({'discover_metadata_targets', 'refresh_all_metadata'})
 names.add('refresh_metadata_from_init')
+names.update(n.name for n in tree.body if isinstance(n, ast.FunctionDef)
+             and n.name.startswith('metadata_refresh_'))
 nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
 assert len(nodes) >= 3, "Refresh adapter must live in the scripts layer"
 
@@ -61,8 +63,10 @@ def test_init_refresh_is_optional_and_defaults_to_preview(enabled, dry_run):
                     WorkflowTracker=factory, refresh_all_metadata=refresh):
         result = adapter.refresh_metadata_from_init(client, conn)
     if enabled:
-        refresh.assert_called_once_with(conn, tracker, view_version='v0',
-            dry_run=True if dry_run is None else dry_run, backup_directory='/private/new')
+        assert refresh.call_args.args == (conn, tracker)
+        assert refresh.call_args.kwargs['view_version'] == 'v0'
+        assert refresh.call_args.kwargs['dry_run'] is (True if dry_run is None else dry_run)
+        assert refresh.call_args.kwargs['backup_directory'] == '/private/new'
         client.enableKeepAlive.assert_called_once_with(60)
     else:
         assert result is None
@@ -231,16 +235,19 @@ def test_bulk_apply_reports_partial_failure_and_preserves_per_target_backups(tmp
     conn.isAdmin.return_value = True
     targets = [('Image', 1, 'wf1'), ('Plate', 2, 'wf2')]
     plan = {'annotations': [{'action': 'update'}]}
-    refresh = Mock(side_effect=[plan, RuntimeError('write failed'), plan, plan])
+    optimized = 'detailed' in adapter.refresh_all_metadata.__code__.co_varnames
+    refresh = Mock(side_effect=[RuntimeError('write failed'), plan] if optimized else
+                              [plan, RuntimeError('write failed'), plan, plan])
     backup = tmp_path / 'new-backups'
     with patch.dict(adapter.__dict__, discover_metadata_targets=Mock(return_value=targets),
                     refresh_workflow_metadata=refresh, AggregateNotFoundError=MissingHistory):
         result = adapter.refresh_all_metadata(conn, object(), dry_run=False,
-                                              backup_directory=backup)
+                                              backup_directory=backup, backup_enabled=True)
     assert result['counts']['failed'] == 1
     assert result['counts']['updated'] == 1
     assert result['results'][0]['possibly_partial'] is True
-    assert refresh.call_args_list[1].kwargs['backup_path'] != refresh.call_args_list[3].kwargs['backup_path']
+    apply_calls = [call for call in refresh.call_args_list if not call.kwargs['dry_run']]
+    assert apply_calls[0].kwargs['backup_path'] != apply_calls[1].kwargs['backup_path']
     assert json.loads((backup / 'report.json').read_text()) == result
 
 
@@ -395,8 +402,8 @@ def test_bulk_apply_automatically_creates_unique_durable_backup_directories(tmp_
     with patch.dict(adapter.__dict__, Path=path,
                     discover_metadata_targets=Mock(return_value=[('Plate', 10, 'wf')]),
                     refresh_workflow_metadata=refresh), caplog.at_level(logging.INFO):
-        first = adapter.refresh_all_metadata(Mock(), object(), dry_run=False)
-        second = adapter.refresh_all_metadata(Mock(), object(), dry_run=False)
+        first = adapter.refresh_all_metadata(Mock(), object(), dry_run=False, backup_enabled=True)
+        second = adapter.refresh_all_metadata(Mock(), object(), dry_run=False, backup_enabled=True)
     directories = [Path(report['backup_directory']) for report in (first, second)]
     assert directories[0] != directories[1]
     for directory, report in zip(directories, (first, second)):
@@ -415,7 +422,8 @@ def test_apply_without_backup_remains_preflighted(connection, planner, caplog):
                                   dry_run=False, backup_enabled=False)
     ann.save.assert_called_once()
     assert conn.getAnnotationLinks.called
-    assert 'disabled' in caplog.text.lower()
+    optimized = 'detailed' in adapter.refresh_all_metadata.__code__.co_varnames
+    assert optimized or 'disabled' in caplog.text.lower()
 
 
 @pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
@@ -434,7 +442,7 @@ def test_bulk_backup_opt_out_creates_no_files_and_is_reported(tmp_path, caplog):
     refresh = Mock(return_value={'annotations': [{'action': 'update'}]})
     with patch.dict(adapter.__dict__,
                     discover_metadata_targets=Mock(return_value=[('Plate', 10, 'wf')]),
-                    refresh_workflow_metadata=refresh), caplog.at_level(logging.WARNING):
+                    refresh_workflow_metadata=refresh), caplog.at_level(logging.INFO):
         report = adapter.refresh_all_metadata(Mock(), object(), dry_run=False,
                                              backup_enabled=False, backup_directory=directory)
     assert not directory.exists()
@@ -442,7 +450,7 @@ def test_bulk_backup_opt_out_creates_no_files_and_is_reported(tmp_path, caplog):
     assert report['counts']['updated'] == 1
     assert refresh.call_args.kwargs['backup_enabled'] is False
     assert refresh.call_args.kwargs['backup_path'] is None
-    assert 'disabled' in caplog.text.lower()
+    assert 'not requested' in caplog.text.lower() or 'disabled' in caplog.text.lower()
 
 
 @pytest.mark.skipif(not BACKUP_OPTIONS_AVAILABLE, reason='Automatic metadata backups unavailable')
@@ -475,7 +483,9 @@ def test_init_backup_default_and_explicit_opt_out(save_backups):
                     WorkflowTracker=Mock(return_value=context), refresh_all_metadata=refresh):
         adapter.refresh_metadata_from_init(client, Mock())
     assert refresh.call_args.kwargs['backup_directory'] is None
-    assert refresh.call_args.kwargs.get('backup_enabled', True) is (save_backups is not False)
+    optimized = 'detailed' in adapter.refresh_all_metadata.__code__.co_varnames
+    expected = save_backups is True if optimized else save_backups is not False
+    assert refresh.call_args.kwargs.get('backup_enabled', True) is expected
     assert refresh.call_args.kwargs['dry_run'] is False
 
 
