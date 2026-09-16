@@ -33,6 +33,12 @@ from omero.rtypes import rstring, unwrap
 from omero.gateway import BlitzGateway
 from biomero import SlurmClient
 import logging
+import json
+from pathlib import Path
+from eventsourcing.application import AggregateNotFoundError
+from omero.sys import ParametersI
+from biomero import WorkflowTracker
+from biomero.provenance import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
 import os
 import sys
 
@@ -53,6 +59,226 @@ def format_image_submission(array_job_id, status):
         f"RUNNING: {counts.get('RUNNING', 0)}, "
         f"FAILED: {counts.get('FAILED', 0)}"
     )
+
+
+def metadata_pairs(values):
+    """Represent list-valued fields using repeated key/value pairs."""
+    return [[str(key), str(item)] for key, value in values.items()
+            for item in (value if isinstance(value, list) else [value])]
+
+
+def _read_values(pairs):
+    values = {}
+    for key, value in pairs:
+        if key in values:
+            # Input_Data is historically list-valued, unlike identity fields.
+            if key != 'Input_Data':
+                raise ValueError(f'Duplicate non-list metadata key: {key}')
+            if not isinstance(values[key], list):
+                values[key] = [values[key]]
+            values[key].append(value)
+        else:
+            values[key] = value
+    return values
+
+
+def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id,
+                              *, view_version='v0', dry_run=True, backup_path=None):
+    """Refresh existing maps in place; unlink obsolete internal-task maps.
+
+    Default is a dry run. Applying requires a new backup file and administrator
+    access so cross-group shared links can be checked. No CSV, canonical/shallow
+    annotation, image data or event is modified. Shared annotations are refused.
+    Writes are not one transaction: errors propagate and the backup remains.
+    Quiesce metadata writers for the target during an administrative refresh.
+    """
+    if object_type not in ('Image', 'Plate'):
+        raise ValueError('Only Image and Plate result targets are supported')
+    if not conn.isAdmin():
+        raise ValueError('Metadata refresh requires an administrator')
+    original_group = conn.SERVICE_OPTS.getOmeroGroup()
+    conn.SERVICE_OPTS.setOmeroGroup('-1')
+    try:
+        target = conn.getObject(object_type, int(object_id))
+        if target is None:
+            raise ValueError('Result target not found')
+        records = []
+        rows = []
+        for ann in target.listAnnotations():
+            ns = ann.getNs() or ''
+            if not (ns == NAMESPACE or ns.startswith(NAMESPACE + '/task/')):
+                continue
+            pairs = ann.getValue()
+            if ['Workflow_ID', str(workflow_id)] not in [list(p) for p in pairs]:
+                continue
+            values = _read_values(pairs)
+            rows.append(MetadataAnnotation(ns, values))
+            records.append({'annotation_id': ann.getId(), 'namespace': ns,
+                            'pairs': [list(p) for p in pairs]})
+        plan = plan_metadata_refresh(tracker, workflow_id, rows,
+                                     view_version=view_version,
+                                     target_key=f'{object_type}:{object_id}')
+        actions = []
+        for record, change in zip(records, plan):
+            pairs = metadata_pairs(change.after.values) if change.after else None
+            action = ('unlink' if pairs is None else
+                      'unchanged' if pairs == record['pairs'] else 'update')
+            actions.append({**record, 'action': action, 'new_pairs': pairs})
+        summary = {'object_type': object_type, 'object_id': int(object_id),
+                   'workflow_id': str(workflow_id), 'view_version': view_version,
+                   'dry_run': dry_run,
+                   'annotations': [{'id': a['annotation_id'], 'action': a['action'],
+                                    'before': len(a['pairs']),
+                                    'after': len(a['new_pairs'] or [])}
+                                   for a in actions]}
+        if dry_run:
+            return summary
+        if not backup_path:
+            raise ValueError('An unused backup_path is required to apply')
+        # Preflight all changes before writing any map. Across-group admin
+        # visibility prevents accidentally modifying another target's view.
+        links = {}
+        for action in actions:
+            if action['action'] == 'unchanged':
+                continue
+            aid = action['annotation_id']
+            linked = []
+            for kind in ('Project', 'Dataset', 'Image', 'Screen', 'Plate',
+                         'Well', 'PlateAcquisition', 'Annotation'):
+                linked.extend((kind, link) for link in conn.getAnnotationLinks(
+                    kind, ann_ids=[aid]))
+            if (len(linked) != 1 or linked[0][0] != object_type or
+                    linked[0][1].getParent().getId() != int(object_id)):
+                raise ValueError(f'Shared or unexpected annotation links: {aid}')
+            links[aid] = linked[0][1].getId()
+            current = conn.getObject('MapAnnotation', aid)
+            if ([list(p) for p in current.getValue()] != action['pairs'] or
+                    current.getNs() != action['namespace']):
+                raise ValueError(f'Annotation changed during planning: {aid}')
+        with Path(backup_path).open('x', encoding='utf-8') as stream:
+            json.dump({**summary, 'actions': actions}, stream, indent=2)
+        conn.SERVICE_OPTS.setOmeroGroup(str(target.getDetails().group.id.val))
+        # Update retained maps before removing links. No global annotation delete.
+        for action in actions:
+            if action['action'] != 'update':
+                continue
+            ann = conn.getObject('MapAnnotation', action['annotation_id'])
+            if [list(p) for p in ann.getValue()] != action['pairs']:
+                raise ValueError('Annotation changed after preflight')
+            ann.setValue(action['new_pairs'])
+            ann.save()
+        unlink_ids = [links[a['annotation_id']] for a in actions
+                      if a['action'] == 'unlink']
+        if unlink_ids:
+            from omero.cmd import Delete2
+            from omero.cmd.graphs import ChildOption
+            request = Delete2(
+                targetObjects={object_type + 'AnnotationLink': unlink_ids},
+                childOptions=[ChildOption(excludeType=['MapAnnotation'])])
+            handle = conn.c.sf.submit(request, conn.SERVICE_OPTS)
+            try:
+                conn._waitOnCmd(handle)
+            finally:
+                handle.close()
+        return summary
+    finally:
+        conn.SERVICE_OPTS.setOmeroGroup(original_group)
+
+def discover_metadata_targets(conn):
+    """Discover existing workflow views on Images and Plates across groups."""
+    if not conn.isAdmin():
+        raise ValueError('Metadata refresh requires an administrator')
+    original_group = conn.SERVICE_OPTS.getOmeroGroup()
+    targets = set()
+    conn.SERVICE_OPTS.setOmeroGroup('-1')
+    try:
+        for kind in ('Image', 'Plate'):
+            offset = 0
+            while True:
+                page = list(conn.getAnnotationLinks(
+                    kind, ns=NAMESPACE, params=ParametersI().page(offset, 500)))
+                for link in page:
+                    for key, value in link.getAnnotation().getValue():
+                        if key == 'Workflow_ID' and value:
+                            targets.add((kind, link.getParent().getId(), value))
+                if len(page) < 500:
+                    break
+                offset += len(page)
+    finally:
+        conn.SERVICE_OPTS.setOmeroGroup(original_group)
+    return sorted(targets)
+
+
+def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
+                         backup_directory=None):
+    """Refresh discoverable views, reporting unavailable histories separately."""
+    if not conn.isAdmin():
+        raise ValueError('Metadata refresh requires an administrator')
+    if view_version not in ('v0', 'v1'):
+        raise ValueError('View_Version must be v0 or v1')
+    targets = discover_metadata_targets(conn)
+    directory = None
+    if not dry_run:
+        if not backup_directory or not Path(backup_directory).is_absolute():
+            raise ValueError('Applying all views requires an absolute Backup_Directory')
+        directory = Path(backup_directory)
+        # Exclusive directory creation protects previous backups and reports.
+        directory.mkdir(mode=0o700, exist_ok=False)
+    report = {'view_version': view_version, 'dry_run': dry_run,
+              'discovered': len(targets), 'results': [],
+              'counts': dict(planned=0, updated=0, unchanged=0, skipped=0, failed=0)}
+    for index, (kind, ident, workflow_id) in enumerate(targets):
+        item = {'object_type': kind, 'object_id': ident, 'workflow_id': workflow_id}
+        try:
+            plan = refresh_workflow_metadata(
+                conn, tracker, kind, ident, workflow_id,
+                view_version=view_version, dry_run=True)
+        except AggregateNotFoundError:
+            item.update(status='skipped', reason='missing event-store history')
+        except ValueError as error:
+            item.update(status='skipped', reason=str(error))
+        except Exception as error:
+            item.update(status='failed', reason=type(error).__name__)
+        else:
+            if dry_run:
+                item.update(status='planned', plan=plan)
+            elif all(a['action'] == 'unchanged' for a in plan['annotations']):
+                item.update(status='unchanged')
+            else:
+                backup = directory / f'{index:06d}-{kind}-{ident}.json'
+                try:
+                    result = refresh_workflow_metadata(
+                        conn, tracker, kind, ident, workflow_id,
+                        view_version=view_version, dry_run=False, backup_path=backup)
+                    item.update(status='updated', result=result, backup=str(backup))
+                except Exception as error:
+                    # A write failure may follow earlier writes on this target.
+                    # Never report it as an untouched/skipped view.
+                    item.update(status='failed', reason=type(error).__name__,
+                                backup=str(backup), possibly_partial=True)
+        report['results'].append(item)
+        report['counts'][item['status']] += 1
+        if directory:
+            with (directory / 'report.json').open('w', encoding='utf-8') as stream:
+                json.dump(report, stream, indent=2)
+    return report
+
+
+def refresh_metadata_from_init(client, conn):
+    """Optional metadata-only maintenance; no Slurm connection is required."""
+    if not unwrap(client.getInput('Refresh OMERO Metadata')):
+        return None
+    if not conn.isAdmin():
+        raise ValueError('Metadata refresh requires an administrator')
+    dry_run = unwrap(client.getInput('Metadata Dry Run'))
+    if dry_run is None:
+        dry_run = True
+    version = unwrap(client.getInput('Metadata View Version')) or 'v0'
+    backup = unwrap(client.getInput('Metadata Backup Directory'))
+    client.enableKeepAlive(60)
+    with WorkflowTracker() as tracker:
+        return refresh_all_metadata(conn, tracker, view_version=version,
+                                    dry_run=dry_run, backup_directory=backup)
 
 
 def runScript():
@@ -98,6 +324,14 @@ def runScript():
                                    "Warning: jobs before this date will not appear in analytics views. "
                                    "Ignored when 'Rebuild From Days Ago' is also set. "
                                    "Leave empty to use whatever is configured in slurm-config.ini or env vars (or full rebuild if nothing is set)."),
+        scripts.Bool('Refresh OMERO Metadata', grouping='02', default=False,
+                     description='Refresh existing Image and Plate workflow metadata across groups. Independent of Init Slurm.'),
+        scripts.Bool('Metadata Dry Run', grouping='02.1', default=True,
+                     description='Preview changes without writing. Inspect the report before disabling.'),
+        scripts.String('Metadata View Version', grouping='02.2', default='v0',
+                       values=[rstring('v0'), rstring('v1')]),
+        scripts.String('Metadata Backup Directory', optional=True, grouping='02.3',
+                       description='New absolute directory on private durable worker storage, required when applying changes.'),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
         version=VERSION,
         authors=["Torec Luik"],
@@ -183,6 +417,9 @@ def runScript():
                     f"{filtered_models}"
                 )
 
+        metadata_report = refresh_metadata_from_init(client, conn)
+        if metadata_report is not None:
+            message += '\nMetadata refresh:\n' + json.dumps(metadata_report, indent=2)
         client.setOutput("Message", rstring(str(message)))
 
     finally:

@@ -2,29 +2,26 @@
 
 BIOMERO core renders and plans metadata views as plain data structures.
 The scripts layer owns OMERO connections, annotation persistence and backups.
-The dedicated admin script `admin/SLURM_Refresh_Metadata.py` updates existing
+The admin script `admin/SLURM_Init_environment.py` optionally updates existing
 metadata. Result import scripts only write metadata for newly imported results.
 It supports result Images and Plates, regardless of which result script created
 their annotations.
 
-Run **Refresh BIOMERO Metadata (Admin Only)** with these inputs:
+Run **Slurm Init (Admin Only)** with these inputs:
 
-- `Data_Type`: `Image` or `Plate`.
-- `ID`: the existing result object's ID (single-result mode).
-- `Workflow_ID`: the UUID recorded in its workflow metadata (single-result mode).
-- `View_Version`: `v0` (default) or `v1`.
-- `Dry_Run`: true by default; inspect the returned plan before applying.
-- `Backup_Path`: a new absolute file path on private, durable worker storage;
-  required when applying. This is a worker path, not a browser download path.
-- `All_Existing`: discover workflow views on all accessible result Images and
-  Plates across groups. Leave `ID` and `Workflow_ID` empty in this mode;
-  `Data_Type` is ignored. This option is off by default.
-- `Backup_Directory`: a new absolute directory on private, durable worker storage;
-  required instead of `Backup_Path` when applying `All_Existing`. Its parent
-  directory must already exist.
+- `Refresh OMERO Metadata`: off by default; discover existing Image and Plate
+  workflow metadata across groups.
+- `Metadata View Version`: `v0` (default) or `v1`.
+- `Metadata Dry Run`: true by default; inspect the report before disabling it.
+- `Metadata Backup Directory`: a new absolute directory on private, durable
+  worker storage; required when applying. Its parent must already exist.
 
-For a deployment-wide update, select `All_Existing`, choose the desired
-`View_Version`, and inspect the dry-run report first. Discovery uses existing
+Uncheck `Init Slurm` for metadata-only maintenance, without cluster setup or
+analytics rebuilding. Analytics projections and OMERO annotations are separate
+views of the event store, controlled by separate options.
+
+For a deployment-wide update, select `Refresh OMERO Metadata`, choose the desired
+view version, and inspect the dry-run report first. Discovery uses existing
 `biomero/workflow` annotations; it does not create metadata on unannotated objects.
 Each object/workflow pair is processed independently. Missing event-store
 history or ambiguous/incomplete snapshots are skipped and reported, leaving
@@ -38,14 +35,14 @@ refused. Bulk scope never implies permission to reconstruct missing history,
 advance historical snapshots to current state, or discard unknown annotations.
 
 Administrator privileges are checked before accessing workflow history. The
-script uses the worker's tracking-database configuration and does not submit
-Slurm jobs or re-import data.
+metadata refresh uses the worker's tracking-database configuration and does not
+submit Slurm jobs or re-import data.
 
 The helper can also be called from the scripts runtime, with `admin` on the
 Python import path:
 
 ```python
-from SLURM_Refresh_Metadata import refresh_workflow_metadata
+from SLURM_Init_environment import refresh_workflow_metadata
 
 # conn is an administrator's BlitzGateway; tracker is WorkflowTracker.
 plan = refresh_workflow_metadata(
