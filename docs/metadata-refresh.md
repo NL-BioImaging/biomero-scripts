@@ -2,15 +2,30 @@
 
 BIOMERO core renders and plans metadata views as plain data structures.
 The scripts layer owns OMERO connections, annotation persistence and backups.
-The administrative Python helper `refresh_workflow_metadata` lives in
-`_data/SLURM_Import_Results.py`; it is not a new registered script or UI option.
+The dedicated admin script `admin/SLURM_Refresh_Metadata.py` updates existing
+metadata. Result import scripts only write metadata for newly imported results.
 It supports result Images and Plates, regardless of which result script created
 their annotations.
 
-In the scripts runtime, with `_data` on the Python import path:
+Run **Refresh BIOMERO Metadata (Admin Only)** with these inputs:
+
+- `Data_Type`: `Image` or `Plate`.
+- `ID`: the existing result object's ID.
+- `Workflow_ID`: the UUID recorded in its workflow metadata.
+- `View_Version`: `v0` (default) or `v1`.
+- `Dry_Run`: true by default; inspect the returned plan before applying.
+- `Backup_Path`: a new absolute file path on private, durable worker storage;
+  required when applying. This is a worker path, not a browser download path.
+
+Administrator privileges are checked before accessing workflow history. The
+script uses the worker's tracking-database configuration and does not submit
+Slurm jobs or re-import data.
+
+The helper can also be called from the scripts runtime, with `admin` on the
+Python import path:
 
 ```python
-from SLURM_Import_Results import refresh_workflow_metadata
+from SLURM_Refresh_Metadata import refresh_workflow_metadata
 
 # conn is an administrator's BlitzGateway; tracker is WorkflowTracker.
 plan = refresh_workflow_metadata(
