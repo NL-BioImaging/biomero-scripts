@@ -32,11 +32,11 @@ those views unchanged. A write failure is reported separately as potentially
 partial, and processing continues with the next target. Shared annotations are
 not modified automatically.
 
-The activity Message and stdout show a compact summary, including how many
+The activity Message shows a compact summary, including how many
 result/workflow pairs would change, are unchanged, were skipped or failed.
-The full per-target report is retained in the worker's `biomero.log`; applying
-changes also writes `report.json` in the backup directory. Library INFO detail
-is kept in the worker log rather than stdout; warnings remain visible in the UI.
+The full per-target report and detailed logger output are available in the
+activity log behind the info button and in the worker's `biomero.log`. Applying
+changes also writes `report.json` in the backup directory.
 
 Applying bulk changes creates separate per-target backup files and a cumulative
 `report.json` in the new backup directory. Reusing an existing directory is

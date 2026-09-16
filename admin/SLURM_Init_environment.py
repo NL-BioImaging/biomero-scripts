@@ -47,11 +47,6 @@ logger = logging.getLogger(__name__)
 VERSION = "2.9.0"
 
 
-def ui_log_filter(record):
-    """Keep selected summaries and warnings in stdout, not library INFO dumps."""
-    return record.levelno >= 30 or getattr(record, 'ui_summary', False)
-
-
 def format_metadata_summary(report):
     """Summarize result/workflow pairs; detailed plans stay in the worker log."""
     counts = report['counts']
@@ -69,7 +64,7 @@ def format_metadata_summary(report):
     return (f"Metadata refresh ({report['view_version']}, {mode}): "
             f"{report['discovered']} result/workflow pairs.\n"
             f"{outcomes}; Skipped: {counts.get('skipped', 0)}; Failed: {counts.get('failed', 0)}.\n"
-            f"{note}\nFull report and skip/failure details: worker biomero.log.")
+            f"{note}\nFull report and skip/failure details: activity log (i button).")
 
 
 def format_image_submission(array_job_id, status):
@@ -404,9 +399,6 @@ def runScript():
             if not configfile:
                 configfile = ''
             with SlurmClient.from_config(configfile=configfile) as slurmClient:
-                # Fabric otherwise echoes remote directory listings directly to
-                # stdout, bypassing logging filters. Core still logs the results.
-                slurmClient.config.run.hide = 'stdout'
                 image_array_id = None
                 # Override analytics rebuild window if provided via UI
                 if rebuild_days_ago is not None:
@@ -453,9 +445,9 @@ def runScript():
 
         metadata_report = refresh_metadata_from_init(client, conn)
         if metadata_report is not None:
-            logger.info('Full metadata refresh report: %s', json.dumps(metadata_report))
+            logger.info('Full metadata refresh report:\n%s', json.dumps(metadata_report, indent=2))
             message += '\n' + format_metadata_summary(metadata_report)
-        logger.info('%s', message, extra={'ui_summary': True})
+        logger.info('%s', message)
         client.setOutput("Message", rstring(str(message)))
 
     finally:
@@ -473,10 +465,10 @@ if __name__ == '__main__':
     LOGSIZE = 500000000
     LOGNUM = 9
     log_filename = 'biomero.log'
-    # Create a stream handler with INFO level (for OMERO.web output)
+    # OMERO captures stdout as the activity log behind the i button.
+    # The separate Message output contains the concise activity result.
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(logging.INFO)
-    stream_handler.addFilter(ui_log_filter)
+    stream_handler.setLevel(logging.DEBUG)
     # Create DEBUG logging to rotating logfile at var/log
     logging.basicConfig(level=logging.DEBUG,
                         format=LOGFORMAT,
