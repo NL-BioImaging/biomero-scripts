@@ -10,12 +10,32 @@ their annotations.
 Run **Refresh BIOMERO Metadata (Admin Only)** with these inputs:
 
 - `Data_Type`: `Image` or `Plate`.
-- `ID`: the existing result object's ID.
-- `Workflow_ID`: the UUID recorded in its workflow metadata.
+- `ID`: the existing result object's ID (single-result mode).
+- `Workflow_ID`: the UUID recorded in its workflow metadata (single-result mode).
 - `View_Version`: `v0` (default) or `v1`.
 - `Dry_Run`: true by default; inspect the returned plan before applying.
 - `Backup_Path`: a new absolute file path on private, durable worker storage;
   required when applying. This is a worker path, not a browser download path.
+- `All_Existing`: discover workflow views on all accessible result Images and
+  Plates across groups. Leave `ID` and `Workflow_ID` empty in this mode;
+  `Data_Type` is ignored. This option is off by default.
+- `Backup_Directory`: a new absolute directory on private, durable worker storage;
+  required instead of `Backup_Path` when applying `All_Existing`. Its parent
+  directory must already exist.
+
+For a deployment-wide update, select `All_Existing`, choose the desired
+`View_Version`, and inspect the dry-run report first. Discovery uses existing
+`biomero/workflow` annotations; it does not create metadata on unannotated objects.
+Each object/workflow pair is processed independently. Missing event-store
+history or ambiguous/incomplete snapshots are skipped and reported, leaving
+those views unchanged. A write failure is reported separately as potentially
+partial, and processing continues with the next target. Shared annotations are
+not modified automatically.
+
+Applying bulk changes creates separate per-target backup files and a cumulative
+`report.json` in the new backup directory. Reusing an existing directory is
+refused. Bulk scope never implies permission to reconstruct missing history,
+advance historical snapshots to current state, or discard unknown annotations.
 
 Administrator privileges are checked before accessing workflow history. The
 script uses the worker's tracking-database configuration and does not submit

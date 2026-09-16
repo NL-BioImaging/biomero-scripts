@@ -4,10 +4,13 @@ import json
 from pathlib import Path
 from uuid import UUID
 
+from eventsourcing.application import AggregateNotFoundError
+
 from omero import scripts
 from omero.constants.namespaces import NSDYNAMIC
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring
+from omero.sys import ParametersI
 
 from biomero import WorkflowTracker
 from biomero.provenance import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
@@ -137,22 +140,107 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
     finally:
         conn.SERVICE_OPTS.setOmeroGroup(original_group)
 
+def discover_metadata_targets(conn):
+    """Discover existing workflow views on Images and Plates across groups."""
+    if not conn.isAdmin():
+        raise ValueError('Metadata refresh requires an administrator')
+    original_group = conn.SERVICE_OPTS.getOmeroGroup()
+    targets = set()
+    conn.SERVICE_OPTS.setOmeroGroup('-1')
+    try:
+        for kind in ('Image', 'Plate'):
+            offset = 0
+            while True:
+                page = list(conn.getAnnotationLinks(
+                    kind, ns=NAMESPACE, params=ParametersI().page(offset, 500)))
+                for link in page:
+                    for key, value in link.getAnnotation().getValue():
+                        if key == 'Workflow_ID' and value:
+                            targets.add((kind, link.getParent().getId(), value))
+                if len(page) < 500:
+                    break
+                offset += len(page)
+    finally:
+        conn.SERVICE_OPTS.setOmeroGroup(original_group)
+    return sorted(targets)
+
+
+def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
+                         backup_directory=None):
+    """Refresh discoverable views, reporting unavailable histories separately."""
+    if not conn.isAdmin():
+        raise ValueError('Metadata refresh requires an administrator')
+    if view_version not in ('v0', 'v1'):
+        raise ValueError('View_Version must be v0 or v1')
+    targets = discover_metadata_targets(conn)
+    directory = None
+    if not dry_run:
+        if not backup_directory or not Path(backup_directory).is_absolute():
+            raise ValueError('Applying all views requires an absolute Backup_Directory')
+        directory = Path(backup_directory)
+        # Exclusive directory creation protects previous backups and reports.
+        directory.mkdir(mode=0o700, exist_ok=False)
+    report = {'view_version': view_version, 'dry_run': dry_run,
+              'discovered': len(targets), 'results': [],
+              'counts': dict(planned=0, updated=0, unchanged=0, skipped=0, failed=0)}
+    for index, (kind, ident, workflow_id) in enumerate(targets):
+        item = {'object_type': kind, 'object_id': ident, 'workflow_id': workflow_id}
+        try:
+            plan = refresh_workflow_metadata(
+                conn, tracker, kind, ident, workflow_id,
+                view_version=view_version, dry_run=True)
+        except AggregateNotFoundError:
+            item.update(status='skipped', reason='missing event-store history')
+        except ValueError as error:
+            item.update(status='skipped', reason=str(error))
+        except Exception as error:
+            item.update(status='failed', reason=type(error).__name__)
+        else:
+            if dry_run:
+                item.update(status='planned', plan=plan)
+            elif all(a['action'] == 'unchanged' for a in plan['annotations']):
+                item.update(status='unchanged')
+            else:
+                backup = directory / f'{index:06d}-{kind}-{ident}.json'
+                try:
+                    result = refresh_workflow_metadata(
+                        conn, tracker, kind, ident, workflow_id,
+                        view_version=view_version, dry_run=False, backup_path=backup)
+                    item.update(status='updated', result=result, backup=str(backup))
+                except Exception as error:
+                    # A write failure may follow earlier writes on this target.
+                    # Never report it as an untouched/skipped view.
+                    item.update(status='failed', reason=type(error).__name__,
+                                backup=str(backup), possibly_partial=True)
+        report['results'].append(item)
+        report['counts'][item['status']] += 1
+        if directory:
+            with (directory / 'report.json').open('w', encoding='utf-8') as stream:
+                json.dump(report, stream, indent=2)
+    return report
+
+
 def runScript():
-    """Refresh one existing result's metadata; never import result data."""
+    """Refresh selected or all existing metadata views; never import data."""
     client = scripts.client(
         'Refresh BIOMERO Metadata (Admin Only)',
-        'Refresh the metadata view of one existing result. Dry run by default. '
+        'Refresh existing metadata views. Dry run by default. '
         'Applying requires a private, durable backup path on the worker.',
         scripts.String('Data_Type', optional=False, grouping='1',
                        values=[rstring('Image'), rstring('Plate')], default='Plate'),
-        scripts.Long('ID', optional=False, grouping='2'),
-        scripts.String('Workflow_ID', optional=False, grouping='3'),
+        scripts.Long('ID', optional=True, grouping='2'),
+        scripts.String('Workflow_ID', optional=True, grouping='3'),
         scripts.String('View_Version', optional=False, grouping='4',
                        values=[rstring('v0'), rstring('v1')], default='v0'),
         scripts.Bool('Dry_Run', optional=False, grouping='5', default=True),
         scripts.String('Backup_Path', optional=True, grouping='6',
                        description='New absolute file path on durable worker storage; '
                                    'required when Dry_Run is false.'),
+        scripts.Bool('All_Existing', optional=False, grouping='7', default=False,
+                     description='Discover all Image and Plate workflow views across groups.'),
+        scripts.String('Backup_Directory', optional=True, grouping='8',
+                       description='New absolute directory on durable worker storage; '
+                                   'required when applying All_Existing.'),
         namespaces=[NSDYNAMIC], version=VERSION,
         authors=['Torec Luik'], institutions=['Amsterdam UMC'],
         contact='cellularimaging@amsterdamumc.nl')
@@ -163,19 +251,30 @@ def runScript():
                 'Access denied: administrator privileges are required.'))
             return
         inputs = client.getInputs(unwrap=True)
-        workflow_id = str(UUID(inputs['Workflow_ID'].strip()))
+        all_existing = inputs.get('All_Existing', False)
+        if all_existing and (inputs.get('ID') is not None or inputs.get('Workflow_ID')):
+            raise ValueError('Omit ID and Workflow_ID when All_Existing is selected')
+        if not all_existing and (inputs.get('ID') is None or not inputs.get('Workflow_ID')):
+            raise ValueError('Provide ID and Workflow_ID, or select All_Existing')
         dry_run = inputs.get('Dry_Run', True)
         backup = inputs.get('Backup_Path', '').strip() or None
-        if not dry_run and (not backup or not Path(backup).is_absolute()):
+        if not all_existing and not dry_run and (not backup or not Path(backup).is_absolute()):
             raise ValueError('Applying requires an absolute Backup_Path on durable storage')
         client.enableKeepAlive(60)
         # Tracking persistence comes from the worker's configured environment.
         # Metadata maintenance does not connect to or submit work on Slurm.
         with WorkflowTracker() as tracker:
-            result = refresh_workflow_metadata(
-                conn, tracker, inputs['Data_Type'], inputs['ID'], workflow_id,
-                view_version=inputs.get('View_Version', 'v0'),
-                dry_run=dry_run, backup_path=backup)
+            if all_existing:
+                result = refresh_all_metadata(
+                    conn, tracker, view_version=inputs.get('View_Version', 'v0'),
+                    dry_run=dry_run,
+                    backup_directory=inputs.get('Backup_Directory', '').strip() or None)
+            else:
+                workflow_id = str(UUID(inputs['Workflow_ID'].strip()))
+                result = refresh_workflow_metadata(
+                    conn, tracker, inputs['Data_Type'], inputs['ID'], workflow_id,
+                    view_version=inputs.get('View_Version', 'v0'),
+                    dry_run=dry_run, backup_path=backup)
         client.setOutput('Message', rstring(json.dumps(result, indent=2)))
     finally:
         client.closeSession()
