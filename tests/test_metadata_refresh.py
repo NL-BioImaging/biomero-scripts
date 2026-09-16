@@ -132,7 +132,8 @@ def test_bulk_refresh_selects_multiple_workflows_without_duplicates():
 def test_init_forwards_all_selected_workflow_uuids():
     chosen = ['11111111-1111-4111-8111-111111111111',
               '22222222-2222-4222-8222-222222222222']
-    inputs = {'Refresh OMERO Metadata': True, 'Metadata Workflow UUIDs': chosen}
+    inputs = {'Refresh OMERO Metadata': True, 'Metadata Workflow UUIDs': chosen,
+              'Filter Metadata by Workflow UUIDs': True}
     client = Mock()
     client.getInput.side_effect = inputs.get
     tracker = Mock()
@@ -143,6 +144,37 @@ def test_init_forwards_all_selected_workflow_uuids():
         adapter.refresh_metadata_from_init(client, Mock())
     assert refresh.call_args.kwargs['workflow_ids'] == chosen
     assert refresh.call_args.kwargs['dry_run'] is True
+
+
+@pytest.mark.skipif('Filter Metadata by Workflow UUIDs' not in source.read_text(encoding='utf-8')
+                   and not os.environ.get('BIOMERO_TEST_METADATA_UUID_GATE'),
+                   reason='Explicit UUID filter gate unavailable')
+@pytest.mark.parametrize('enabled', [None, False])
+def test_unchecked_uuid_filter_ignores_prefilled_selection(enabled):
+    inputs = {'Refresh OMERO Metadata': True, 'Metadata Workflow UUIDs': ['invalid-prefill'],
+              'Filter Metadata by Workflow UUIDs': enabled}
+    client = Mock()
+    client.getInput.side_effect = inputs.get
+    context = Mock(__enter__=Mock(return_value=object()), __exit__=Mock(return_value=False))
+    refresh = Mock()
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value,
+                    WorkflowTracker=Mock(return_value=context), refresh_all_metadata=refresh):
+        adapter.refresh_metadata_from_init(client, Mock())
+    assert 'workflow_ids' not in refresh.call_args.kwargs
+
+
+@pytest.mark.skipif('Filter Metadata by Workflow UUIDs' not in source.read_text(encoding='utf-8')
+                   and not os.environ.get('BIOMERO_TEST_METADATA_UUID_GATE'),
+                   reason='Explicit UUID filter gate unavailable')
+def test_checked_uuid_filter_refuses_empty_selection_before_tracker():
+    inputs = {'Refresh OMERO Metadata': True, 'Filter Metadata by Workflow UUIDs': True}
+    client = Mock()
+    client.getInput.side_effect = inputs.get
+    factory = Mock()
+    with patch.dict(adapter.__dict__, unwrap=lambda value: value, WorkflowTracker=factory):
+        with pytest.raises(ValueError, match='Select at least one workflow UUID'):
+            adapter.refresh_metadata_from_init(client, Mock())
+    factory.assert_not_called()
 
 
 @pytest.mark.skipif(not hasattr(adapter, 'refresh_all_metadata'), reason='bulk refresh not present')
