@@ -37,6 +37,17 @@ def test_absent_flag_is_a_noop():
     client.normalize_results_on_slurm.assert_not_called()
 
 
+def test_normalizer_receives_workflow_connection():
+    function = load()
+    if 'omero_conn' not in function.__code__.co_varnames and not os.environ.get('BIOMERO_TEST_REMOTE_SHALLOWER'):
+        pytest.skip('Connection forwarding requires updated feature source')
+    client = SimpleNamespace(remote_shallow_zarr=True, normalize_results_on_slurm=Mock())
+    conn = Mock()
+    function(client, '/data', 'workflow', omero_conn=conn)
+    client.normalize_results_on_slurm.assert_called_once_with(
+        '/data', 'workflow', 'canonical', omero_conn=conn)
+
+
 def test_normalizer_runs_before_zip_creation():
     source = SOURCE.read_text(encoding='utf-8')
     if 'def normalize_remote_results' not in source and not os.environ.get('BIOMERO_TEST_REMOTE_SHALLOWER'):
