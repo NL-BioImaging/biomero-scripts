@@ -526,7 +526,8 @@ workflow versions and per-target metadata plans are available behind the activit
 info button and in the worker's `biomero.log`.
 Dry runs of one to three selected workflows show human-readable field diffs,
 omitting unchanged fields. Bulk sweeps log progress counts and skip/failure
-outcomes rather than full metadata maps. Backups are opt-in: when enabled,
+outcomes rather than full metadata maps, with four isolated metadata workers
+by default (`Metadata Workers`, 1-8). Backups are opt-in: when enabled,
 inspection/manual-recovery snapshots are saved in a unique directory under
 `/data/biomero-metadata-backups`, with its path reported in the activity result.
 Administrators can override the location; no automated restore is provided.

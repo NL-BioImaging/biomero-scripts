@@ -42,6 +42,10 @@ from biomero import WorkflowTracker
 from biomero.provenance import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from functools import partial
+from queue import Queue, Empty
 
 logger = logging.getLogger(__name__)
 VERSION = "2.9.0"
@@ -269,11 +273,12 @@ def metadata_refresh_log_diff(kind, ident, workflow_id, plan):
             if before.get(key) == after.get(key):
                 continue
             if key not in before:
-                logger.info('  + %s: %s', key, display(after[key]))
+                logger.info('  %s %s | + %s: %s', kind, ident, key, display(after[key]))
             elif key not in after:
-                logger.info('  - %s: %s', key, display(before[key]))
+                logger.info('  %s %s | - %s: %s', kind, ident, key, display(before[key]))
             else:
-                logger.info('  ~ %s: %s -> %s', key, display(before[key]), display(after[key]))
+                logger.info('  %s %s | ~ %s: %s -> %s', kind, ident, key,
+                            display(before[key]), display(after[key]))
 
 
 def metadata_refresh_target(conn, tracker, kind, ident, workflow_id, *, view_version,
@@ -309,13 +314,96 @@ def metadata_refresh_target(conn, tracker, kind, ident, workflow_id, *, view_ver
     return item
 
 
+@contextmanager
+def metadata_refresh_worker(conn, tracker, session_id):
+    """Own a gateway and history reader in one lane; never kill the parent session."""
+    gateway = conn.clone()
+    try:
+        if not gateway.connect(sUuid=session_id):
+            raise RuntimeError('Metadata worker could not join the script session')
+        gateway.c.enableKeepAlive(60)
+        env = dict(tracker.env)
+        # Maintenance only reads existing events; workers must not create tables.
+        env['CREATE_TABLE'] = env['WORKFLOWTRACKER_CREATE_TABLE'] = 'no'
+        with WorkflowTracker(env=env) as reader:
+            try:
+                yield gateway, reader
+            finally:
+                # The SQLAlchemy factory's close() does not dispose its datastore.
+                # Remove this thread's scoped session, or dispose its own engine.
+                datastore = getattr(reader.factory, 'datastore', None)
+                if datastore is not None:
+                    if getattr(datastore, 'scoped_session', None) is not None:
+                        datastore.scoped_session.remove()
+                    elif getattr(datastore, 'engine', None) is not None:
+                        datastore.engine.dispose()
+    finally:
+        gateway.close(hard=False)
+
+
+def metadata_refresh_lane(chunk, factory, queue, directory, options):
+    """Reuse lane-local resources and report every target, including setup failures."""
+    completed = 0
+    try:
+        with factory() as (conn, tracker):
+            for index, (kind, ident, workflow_id) in chunk:
+                backup = directory / f'{index:06d}-{kind}-{ident}.json' if directory else None
+                item = metadata_refresh_target(
+                    conn, tracker, kind, ident, workflow_id, backup_path=backup, **options)
+                queue.put((index, item))
+                completed += 1
+    except Exception as error:
+        logger.exception('Metadata refresh worker stopped')
+        for index, (kind, ident, workflow_id) in chunk[completed:]:
+            queue.put((index, {'object_type': kind, 'object_id': ident,
+                              'workflow_id': workflow_id, 'status': 'failed',
+                              'reason': str(error) or type(error).__name__,
+                              'possibly_partial': False}))
+
+
+def metadata_refresh_outcomes(conn, tracker, targets, directory, options,
+                              workers, worker_factory):
+    """Keep outstanding jobs bounded to lanes, not one future per OMERO result."""
+    if workers == 1:
+        for index, (kind, ident, workflow_id) in enumerate(targets):
+            backup = directory / f'{index:06d}-{kind}-{ident}.json' if directory else None
+            yield index, metadata_refresh_target(
+                conn, tracker, kind, ident, workflow_id, backup_path=backup, **options)
+        return
+    # Serialize multiple workflow views attached to the same object in one lane.
+    chunks = [[] for _ in range(workers)]
+    object_lanes = {}
+    for index, target in enumerate(targets):
+        key = target[:2]
+        lane = object_lanes.setdefault(key, len(object_lanes) % workers)
+        chunks[lane].append((index, target))
+    queue = Queue(maxsize=workers * 2)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(metadata_refresh_lane, chunk, worker_factory,
+                                   queue, directory, options) for chunk in chunks if chunk]
+        for _ in targets:
+            while True:
+                try:
+                    item = queue.get(timeout=1)
+                    break
+                except Empty:
+                    if all(future.done() for future in futures):
+                        raise RuntimeError('Metadata workers stopped without reporting every target')
+            yield item
+
+
 def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
-                         backup_directory=None, workflow_ids=None, backup_enabled=False):
+                         backup_directory=None, workflow_ids=None, backup_enabled=False,
+                         workers=1, worker_factory=None):
     """Refresh discoverable views, reporting unavailable histories separately."""
     if not conn.isAdmin():
         raise ValueError('Metadata refresh requires an administrator')
     if view_version != 'v0':
         raise ValueError('View_Version must be v0')
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError('Metadata workers must be an integer between 1 and 8')
+    if workers > 1 and worker_factory is None:
+        raise ValueError('Parallel metadata workers require an isolated worker_factory')
     selected_workflows = {str(UUID(str(value).strip()))
                           for value in (workflow_ids or [])}
     targets = discover_metadata_targets(conn)
@@ -342,17 +430,20 @@ def refresh_all_metadata(conn, tracker, *, view_version='v0', dry_run=True,
               'backup_directory': str(directory) if directory else None,
               'discovered': len(targets), 'results': [],
               'counts': dict(planned=0, updated=0, unchanged=0, skipped=0, failed=0)}
-    for index, (kind, ident, workflow_id) in enumerate(targets):
-        backup = directory / f'{index:06d}-{kind}-{ident}.json' if directory else None
-        item = metadata_refresh_target(
-            conn, tracker, kind, ident, workflow_id, view_version=view_version,
-            dry_run=dry_run, backup_path=backup, backup_enabled=backup_enabled, detailed=detailed)
-        report['results'].append(item)
+    options = dict(view_version=view_version, dry_run=dry_run,
+                   backup_enabled=backup_enabled, detailed=detailed)
+    results = {}
+    logger.info('Metadata refresh started: %s result/workflow pairs; workers=%s; mode=%s; field diffs=%s',
+                len(targets), workers, 'dry run' if dry_run else 'apply', detailed)
+    for index, item in metadata_refresh_outcomes(
+            conn, tracker, targets, directory, options, workers, worker_factory):
+        results[index] = item
         report['counts'][item['status']] += 1
-        if (index + 1) % 25 == 0 or index + 1 == len(targets):
+        if len(results) % 25 == 0 or len(results) == len(targets):
             logger.info('Metadata refresh progress: %s/%s; updated=%s, unchanged=%s, planned=%s, skipped=%s, failed=%s',
-                        index + 1, len(targets), report['counts']['updated'], report['counts']['unchanged'],
+                        len(results), len(targets), report['counts']['updated'], report['counts']['unchanged'],
                         report['counts']['planned'], report['counts']['skipped'], report['counts']['failed'])
+    report['results'] = [results[index] for index in sorted(results)]
     if directory:
         with (directory / 'report.json').open('x', encoding='utf-8') as stream:
             json.dump(report, stream, indent=2)
@@ -369,6 +460,11 @@ def refresh_metadata_from_init(client, conn):
     if dry_run is None:
         dry_run = True
     version = unwrap(client.getInput('Metadata View Version')) or 'v0'
+    workers = unwrap(client.getInput('Metadata Workers'))
+    if workers is None:
+        workers = 4
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError('Metadata workers must be an integer between 1 and 8')
     backup = unwrap(client.getInput('Metadata Backup Directory'))
     backup_enabled = unwrap(client.getInput('Save Metadata Backups'))
     if backup_enabled is None:
@@ -385,6 +481,9 @@ def refresh_metadata_from_init(client, conn):
     selection['backup_enabled'] = backup_enabled
     client.enableKeepAlive(60)
     with WorkflowTracker() as tracker:
+        if workers > 1:
+            selection.update(workers=workers, worker_factory=partial(
+                metadata_refresh_worker, conn, tracker, client.getSessionId()))
         return refresh_all_metadata(conn, tracker, view_version=version,
                                     dry_run=dry_run, backup_directory=backup, **selection)
 
@@ -461,6 +560,8 @@ def runScript():
                      description='Preview changes without writing. Inspect the report before disabling.'),
         scripts.String('Metadata View Version', grouping='02.2', default='v0',
                        values=[rstring('v0')]),
+        scripts.Int('Metadata Workers', grouping='02.2.1', default=4,
+                    description='Parallel metadata workers (1-8). Each worker owns its connection and history reader. Use 1 for sequential maintenance.'),
         scripts.Bool('Save Metadata Backups', grouping='02.3', default=False,
                      description='Optionally save original metadata before applying. These are manual-recovery snapshots; no automated restore is provided.'),
         scripts.String('Metadata Backup Directory', optional=True, grouping='02.3.1',

@@ -13,6 +13,10 @@ Run **Slurm Init (Admin Only)** with these inputs:
   workflow metadata across groups.
 - `Metadata View Version`: `v0` (the only supported view).
 - `Metadata Dry Run`: true by default; inspect the report before disabling it.
+- `Metadata Workers`: 4 by default, adjustable from 1 to 8. Workers process
+  independent targets concurrently using their own OMERO gateways and event-store
+  readers. Use 1 for sequential maintenance. Multiple workflow views on the same
+  object are kept in one worker lane.
 - `Save Metadata Backups`: false by default. Enable it to save the original
   annotation values and links before changing each target. These are optional
   inspection/manual-recovery snapshots, not an automated restore mechanism.
@@ -37,7 +41,11 @@ Before a deployment-wide update, dry-run one to three selected workflow UUIDs
 and inspect their field diffs. Then disable filtering and dry-run mode to apply
 the same view across OMERO. Discovery uses existing
 `biomero/workflow` annotations; it does not create metadata on unannotated objects.
-Each object/workflow pair is processed independently. Missing event-store
+Each object/workflow pair is planned once, then preflighted before writing.
+Workers join the administrative script session and keep their clients alive;
+they detach on completion without terminating the parent session. Event-store
+sessions and connections owned by each worker are released when its lane ends.
+Missing event-store
 history or ambiguous/incomplete snapshots are skipped and reported, leaving
 those views unchanged. A write failure is reported separately as potentially
 partial, and processing continues with the next target. Shared annotations are
