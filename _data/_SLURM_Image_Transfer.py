@@ -1338,7 +1338,7 @@ def index_existing_image_zarr(
     promotion_service_factory=None,
     annotation_writer=None,
 ):
-    """Verify and index an existing managed Zarr without copying its pixels."""
+    """Index the authoritative managed backing Zarr without rereading OMERO."""
     storage_id, storage_root, relative_path = locate_managed_zarr(
         existing_path,
         storage_roots,
@@ -1358,24 +1358,6 @@ def index_existing_image_zarr(
     }
     identity_provider = identity_provider or IsccBioIdentityProvider()
     logger.info(
-        "Calculating ISCC-BIO pixel identity from OMERO Pixels for existing "
-        "Zarr Image %s",
-        image.getId(),
-    )
-    original_identity = identity_provider.generate_omero(
-        conn,
-        image_id=int(image.getId()),
-        **guard_values,
-    )
-    logger.info(
-        "Calculated OMERO pixel identity for Image %s: ISCC=%s, "
-        "Data-Code=%s, Instance-Code=%s",
-        image.getId(),
-        original_identity.iscc_code,
-        original_identity.data_code,
-        original_identity.instance_code,
-    )
-    logger.info(
         "Calculating ISCC-BIO pixel identity from existing managed Zarr for "
         "Image %s: %s",
         image.getId(),
@@ -1393,46 +1375,118 @@ def index_existing_image_zarr(
         existing_identity.data_code,
         existing_identity.instance_code,
     )
-    if not pixel_identities_match(original_identity, existing_identity):
-        raise ValueError(
-            f"Existing managed Zarr pixels do not match OMERO Image "
-            f"{image.getId()}"
-        )
-
-    promotion_service_factory = (
-        promotion_service_factory or CanonicalPromotionService
-    )
-    indexing = promotion_service_factory(
-        storage_root_id=storage_id,
-        storage_root=storage_root,
-    )
-    result = indexing.index_existing(
-        existing_path,
-        relative_path=relative_path,
+    source = CanonicalZarrSource(
+        storage_root=storage_id,
+        relative_path=relative_path.as_posix(),
         source_object_type="Image",
         source_object_id=int(image.getId()),
         source_generation=source_generation,
         node_path=".",
-        original_identity=original_identity,
-        existing_identity=existing_identity,
-        pixel_identity_origin="omero-pixels",
+        interchange_profile="ngff-0.4-zarr-v2",
+        pixel_identity=existing_identity,
+        pixel_identity_origin="canonical-bootstrap",
+        canonical_pixel_verified=True,
     )
+    write_indexed_canonical_marker(existing_path, source)
     attach_canonical_source(
         conn,
         image,
         "Image",
-        result.source,
+        source,
         annotation_writer=annotation_writer,
     )
     logger.info(
-        "ISCC-BIO verification matched OMERO Pixels and existing Zarr for "
+        "Using authoritative backing Zarr pixels for "
         "Image %s; indexed generation %s in place at %s:%s",
         image.getId(),
         source_generation,
         storage_id,
         relative_path.as_posix(),
     )
-    return result.source
+    return source
+
+
+def verified_plate_source(source, origin="canonical-bootstrap"):
+    """Keep identities and labels intact while recording canonical pixel trust."""
+    return source.model_copy(update={"images": tuple(
+        image.model_copy(update={"source": image.source.model_copy(update={
+            "canonical_pixel_verified": True,
+            "pixel_identity_origin": origin,
+        })}) for image in source.images
+    )})
+
+
+def upgrade_reused_canonical(conn, obj, source, source_path):
+    """Upgrade old records only when reusing the object's actual backing Zarr.
+
+    A cached export is not authoritative merely because it is on managed disk.
+    Require the existing import provenance to identify the same backing store.
+    Publish a new metadata generation without copying or rehashing pixel data.
+    """
+    is_plate = isinstance(source, CanonicalPlateSource)
+    verified = (all(i.source.canonical_pixel_verified for i in source.images)
+                if is_plate else source.canonical_pixel_verified)
+    if verified:
+        return source
+    backing = get_legacy_zarr_path(obj)
+    if backing is None or Path(backing).resolve() != Path(source_path).resolve():
+        return source
+    upgraded = (verified_plate_source(source) if is_plate else
+                source.model_copy(update={"canonical_pixel_verified": True,
+                                          "pixel_identity_origin": "canonical-bootstrap"}))
+    generation = source.source_generation + 1
+    upgraded = upgraded.model_copy(update={"source_generation": generation})
+    if is_plate:
+        upgraded = upgraded.model_copy(update={"images": tuple(
+            image.model_copy(update={"source": image.source.model_copy(
+                update={"source_generation": generation})})
+            for image in upgraded.images
+        )})
+    write_indexed_canonical_marker(source_path, upgraded)
+    if is_plate:
+        attach_canonical_plate_source(conn, obj, upgraded)
+    else:
+        attach_canonical_source(conn, obj, "Image", upgraded)
+    return upgraded
+
+
+def verify_exported_plate_source(conn, plate, export_path, source,
+                                 identity_provider=None):
+    """Compare fresh CLI-exported fields with their OMERO source before commit."""
+    provider = identity_provider or IsccBioIdentityProvider()
+
+    def verify():
+        with (Path(export_path) / ".zattrs").open(encoding="utf-8") as handle:
+            metadata = json.load(handle)["plate"]
+        wells = {(well.getRow(), well.getColumn()): well
+                 for well in plate.listChildren()}
+        paths = {well["path"]: wells[(well["rowIndex"], well["columnIndex"])]
+                 for well in metadata["wells"]}
+        seen_images = set()
+        for item in source.images:
+            well_path, field = item.image_node_path.rsplit("/", 1)
+            # omero-cli-zarr uses the getWellSample(field) positional index.
+            if not field.isdecimal():
+                raise ValueError(f"Unsupported exported Plate field: {field}")
+            image = paths[well_path].getImage(int(field))
+            if image is None or int(image.getId()) in seen_images:
+                raise ValueError("Missing or duplicate exported Plate Image mapping")
+            seen_images.add(int(image.getId()))
+            identity = item.source.pixel_identity
+            validate_omero_image_semantics(image, identity)
+            original = provider.generate_omero(
+                conn, image_id=int(image.getId()),
+                node_path=identity.node_path, role=identity.role,
+                shape=identity.shape, dtype=identity.dtype, axes=identity.axes,
+                coordinate_transformations=identity.coordinate_transformations,
+            )
+            if not pixel_identities_match(original, identity):
+                raise ValueError(
+                    f"Exported Plate pixels do not match OMERO Image {image.getId()}"
+                )
+        return verified_plate_source(source, origin="omero-pixels")
+
+    return run_with_keepalive(verify, conn.keepAlive)
 
 
 def index_existing_plate_zarr(
@@ -1459,6 +1513,7 @@ def index_existing_plate_zarr(
         identity_provider=identity_provider,
         keepalive=conn.keepAlive,
     )
+    source = verified_plate_source(source)
     write_indexed_canonical_marker(existing_path, source)
     attach_canonical_plate_source(
         conn,
@@ -1513,6 +1568,8 @@ def promote_exported_plate_zarr(
         identity_provider=identity_provider,
         keepalive=conn.keepAlive,
     )
+    source = verify_exported_plate_source(
+        conn, plate, export_path, source, identity_provider)
     committed = store.commit(export_path, source)
     attach_canonical_plate_source(
         conn,
@@ -2174,6 +2231,9 @@ def save_as_zarr(
         source_path = select_zarr_source_path(
             object, canonical_source, storage_roots or {})
     if source_path is not None:
+        if shallow_zarr_storage and canonical_source is not None:
+            canonical_source = upgrade_reused_canonical(
+                conn, object, canonical_source, source_path)
         if (
             shallow_zarr_storage
             and canonical_source is None

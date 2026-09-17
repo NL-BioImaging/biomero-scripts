@@ -99,6 +99,7 @@ from omero_metadata.populate import ParsingContext
 import ezomero
 
 from biomero import SlurmClient, constants
+from biomero.provenance import render_workflow_metadata
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True
@@ -344,7 +345,24 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         return None
 
 
-def build_shallow_import_options(canonical_inputs, client=None):
+def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None):
+    """Administrator-only filesystem stage before result archiving."""
+    if not (getattr(slurm_client, "remote_shallow_zarr", False)
+            and IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+            and IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
+        return None
+    canonical = load_canonical_input_snapshot(slurm_client, workflow_id)
+    kwargs = {}
+    if omero_conn is not None:
+        def heartbeat():
+            if omero_conn.keepAlive() is False:
+                raise RuntimeError('OMERO connection is no longer active')
+        kwargs['heartbeat'] = heartbeat
+    return slurm_client.shallow_results_on_slurm(
+        data_path, workflow_id, canonical, **kwargs)
+
+
+def build_shallow_import_options(canonical_inputs, client=None, remote_receipts=()):
     """Build an importer-owned shallow operation or preserve legacy import."""
     if not (
         IMPORTER_ENABLED
@@ -365,11 +383,13 @@ def build_shallow_import_options(canonical_inputs, client=None):
     plate_label_name = (unwrap(client.getInput(
         constants.results.PLATE_LABEL_PREVIEW_NAME
     )) or "").strip() if client else ""
+    extra = {"remoteReceipts": remote_receipts} if remote_receipts else {}
     operation = ShallowZarrImportOperation(
         canonicalInputs=canonical_inputs,
         importImageLabelViews=True,
         importPlateLabelPreview=import_plate_preview,
         plateLabelName=(plate_label_name or None),
+        **extra,
     )
     envelope = ImportOptionsEnvelope(operations=(operation,))
     logger.info(
@@ -1610,6 +1630,21 @@ def upload_log_to_omero(
     return message
 
 
+def attach_provenance_csv(client, conn, message, job_id, targets,
+                          metadata_files, wf_id=None):
+    """Attach full provenance independently of optional result attachments."""
+    if not metadata_files or not targets:
+        warning = "Provenance warning: no metadata CSV or attachment target available"
+        logger.warning(warning)
+        return message + "\n" + warning
+    try:
+        return upload_metadata_csv_to_omero(
+            client, conn, message, job_id, targets, metadata_files, wf_id)
+    except Exception as error:
+        logger.warning("Provenance CSV attachment failed: %s", error)
+        return message + "\nProvenance warning: metadata CSV attachment failed: {}".format(error)
+
+
 def upload_metadata_csv_to_omero(
     client: Any,
     conn: BlitzGateway,
@@ -1677,36 +1712,32 @@ def upload_metadata_csv_to_omero(
         annotation = create_file_annotation_inplace(
             conn, renamed_metadata_file, mimetype, namespace, description)
 
-        # Refresh objects to avoid UnloadedEntityException (works for Projects, Plates, Images)
+        linked = 0
+        failed = 0
+        seen = set()
         for obj in projects:
-            # Detect object type dynamically
-            if hasattr(obj, '_obj') and hasattr(obj._obj, '__class__'):
-                obj_class_name = obj._obj.__class__.__name__
-                if 'Project' in obj_class_name:
-                    object_type = "Project"
-                elif 'Dataset' in obj_class_name:
-                    object_type = "Dataset"
-                elif 'Plate' in obj_class_name:
-                    object_type = "Plate"
-                elif 'Image' in obj_class_name:
-                    object_type = "Image"
-                else:
-                    # Fallback - try to use the wrapper type
-                    object_type = type(obj).__name__.replace(
-                        'Wrapper', '').replace('_', '')
-            else:
-                object_type = "Project"  # Default fallback
-
-            refreshed_obj = conn.getObject(object_type, obj.getId())
-            if refreshed_obj:
+            try:
+                if obj is None:
+                    raise RuntimeError("Provenance target is unavailable")
+                object_type = obj.OMERO_CLASS
+                identity = (object_type, obj.getId())
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                refreshed_obj = conn.getObject(*identity)
+                if refreshed_obj is None:
+                    raise RuntimeError("Provenance target could not be refreshed")
                 refreshed_obj.linkAnnotation(annotation)
-            else:
-                logger.warning(
-                    f"Could not refresh {object_type} {obj.getId()} for annotation linking")
+                linked += 1
+            except Exception as link_error:
+                failed += 1
+                logger.warning("Metadata CSV link failed: %s", link_error)
 
-        message += f"\nAttached metadata CSV {os.path.basename(renamed_metadata_file)} to {len(projects)} projects"
-        logger.info(
-            f"Successfully attached metadata CSV to {len(projects)} projects")
+        message += "\nAttached metadata CSV {} to {}/{} targets".format(
+            os.path.basename(renamed_metadata_file), linked, linked + failed)
+        if failed:
+            message += " (provenance warning: {} links failed)".format(failed)
+        logger.info(message)
 
     except Exception as e:
         message += f" Uploading metadata CSV failed: {e}"
@@ -2021,6 +2052,7 @@ def extract_or_reuse_slurm_results(
     wf_id: UUID,
     message: str,
     permanent_storage_path: Optional[str],
+    omero_conn=None,
 ) -> Tuple[Optional[str], str, Optional[str], str, str]:
     """Reuse durable staged results or perform the initial Slurm retrieval."""
     if permanent_storage_path:
@@ -2043,6 +2075,7 @@ def extract_or_reuse_slurm_results(
         group_name,
         wf_id,
         message,
+        omero_conn=omero_conn,
     )
 
 
@@ -2053,6 +2086,7 @@ def extract_slurm_results_zip(
     group_name: str,
     wf_id: UUID,
     message: str,
+    omero_conn=None,
 ) -> Tuple[str, str, str, str, str]:
     """Extract and copy SLURM results zip once for reuse by multiple workflows.
 
@@ -2066,6 +2100,7 @@ def extract_slurm_results_zip(
         group_name: Name of the OMERO group.
         wf_id: Workflow ID.
         message: Message to be returned in the tuple.
+        omero_conn: Workflow connection kept alive while remote shallowing runs.
 
     Returns:
         slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message
@@ -2121,6 +2156,10 @@ def extract_slurm_results_zip(
             f"SLURM output directory still empty after {poll_max_attempts * poll_interval}s: "
             f"{out_dir}. Job may have failed to write output.")
 
+    shallow_remote_results(slurmClient, slurm_data_path, wf_id,
+                             omero_conn=omero_conn)
+
+    # Archive-format extension point: shallowing is independent of ZIP.
     # Create and copy zip archive from SLURM
     filename = f"{slurm_job_id}_out"
     logger.info(f"Creating and copying data archive from SLURM...")
@@ -2335,6 +2374,11 @@ def create_metadata_csv(
             for tid in wf.tasks:
                 task = slurmClient.workflowTracker.repository.get(tid)
                 task_prefix = f"Task_{task.task_name}_"
+
+                if getattr(task, 'storage_provenance', None):
+                    metadata_rows.append([
+                        f'{task_prefix}Storage_Provenance',
+                        json.dumps(task.storage_provenance, sort_keys=True)])
 
                 metadata_rows.extend([
                     [f'{task_prefix}ID', str(task._id)],
@@ -2728,6 +2772,7 @@ def create_upload_orders_for_results(
     wf_id: UUID,
     client: Any = None,
     canonical_inputs=None,
+    remote_receipts=(),
 ) -> List[Dict[str, Any]]:
     """Create upload orders for SLURM results (images and optionally label zarrs).
 
@@ -2754,6 +2799,7 @@ def create_upload_orders_for_results(
     lifecycle_options = build_shallow_import_options(
         canonical_inputs,
         client,
+        **({"remote_receipts": remote_receipts} if remote_receipts else {}),
     )
     if lifecycle_options is not None:
         image_files = select_lifecycle_import_paths(results_path)
@@ -3011,6 +3057,7 @@ def add_metadata_to_imported_images(
     og_name_map: Optional[Dict[str, str]] = None,
     roi_label_pattern: str = "",
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
+    provenance_targets=None,
 ) -> str:
     """Add metadata to images/plates imported by biomero-importer using UUID search.
 
@@ -3035,7 +3082,8 @@ def add_metadata_to_imported_images(
         # then continue discovering imported images for exact ROI source pairs.
         if destination_type.lower() == "screen":
             plate_message = add_metadata_to_imported_plates(
-                conn, slurmClient, destination_id, order_uuids, wf_id, job_id)
+                conn, slurmClient, destination_id, order_uuids, wf_id, job_id,
+                provenance_targets=provenance_targets)
             if plate_message:
                 messages.append(plate_message)
         
@@ -3114,13 +3162,16 @@ def add_metadata_to_imported_images(
 
         # Add metadata to each imported image (same pattern as SLURM_Get_Results.py)
         metadata_added = 0
+        metadata_reduced = 0
         for result_index, img in enumerate(imported_images):
             if destination_type.lower() == "dataset":
                 try:
-                    add_image_annotations(
+                    annotation_status = add_image_annotations(
                         conn, slurmClient, img.getId(), job_id, wf_id=wf_id)
-                    metadata_added += 1
-                    logger.debug(f"Added metadata to image {img.getId()}: {img.getName()}")
+                    if annotation_status == "complete":
+                        metadata_added += 1
+                    elif annotation_status == "reduced":
+                        metadata_reduced += 1
                 except Exception as img_error:
                     logger.warning(f"Failed to add metadata to image {img.getId()}: {img_error}")
 
@@ -3158,7 +3209,13 @@ def add_metadata_to_imported_images(
                         f"Could not update description for image {img.getId()}: {desc_error}")
 
         if destination_type.lower() == "dataset":
-            message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
+            if metadata_added == len(imported_images):
+                message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
+            else:
+                message = (
+                    f"Workflow metadata for {len(imported_images)} imported images: "
+                    f"{metadata_added} complete, {metadata_reduced} reduced, "
+                    f"{len(imported_images) - metadata_added - metadata_reduced} incomplete")
         else:
             message = f"Matched {len(imported_images)} imported screen images to workflow inputs"
         messages.append(message)
@@ -3178,7 +3235,8 @@ def add_metadata_to_imported_plates(
     destination_id: int,
     order_uuids: List[str],
     wf_id: str,
-    job_id: str
+    job_id: str,
+    provenance_targets=None,
 ) -> str:
     """Add metadata to plates imported by biomero-importer using UUID search.
     
@@ -3269,18 +3327,26 @@ def add_metadata_to_imported_plates(
         logger.info(f"Adding metadata to {len(imported_plates)} imported plates")
 
         # Add metadata to each imported plate
+        if provenance_targets is not None:
+            provenance_targets.extend(imported_plates)
         metadata_added = 0
+        metadata_reduced = 0
         for plate in imported_plates:
             try:
                 # Add annotations to the plate (using same pattern but for plate objects)
-                add_plate_annotations(
+                annotation_status = add_plate_annotations(
                     conn, slurmClient, plate.getId(), job_id, wf_id=wf_id)
-                metadata_added += 1
-                logger.debug(f"Added metadata to plate {plate.getId()}: {plate.getName()}")
+                if annotation_status == "complete":
+                    metadata_added += 1
+                elif annotation_status == "reduced":
+                    metadata_reduced += 1
             except Exception as plate_error:
                 logger.warning(f"Failed to add metadata to plate {plate.getId()}: {plate_error}")
 
-        message = f"Added workflow metadata to {metadata_added}/{len(imported_plates)} imported plates"
+        message = (
+            f"Workflow metadata for {len(imported_plates)} imported plates: "
+            f"{metadata_added} complete, {metadata_reduced} reduced, "
+            f"{len(imported_plates) - metadata_added - metadata_reduced} incomplete")
         logger.info(message)
         return message
 
@@ -3415,118 +3481,209 @@ def rename_label_images_in_omero(
 
 def add_plate_annotations(conn, slurmClient, plate_id, job_id, wf_id=None):
     """Add workflow metadata annotations to a plate"""
-    add_object_annotations(conn, slurmClient, "Plate", plate_id, job_id, wf_id)
+    return add_object_annotations(conn, slurmClient, "Plate", plate_id, job_id, wf_id)
 
 
 def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
     """Add workflow metadata annotations to an image"""
-    add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
+    return add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
+
+
+def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
+                                   ns, across_groups=False):
+    """Try the historical full view, reducing it only on an index-size error.
+
+    Full values remain in the workflow CSV and event store. Keep this helper
+    identical in both result scripts: OMERO downloads scripts independently.
+    """
+    import hashlib
+
+    def write(values):
+        annotation_id = ezomero.post_map_annotation(
+            conn=conn, object_type=object_type, object_id=object_id,
+            kv_dict=values, ns=ns, across_groups=across_groups)
+        if not annotation_id:
+            raise RuntimeError("MapAnnotation save returned no ID")
+        return annotation_id
+
+    try:
+        return write(kv_dict), "complete"
+    except Exception as error:
+        detail = (str(error) + " " + str(
+            getattr(error, "serverStackTrace", ""))).lower()
+        index_size_error = (
+            ("index row" in detail or "index entry" in detail)
+            and ("maximum" in detail or "too large" in detail
+                 or "exceeds" in detail))
+        if not index_size_error:
+            logger.warning("Provenance annotation failed for %s %s (%s): %s",
+                           object_type, object_id, ns, error)
+            return None, "failed"
+
+    reference = "metadata_{}.csv".format(
+        kv_dict.get("Workflow_ID") or kv_dict.get("Job_ID") or "workflow")
+    # Bound the combined key/value bytes conservatively; do not depend on
+    # compression, page size, or the failing server's index tuple overhead.
+    reduced = {}
+    for key, value in kv_dict.items():
+        raw_key = str(key).encode("utf-8")
+        raw_value = str(value).encode("utf-8")
+        if len(raw_key) + len(raw_value) <= 1024:
+            reduced[key] = value
+            continue
+        safe_key = key
+        if len(raw_key) > 512:
+            safe_key = "Long_key_sha256_" + hashlib.sha256(raw_key).hexdigest()
+            while safe_key in kv_dict or safe_key in reduced:
+                safe_key += "_"
+        reduced[safe_key] = (
+            "Large field; full value in {} (utf8_bytes={}; sha256={})".format(
+                reference, len(raw_value), hashlib.sha256(raw_value).hexdigest()))
+    if reduced == kv_dict:
+        logger.warning("Index-size rejection for %s %s (%s); no large fields "
+                       "could be reduced", object_type, object_id, ns)
+        return None, "failed"
+    try:
+        annotation_id = write(reduced)
+        logger.warning("Reduced provenance view saved for %s %s (%s); "
+                       "full values are in %s and workflow history",
+                       object_type, object_id, ns, reference)
+        return annotation_id, "reduced"
+    except Exception as error:
+        logger.warning("Reduced provenance annotation failed for %s %s (%s): %s",
+                       object_type, object_id, ns, error)
+        return None, "failed"
+
+
+
+
+def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
+    """Read the imported result's managed storage evidence, never feature flags."""
+    import hashlib
+
+    target = conn.getObject(object_type, object_id)
+    refs, paths = [], set()
+    for ann in target.listAnnotations():
+        ns = ann.getNs()
+        if ns not in ('biomero.zarr.shallow',
+                      (IMPORTER_CONFIG or {}).get('annotation_namespace', 'biomero.import')):
+            continue
+        values = dict(ann.getValue())
+        if ns == 'biomero.zarr.shallow':
+            if values.get('workflowId') == str(wf_id):
+                refs.append(values)
+        else:
+            path = values.get('Imported_from') or values.get('Filepath')
+            if path:
+                paths.add(path)
+    mount = Path(os.getenv('IMPORT_MOUNT_PATH', '/data')).resolve()
+    reference = None
+    if refs:
+        if len(refs) != 1 or refs[0].get('storageRoot') != 'import-mount-data':
+            raise ValueError('Ambiguous or unsupported shallow storage reference')
+        reference = refs[0]
+        root = (mount / reference['relativePath']).resolve()
+        root.relative_to(mount)
+    else:
+        roots = set()
+        for path in paths:
+            candidate = Path(path).resolve()
+            if not candidate.is_relative_to(mount):
+                continue
+            nearest = None
+            for parent in (candidate, *candidate.parents):
+                if not parent.is_relative_to(mount):
+                    break
+                if (parent / '.biomero-shallow.json').is_file():
+                    nearest = parent
+                    break
+                if nearest is None and any((parent / name).is_file()
+                                           for name in ('.zgroup', 'zarr.json')):
+                    nearest = parent
+            if nearest:
+                roots.add(nearest)
+        if not roots:
+            return None  # Non-Zarr or unavailable evidence; do not invent an outcome.
+        if len(roots) != 1:
+            raise ValueError('Ambiguous imported storage paths')
+        root = roots.pop()
+    manifest = root / '.biomero-shallow.json'
+    shallow = manifest.is_file()
+    if reference and not shallow:
+        raise ValueError('Shallow reference has no readable manifest')
+    evidence = {'schema': 1, 'storage': 'shallow-zarr' if shallow else 'full-zarr'}
+    outcome = root / '.biomero-import-storage.json'
+    if outcome.is_file():
+        recorded = json.loads(outcome.read_text(encoding='utf-8'))
+        if (recorded.get('schema') != 1 or recorded.get('workflow_id') != str(wf_id)
+                or recorded.get('storage') != evidence['storage']):
+            raise ValueError('Storage outcome does not match imported result')
+        evidence.update(recorded)
+    elif shallow:
+        evidence['location'] = 'unknown'
+    if shallow:
+        raw = manifest.read_bytes()
+        collection = json.loads(raw)
+        if collection.get('workflowId') != str(wf_id):
+            raise ValueError('Shallow manifest belongs to another workflow')
+        images = collection['images']
+        if reference and 'imageNodePath' in reference:
+            images = [image for image in images
+                      if image['imageNodePath'] == reference['imageNodePath']]
+        if not images:
+            raise ValueError('Result missing from shallow manifest')
+        evidence.update(
+            manifest='import-mount-data/' + manifest.relative_to(mount).as_posix(),
+            manifest_sha256=hashlib.sha256(raw).hexdigest(),
+            source_biocodes=sorted({image['source']['pixelIdentity']['iscc']
+                                   for image in images}))
+    return evidence
+
+
+def record_import_storage_provenance(conn, slurm_client, object_type, object_id, wf_id):
+    """Persist observed result facts before the import-task metadata snapshot."""
+    evidence = collect_import_storage_provenance(conn, object_type, object_id, wf_id)
+    if evidence is None:
+        return
+    tracker = slurm_client.workflowTracker
+    workflow = tracker.repository.get(uuid.UUID(str(wf_id)))
+    tasks = [tracker.repository.get(tid) for tid in workflow.tasks]
+    imports = [task for task in tasks if task.task_name == 'SLURM_Import_Results.py']
+    if len(imports) != 1:
+        raise ValueError('Cannot identify a unique import task for storage provenance')
+    tracker.record_storage_provenance(
+        imports[0].id, f'{object_type}:{object_id}', evidence)
 
 
 def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf_id=None):
     """Generic function to add workflow metadata annotations to any OMERO object (Image, Plate, etc.)"""
+    outcomes = []
+
+    def write_map(**kwargs):
+        annotation_id, status = post_provenance_map_annotation(**kwargs)
+        outcomes.append(status)
+        return annotation_id
+
     ns_wf = "biomero/workflow"
     if slurmClient.track_workflows and wf_id:
         try:
-            wf = slurmClient.workflowTracker.repository.get(wf_id)
+            try:
+                record_import_storage_provenance(
+                    conn, slurmClient, object_type, object_id, wf_id)
+            except Exception as error:
+                outcomes.append('failed')
+                logger.warning('Storage provenance unavailable for %s %s: %s',
+                               object_type, object_id, error)
+            for annotation in render_workflow_metadata(
+                    slurmClient.workflowTracker, wf_id,
+                    target_key=f'{object_type}:{object_id}'):
+                write_map(
+                    conn=conn, object_type=object_type, object_id=object_id,
+                    kv_dict=annotation.values, ns=annotation.namespace,
+                    across_groups=False)
 
-            map_ann_ids = []
-
-            # Extract version from the description using regex
-            version_match = re.search(r'\d+\.\d+\.\d+', wf.description)
-            workflow_version = version_match.group(
-                0) if version_match else "Unknown"
-
-            workflow_annotation_dict = {
-                'Workflow_ID': str(wf_id),
-                'Name': wf.name,
-                'Version': str(workflow_version),
-                'Created_On': wf._created_on.isoformat(),
-                'Modified_On': wf._modified_on.isoformat(),
-                'Task_IDs': ", ".join([str(tid) for tid in wf.tasks]),
-            }
-            map_ann_id = ezomero.post_map_annotation(
-                conn=conn,
-                object_type=object_type,
-                object_id=object_id,
-                kv_dict=workflow_annotation_dict,
-                ns=ns_wf,
-                across_groups=False  # Set to False if you don't want cross-group behavior
-            )
-            map_ann_ids.append(map_ann_id)
-
-            for tid in wf.tasks:
-                task = slurmClient.workflowTracker.repository.get(tid)
-                # Add FAIR metadata
-                task_annotation_dict = {
-                    'Task_ID': str(task._id),
-                    'Workflow_ID': str(wf_id),
-                    'Workflow_Name': wf.name,
-                    'Name': task.task_name,
-                    'Version': task.task_version,
-                    'Created_On': task._created_on.isoformat(),
-                    'Modified_On': task._modified_on.isoformat(),
-                    'Status': task.status,
-                    'Input_Data': task.input_data,
-                    'Job_IDs': ", ".join([str(jid) for jid in task.job_ids]),
-                }
-                # Add parameters
-                if task.params:
-                    task_annotation_dict.update({f"Param_{key}": str(
-                        value) for key, value in task.params.items()})
-                # task metadata - SLURM_Import_Results.py uses the SLURM_Get_Results.py
-                # namespace so the batch supervisor (find_output_images_for_batch) can
-                # locate images regardless of which import script was used.
-                # The 'Name' key in the annotation dict still identifies the true source.
-                # All other tasks keep their own namespace.
-                if task.task_name == 'SLURM_Import_Results.py':
-                    ns_task = ns_wf + "/task/SLURM_Get_Results.py"
-                else:
-                    ns_task = ns_wf + "/task" + f"/{task.task_name}"
-                map_ann_id = ezomero.post_map_annotation(
-                    conn=conn,
-                    object_type=object_type,
-                    object_id=object_id,
-                    kv_dict=task_annotation_dict,
-                    ns=ns_task,
-                    across_groups=False  # Set to False if you don't want cross-group behavior
-                )
-                map_ann_ids.append(map_ann_id)
-
-                for jid in task.job_ids:
-                    job_dict = {
-                        'Job_ID': str(jid),
-                        'Task_ID': str(tid),
-                        'Workflow_ID': str(wf_id),
-                        'Result_Message': task.result_message,
-                    }
-                    # Add the specific job-script command
-                    if task.results and "command" in task.results[0]:
-                        job_dict['Command'] = task.results[0]['command']
-                    # and environment variables
-                    if task.results and "env" in task.results[0]:
-                        job_dict.update({f"Env_{key}": str(value)
-                                        for key, value in task.results[0]['env'].items()})
-                    # job metadata
-                    ns_task_job = ns_task + "/job"
-                    logger.debug(f"Adding metadata: {job_dict}")
-                    map_ann_id = ezomero.post_map_annotation(
-                        conn=conn,
-                        object_type=object_type,
-                        object_id=object_id,
-                        kv_dict=job_dict,
-                        ns=ns_task_job,
-                        across_groups=False  # Set to False if you don't want cross-group behavior
-                    )
-                    map_ann_ids.append(map_ann_id)
-
-            if map_ann_ids:
-                logger.info(
-                    f"Successfully added annotations to {object_type} ID: {object_id}. MapAnnotation IDs: {map_ann_ids}")
-            else:
-                logger.warning(
-                    f"MapAnnotation created for {object_type} ID: {object_id}, but no ID was returned.")
         except Exception as e:
+            outcomes.append("failed")
             logger.error(
                 f"Failed to add annotations to {object_type} ID: {object_id}. Error: {str(e)}")
     else:  # We have no access to workflow tracking, log very limited metadata
@@ -3538,7 +3695,7 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
         # job metadata
         logger.debug(
             f"Track workflows is off. Adding only limited metadata: {job_dict}")
-        map_ann_id = ezomero.post_map_annotation(
+        map_ann_id = write_map(
             conn=conn,
             object_type=object_type,
             object_id=object_id,
@@ -3546,6 +3703,14 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
             ns=ns_task_job,
             across_groups=False  # Set to False if you don't want cross-group behavior
         )
+
+    status = ("failed" if "failed" in outcomes else
+              "reduced" if "reduced" in outcomes else "complete")
+    logger.info("Provenance view for %s %s: %s (%s complete, %s reduced, "
+                "%s failed annotations)", object_type, object_id, status,
+                outcomes.count("complete"), outcomes.count("reduced"),
+                outcomes.count("failed"))
+    return status
 
 
 def process_importer_workflow(
@@ -3561,6 +3726,7 @@ def process_importer_workflow(
     input_images: Optional[List[Any]] = None,
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
     canonical_inputs=None,
+    provenance_targets=None,
 
 ) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
@@ -3678,12 +3844,18 @@ def process_importer_workflow(
         logger.info(f"Created new {destination_type.lower()} ID: {destination_id}")
 
     destination_wrapper = conn.getObject(destination_type, destination_id)
+    if provenance_targets is not None and destination_type.lower() == "dataset":
+        provenance_targets.append(destination_wrapper)
 
     # Create upload order for images only
     logger.info("Creating upload orders for biomero-importer...")
+    remote_receipts = ()
+    if getattr(slurmClient, "remote_shallow_zarr", False) and canonical_inputs is not None:
+        remote_receipts = slurmClient.get_remote_shallower_receipts(wf_id, canonical_inputs)
     orders = create_upload_orders_for_results(
         group_name, username, destination_type, destination_id,
-        permanent_storage_path, wf_id, client, canonical_inputs)
+        permanent_storage_path, wf_id, client, canonical_inputs,
+        **({"remote_receipts": remote_receipts} if remote_receipts else {}))
 
     if orders:
         message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
@@ -3718,7 +3890,7 @@ def process_importer_workflow(
                 input_images=input_images, og_name_map=og_name_map,
                 roi_label_pattern=(unwrap(client.getInput(
                     constants.results.ROI_LABEL_PATTERN)) or ""),
-                roi_pairs=roi_pairs)
+                roi_pairs=roi_pairs, provenance_targets=provenance_targets)
             if post_processing_message:
                 message += f"\n{post_processing_message}"
 
@@ -3859,11 +4031,6 @@ def process_zip_attachments(
         # Record the exact path that was attached so the caller can skip cleanup.
         # upload_zip_to_omero appends .zip internally, so match that here.
         attached_zip_path = f"{zip_path}.zip"
-
-        # Create and attach metadata CSV for ZIP attachments
-        if projects and metadata_files:
-            message = upload_metadata_csv_to_omero(
-                client, conn, message, slurm_job_id, projects, metadata_files, wf_id)
 
     return message, attached_zip_path
 
@@ -4878,7 +5045,7 @@ def runScript() -> None:
             try:
                 slurm_data_path, permanent_storage_path, temporary_zip_file_path, filename, message = extract_or_reuse_slurm_results(
                     slurmClient, slurm_job_id, local_tmp_storage, group_name,
-                    wf_id, message, permanent_storage_path)
+                    wf_id, message, permanent_storage_path, omero_conn=conn)
                 message += f"\nSuccessfully extracted SLURM results: {permanent_storage_path}"
                 logger.info(
                     f"SLURM results extracted and available: {permanent_storage_path}")
@@ -4945,6 +5112,7 @@ def runScript() -> None:
                 _file_output_targets_for_log = [t for t in _file_output_targets_for_log if t is not None]
 
             importer_destination_target = None
+            provenance_targets = []
             # Explicit, user-chosen log targets (project/plate/dataset attachment,
             # else file-output targets). May be empty when the user picked an
             # output option that implies no direct container (e.g. importer-only
@@ -5036,7 +5204,8 @@ def runScript() -> None:
                     group_name, username,
                     permanent_storage_path, wf_id, task_id,
                     input_images=input_images, roi_pairs=roi_pairs,
-                    canonical_inputs=canonical_input_manifest)
+                    canonical_inputs=canonical_input_manifest,
+                    provenance_targets=provenance_targets)
                 message += importer_message
 
             if unwrap(client.getInput(constants.results.OUTPUT_CREATE_ROIS)):
@@ -5105,6 +5274,14 @@ def runScript() -> None:
                 conn, slurmClient, permanent_storage_path, slurm_job_id, wf_id)
             message += f"\nCreated metadata files: {metadata_files}"
             logger.info(f"Metadata files created: {metadata_files}")
+            # Full provenance belongs to result Plates/Datasets even when the
+            # user requested no ZIP or individual file attachments. Retain
+            # explicitly selected legacy attachment targets too.
+            csv_targets = provenance_targets or (
+                [importer_destination_target] if importer_destination_target else _log_targets)
+            message = attach_provenance_csv(
+                client, conn, message, slurm_job_id,
+                list(csv_targets) + list(projects), metadata_files, wf_id)
 
             # SLURM TABLES PROCESSING
             if process_csv_tables:
@@ -5160,6 +5337,10 @@ def runScript() -> None:
                 # full archive of all results and is handled by process_zip_attachments;
                 # workflow-produced zips inside subdirectories attach normally.
                 _file_skip = list(metadata_files or [])
+                if metadata_files:
+                    _file_skip.append(os.path.join(
+                        os.path.dirname(metadata_files[0]),
+                        f"metadata_{wf_id or slurm_job_id}.csv"))
                 if log_to_upload:
                     _file_skip.append(log_to_upload)
                 # Exclude the bulk results zip — handled by process_zip_attachments.

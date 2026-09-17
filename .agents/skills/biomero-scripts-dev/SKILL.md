@@ -10,6 +10,26 @@ OMERO users run containerized, FAIR bioimage-analysis workflows on a remote HPC
 cluster. They rely on the `biomero` Python library for SSH/Slurm orchestration
 and are deployed as part of the NL-BIOMERO stack.
 
+## Core / OMERO scripts boundary
+
+BIOMERO core owns event-store aggregates, historical replay, and versioned
+metadata views or update plans expressed as plain data structures. These OMERO
+scripts request those views and own their OMERO-specific persistence.
+
+- Keep OMERO connections, gateways, sessions, model wrappers, permission checks,
+  keepalives, annotation creation/update/unlinking and persistence backups here.
+  Never pass an OMERO connection into BIOMERO core, even through an optional or
+  duck-typed adapter.
+- Use core's rendering/view functions instead of duplicating event-store
+  interpretation or metadata selection policy in scripts. Translate the returned
+  data structures into OMERO annotations at this boundary.
+- Client-library dependencies such as omeropy and ezomero belong to the scripts
+  layer, not core. Do not move their imports, implementation code, or
+  client-library-specific references into core when extracting shared logic.
+  Preserve the repositories' separate dependency and licensing boundaries.
+- Keep OMERO adapter tests in the scripts test-suite harness; pure rendering
+  and event-store view tests belong in core.
+
 ## Understand the deployment boundary
 
 - Install and register these scripts on the OMERO server.
@@ -249,6 +269,19 @@ logging, installation, or result selection changes. Also inspect sibling repos:
   when a change affects worker environment variables, mounts, permissions,
   processor routing, importer enablement, or installed script selection.
 
-Remember that scripts use DEBUG rotating-file logging and INFO stdout logging
-by default. Preserve useful operational diagnostics while avoiding secrets in
-logs.
+## Script result summaries and activity logs
+
+`client.setOutput("Message", rstring(message))` supplies the concise, informative
+summary shown in the OMERO Activities result. Summarize outcomes, warnings,
+counts, and where to find details; do not put full reports in `Message`.
+
+The standard processor captures script stdout/stderr in the activity log behind
+the **i** button. Normal `logger.info()`, `logger.debug()`, `logger.warning()`,
+and other logger calls provide the detailed diagnostics there, subject to the
+configured handler levels, and in `biomero.log`. Scripts normally use DEBUG
+rotating-file logging and INFO stdout logging. Preserve detailed reports and
+operational context in logger output, while avoiding secrets.
+
+Shortening the activity summary means shortening `Message`, not filtering or
+summarizing logger output. Follow the existing scripts' logging infrastructure;
+do not create a separate log attachment to replace the standard activity log.
