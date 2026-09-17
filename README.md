@@ -207,9 +207,10 @@ rebuild.
 - false: Image Transfer exports normally and Import Results imports normally;
 - true: Image Transfer may promote/reuse a verified canonical Zarr, and Import
   Results submits a typed `biomero.shallow-zarr` operation with the exact
-  workflow input snapshot. BIOMERO.importer performs identity comparison,
-  fail-safe normalization, and registration planning in its independent
-  service after the order is committed.
+  workflow input snapshot. By default, eligible results are normalized on
+  Slurm before transfer. BIOMERO.importer validates the remote receipt and
+  registers the results. When remote shallowing is disabled or safely falls
+  back, the importer performs identity comparison and normalization locally.
 
 Run Workflow distinguishes complete Zarr inputs from temporary conversion
 material. A workflow that consumes Zarr receives a reconstructed shallow input
@@ -222,12 +223,14 @@ original pixels and labels, and deliberately excludes the temporary export
 from canonical promotion and returned-Zarr matching. Plates always use the
 complete Zarr path.
 
-The OMERO script does not hash or mutate returned Zarrs. If the deployed
+The OMERO script delegates returned-Zarr hashing and normalization to the remote
+helper or importer. If the deployed
 importer does not advertise the lifecycle operation, or no canonical workflow
 snapshot is available, it uses the established full-import path. Existing
 legacy label-result controls remain unchanged in that fallback. Identity
-worker concurrency is configured on BIOMERO.importer, so a web/script timeout
-cannot stop the expensive Plate comparison after hand-off.
+worker concurrency for local normalization is configured on BIOMERO.importer;
+remote concurrency uses `BIOMERO_REMOTE_SHALLOWER_WORKERS`. Once the importer
+accepts an order, its processing is independent of the submitting script.
 
 Canonical Plate identities are indexed in OMERO as one compact Plate record
 plus bounded image- and label-node records. This keeps large Plate metadata
@@ -265,6 +268,88 @@ Importer-disabled deployments continue to use `SLURM_Get_Results.py` and do not
 load BIOMERO.importer Zarr helpers. The worker processor must forward this
 environment variable to downloaded scripts; current NL-BIOMERO deployments do
 that dynamically through `biomero.constants.slurm_env`.
+
+### Optional remote Zarr shallower
+
+Remote shallowing uses BIOMERO's shared Slurm job monitor with a script-owned
+heartbeat callback that keeps the OMERO connection alive during shallowing
+and recovery. Conversion uses the same callback interface.
+Connection failures stop monitoring.
+This applies to inline and detached workflows. Helper resources
+inherit generic Slurm settings, with optional partition, memory and time
+overrides in `[SLURM]` (`remote_shallower_partition`,
+`remote_shallower_mem`, `remote_shallower_time`). GPU and job-array settings
+are not inherited. Use matching BIOMERO core and scripts versions.
+
+With administrator `BIOMERO_REMOTE_SHALLOW_ZARR=true`, importer enablement and
+the existing shallow capability, `SLURM_Import_Results.py` runs the configured
+CPU remote shallower before ZIP creation. It uses the canonical input manifest
+already persisted by image transfer. Detached retries adopt the helper job or
+completed receipt. Successful receipts come from workflow tracking and travel
+in the ordinary lifecycle import order; the importer validates them without
+repeating pixel hashing. Unsupported results and safe failures retain the local
+importer path. Remote shallowing defaults to true within opt-in shallow Zarr
+mode and is not an OMERO script parameter. Run `SLURM_Init_environment` to
+install the image and verify it with `SLURM_check_setup` before running workflows.
+Runtime never pulls images; a missing or invalid image raises a setup error.
+Unresolved submissions, incomplete recovery or invalid receipts stop retrieval
+and preserve remote output for inspection instead of archiving uncertain data.
+Set `BIOMERO_REMOTE_SHALLOW_ZARR=false` to retain importer-side normalization.
+Shallow storage itself remains opt-in: an absent or false `BIOMERO_SHALLOW_ZARR`
+leaves ordinary result imports unchanged.
+
+See the [NL-BIOMERO remote-shallower administrator guide](https://nl-bioimaging.github.io/NL-BIOMERO/latest/sysadmin/remote-shallower.html)
+for deployment settings, helper image initialization and recovery.
+
+### Component compatibility
+
+Deploy these scripts with the corresponding BIOMERO core release and the
+compatible importer supplied by the NL-BIOMERO release. Core must provide
+`biomero.provenance` and `biomero.maintenance`: result and administrative scripts
+import these APIs even when shallow storage and detached execution are disabled.
+The script `VERSION` shown in OMERO identifies the BIOMERO release series;
+also check the installed scripts tag and core package version when comparing
+prereleases.
+
+Remote normalization additionally requires the importer receipt API,
+`biomero-schema>=0.2.1b1,<0.4`, and a compatible BIOMERO.shallower image.
+The first published helper is
+`cellularimagingcf/biomero-shallower:0.1.0-beta.1`; its package/tool version is
+`0.1.0b1`. Install the scripts on both the OMERO server and the detached worker.
+Detached metadata maintenance requires a matching NL-BIOMERO worker with the
+maintenance supervisor; ordinary detached-workflow support alone is insufficient.
+
+### Workflow metadata views
+
+Result scripts use the matching BIOMERO core's versioned metadata renderer.
+New OMERO key/value annotations default to the legacy-compatible `v0` view:
+scientific task parameters and existing job fields are retained, while detached
+coordination tasks and duplicated output settings are excluded. Full CSV
+provenance and event history are unchanged. Batching retains its existing result
+namespace and discovery fields.
+
+BIOMERO's developer documentation, **Workflow metadata views**, describes the
+legacy-compatible `v0` view and the administrator API for a dry-run-first
+refresh of existing annotations. The refresh changes the view, not the recorded
+execution history. The scripts-layer [metadata refresh guide](docs/metadata-refresh.md)
+describes how administrators can apply a new view safely through Slurm Init.
+Slurm Init shows a compact summary in the activity result. Detailed commands,
+workflow versions and per-target metadata plans are available behind the activity's
+info button and in the worker's `biomero.log`.
+Dry runs of one to three selected workflows show human-readable field diffs,
+omitting unchanged fields. Bulk sweeps log progress counts and skip/failure
+outcomes rather than full metadata maps, with four isolated metadata workers
+by default (`Metadata Workers`, 1-8). Backups are opt-in: when enabled,
+inspection/manual-recovery snapshots are saved in a unique directory under
+`/data/biomero-metadata-backups`, with its path reported in the activity result.
+Administrators can override the location; no automated restore is provided.
+With `BIOMERO_DETACHED_WORKFLOWS` enabled, metadata apply runs execute in the
+processor's background maintenance lane. The activity reports a request ID;
+progress, backup locations and final counts are in `biomeroworker`'s
+`biomero.log`. Dry runs remain inline. An absent or false flag preserves inline
+execution for all refreshes.
+Slurm Check Setup reports active and recent maintenance requests and their
+counts. Uncheck `Check Slurm` to check maintenance without an HPC connection.
 
 ### Workflow provenance files and searchable metadata
 
@@ -479,62 +564,3 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
-
-
-### Optional remote Zarr shallower
-
-Remote shallowing uses BIOMERO's shared Slurm job monitor with a script-owned
-heartbeat callback that keeps the OMERO connection alive during shallowing
-and recovery. Conversion uses the same callback interface.
-Connection failures stop monitoring.
-This applies to inline and detached workflows. Helper resources
-inherit generic Slurm settings, with optional partition, memory and time
-overrides in `[SLURM]` (`remote_shallower_partition`,
-`remote_shallower_mem`, `remote_shallower_time`). GPU and job-array settings
-are not inherited. Use matching BIOMERO core and scripts versions.
-
-With administrator `BIOMERO_REMOTE_SHALLOW_ZARR=true`, importer enablement and
-the existing shallow capability, `SLURM_Import_Results.py` runs the configured
-CPU remote shallower before ZIP creation. It uses the canonical input manifest
-already persisted by image transfer. Detached retries adopt the helper job or
-completed receipt. Successful receipts come from workflow tracking and travel
-in the ordinary lifecycle import order; the importer validates them without
-repeating pixel hashing. Unsupported results and safe failures retain the local
-importer path. Remote shallowing defaults to true within opt-in shallow Zarr
-mode and is not an OMERO script parameter. Run `SLURM_Init_environment` to
-install the image and verify it with `SLURM_check_setup` before running workflows.
-Runtime never pulls images; a missing or invalid image raises a setup error.
-Matching core, schema, importer, and helper versions are required; see the
-NL-BIOMERO administrator documentation for deployment settings and recovery.
-
-## Workflow metadata views
-
-Result scripts use the matching BIOMERO core's versioned metadata renderer.
-New OMERO key/value annotations default to the legacy-compatible `v0` view:
-scientific task parameters and existing job fields are retained, while detached
-coordination tasks and duplicated output settings are excluded. Full CSV
-provenance and event history are unchanged. Batching retains its existing result
-namespace and discovery fields.
-
-BIOMERO's developer documentation, **Workflow metadata views**, describes the
-legacy-compatible `v0` view and the administrator API for a dry-run-first
-refresh of existing annotations. The refresh changes the view, not the recorded
-execution history. The scripts-layer [metadata refresh guide](docs/metadata-refresh.md)
-describes how administrators can apply a new view safely through Slurm Init.
-Slurm Init shows a compact summary in the activity result. Detailed commands,
-workflow versions and per-target metadata plans are available behind the activity's
-info button and in the worker's `biomero.log`.
-Dry runs of one to three selected workflows show human-readable field diffs,
-omitting unchanged fields. Bulk sweeps log progress counts and skip/failure
-outcomes rather than full metadata maps, with four isolated metadata workers
-by default (`Metadata Workers`, 1-8). Backups are opt-in: when enabled,
-inspection/manual-recovery snapshots are saved in a unique directory under
-`/data/biomero-metadata-backups`, with its path reported in the activity result.
-Administrators can override the location; no automated restore is provided.
-With `BIOMERO_DETACHED_WORKFLOWS` enabled, metadata apply runs execute in the
-processor's background maintenance lane. The activity reports a request ID;
-progress, backup locations and final counts are in `biomeroworker`'s
-`biomero.log`. Dry runs remain inline. An absent or false flag preserves inline
-execution for all refreshes.
-Slurm Check Setup reports active and recent maintenance requests and their
-counts. Uncheck `Check Slurm` to check maintenance without an HPC connection.
