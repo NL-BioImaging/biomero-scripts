@@ -1,0 +1,119 @@
+import ast
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+SOURCE_ROOT = Path(os.environ.get(
+    "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
+))
+SCRIPT_PATH = SOURCE_ROOT / "admin" / "BIOMERO_Migrate_Shallow_Storage.py"
+
+
+def _load_helpers():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    wanted = {
+        "_pairs_to_values",
+        "_resolve_store_path",
+        "_build_group_plan",
+        "_apply_annotation_updates",
+    }
+    nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path,
+        "json": json,
+        "upgrade_annotation_reference_v1": lambda values, _manifest: {
+            **{key: value for key, value in values.items() if key != "model"},
+            "schema": "2",
+            "format": "biomero-shallow-zarr",
+        },
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
+                 "exec"), namespace)
+    assert wanted.issubset(namespace)
+    return namespace
+
+
+def _record(annotation_id, relative_path="results/result.zarr"):
+    values = {
+        "schema": "1",
+        "model": "rfc8-shallow-copy",
+        "storageRoot": "group-0-data",
+        "relativePath": relative_path,
+        "workflowId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    }
+    return {
+        "annotation_id": annotation_id,
+        "object_type": "Plate",
+        "object_id": 100 + annotation_id,
+        "group_id": 3,
+        "pairs": [[key, value] for key, value in values.items()],
+        "values": values,
+    }
+
+
+def test_group_plan_upgrades_every_omero_projection_once(tmp_path):
+    helpers = _load_helpers()
+    records = [_record(1), _record(2)]
+
+    plan = helpers["_build_group_plan"](
+        records,
+        {"group-0-data": tmp_path},
+        SimpleNamespace(),
+    )
+
+    assert plan["store_path"] == (tmp_path / "results/result.zarr").resolve()
+    assert [item["after"]["schema"] for item in plan["annotations"]] == ["2", "2"]
+    assert all("model" not in item["after"] for item in plan["annotations"])
+
+
+def test_group_plan_rejects_references_to_different_stores(tmp_path):
+    helpers = _load_helpers()
+
+    with pytest.raises(ValueError, match="one shallow store"):
+        helpers["_build_group_plan"](
+            [_record(1), _record(2, "results/other.zarr")],
+            {"group-0-data": tmp_path},
+            SimpleNamespace(),
+        )
+
+
+def test_annotation_write_failure_rolls_back_prior_updates():
+    helpers = _load_helpers()
+    records = [_record(1), _record(2)]
+    plan = {
+        "annotations": [
+            {
+                "record": record,
+                "before": record["values"],
+                "after": {"schema": "2"},
+            }
+            for record in records
+        ]
+    }
+    writes = []
+
+    def writer(_conn, record, values):
+        writes.append((record["annotation_id"], values["schema"]))
+        if record["annotation_id"] == 2 and values["schema"] == "2":
+            raise RuntimeError("injected OMERO failure")
+
+    with pytest.raises(RuntimeError, match="injected OMERO failure"):
+        helpers["_apply_annotation_updates"](
+            object(), plan, writer=writer,
+        )
+
+    assert writes == [(1, "2"), (2, "2"), (2, "1"), (1, "1")]
+
+
+def test_pairs_reject_duplicate_projection_keys():
+    helpers = _load_helpers()
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        helpers["_pairs_to_values"]([["schema", "1"], ["schema", "2"]])
