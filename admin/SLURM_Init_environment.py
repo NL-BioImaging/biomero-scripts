@@ -667,6 +667,10 @@ def runScript():
                     # with workflow images so one concurrency limit covers all
                     # container builds.
                     converter_specs = slurmClient.prepare_converters()
+                    if (slurmClient.remote_shallow_zarr
+                            and slurmClient.remote_shallower_image):
+                        from biomero.remote_shallower import image_spec
+                        converter_specs.append(image_spec(slurmClient))
                     conn.keepAlive()
 
                     # 4. Submit one bounded workflow + converter image array.
