@@ -1,5 +1,8 @@
 import ast
 import os
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 import pytest
 from pathlib import Path
 
@@ -9,6 +12,7 @@ SOURCE_ROOT = Path(os.environ.get(
 ))
 CHECK_SCRIPT = SOURCE_ROOT / "admin" / "SLURM_check_setup.py"
 INIT_SCRIPT = SOURCE_ROOT / "admin" / "SLURM_Init_environment.py"
+RUN_SCRIPT = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
 
 
 def load_function(path, name):
@@ -19,7 +23,7 @@ def load_function(path, name):
     ), None)
     if function is None:
         raise AssertionError(f"{name} is not available on this source revision")
-    namespace = {}
+    namespace = {"SlurmClient": object}
     exec(compile(ast.Module(body=[function], type_ignores=[]),
                  str(path), "exec"), namespace)
     return namespace[name]
@@ -114,3 +118,52 @@ def test_initializer_submits_one_combined_array_and_reads_its_status():
     assert "image_status = slurmClient.get_image_pull_status()" in source
     assert "get_logfile_from_slurm" not in source
     assert "sing.log" not in source
+
+
+def test_initializer_adds_configured_remote_shallower_to_image_array():
+    source = INIT_SCRIPT.read_text(encoding="utf-8")
+
+    assert "slurmClient.remote_shallow_zarr" in source
+    assert "slurmClient.remote_shallower_image" in source
+    assert "converter_specs.append(image_spec(slurmClient))" in source
+
+
+def test_workflow_preflight_accepts_ready_remote_shallower():
+    validator = load_function(RUN_SCRIPT, "validate_remote_shallower_ready")
+    destination = "/images/shallower.sif"
+    client = SimpleNamespace(
+        remote_shallow_zarr=True,
+        _partition_existing_images=Mock(return_value=([{"destination": destination}], [])),
+    )
+    remote_shallower = ModuleType("biomero.remote_shallower")
+    remote_shallower.image_spec = Mock(return_value={"destination": destination})
+
+    validator.__globals__.update(
+        IMPORTER_ENABLED=True,
+        SHALLOW_ZARR_ENABLED=True,
+    )
+    with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
+        validator(client, use_zarr_format=True)
+
+    client._partition_existing_images.assert_called_once_with(
+        [{"destination": destination}]
+    )
+
+
+def test_workflow_preflight_rejects_missing_remote_shallower_before_launch():
+    validator = load_function(RUN_SCRIPT, "validate_remote_shallower_ready")
+    destination = "/images/shallower.sif"
+    client = SimpleNamespace(
+        remote_shallow_zarr=True,
+        _partition_existing_images=Mock(return_value=([], [{"destination": destination}])),
+    )
+    remote_shallower = ModuleType("biomero.remote_shallower")
+    remote_shallower.image_spec = Mock(return_value={"destination": destination})
+
+    validator.__globals__.update(
+        IMPORTER_ENABLED=True,
+        SHALLOW_ZARR_ENABLED=True,
+    )
+    with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
+        with pytest.raises(RuntimeError, match="SLURM Init Environment"):
+            validator(client, use_zarr_format=True)
