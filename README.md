@@ -30,7 +30,7 @@ scripts follow. Deployment and administration are documented in NL-BIOMERO.
 | `__workflows/` | `SLURM_Run_Workflow.py`, `SLURM_Run_Workflow_Batched.py` | Run an analysis and retrieve results; optionally split inputs into batches. |
 | `_data/` | Image/File Transfer, Remote Conversion, Get Update | Export inputs, convert formats and monitor jobs. |
 | `_data/` | `SLURM_Get_Results.py`, `SLURM_Import_Results.py` | Upload results through OMERO or import in place with BIOMERO.importer. |
-| `admin/` | Slurm Init, Check Setup, Cownary, Tail Logs | Initialize and inspect the cluster, maintain workflow metadata and diagnose execution. |
+| `admin/` | Slurm Init, Check Setup, Shallow Storage Migration, Cownary, Tail Logs | Initialize and inspect the cluster, migrate managed storage metadata, maintain workflow metadata and diagnose execution. |
 
 CellPose Segmentation and Example Minimal Slurm Script are examples, not the
 standard workflow entry points; NL-BIOMERO does not install them by default.
