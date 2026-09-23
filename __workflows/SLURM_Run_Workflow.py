@@ -546,6 +546,25 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
         raise RuntimeError(error_msg)
 
 
+def validate_remote_shallower_ready(slurmClient: SlurmClient,
+                                    use_zarr_format: bool) -> None:
+    """Fail before workflow submission when remote shallowing cannot run."""
+    if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and use_zarr_format
+            and slurmClient.remote_shallow_zarr):
+        return
+
+    from biomero.remote_shallower import image_spec
+
+    spec = image_spec(slurmClient)
+    ready, pending = slurmClient._partition_existing_images([spec])
+    if pending or not ready:
+        raise RuntimeError(
+            f"Remote shallower image missing or invalid: {spec['destination']}. "
+            "Ask an administrator to run SLURM Init Environment and verify "
+            "the image with SLURM Check Setup before starting this workflow."
+        )
+
+
 def runScript():
     """Main entry point for the SLURM workflow execution script.
 
@@ -933,6 +952,10 @@ def runScript():
             if roi_warning:
                 logger.warning(roi_warning)
                 UI_messages += roi_warning + " "
+            # Validate hard result-import dependencies before tracking or
+            # starting any expensive transfer or analysis work.
+            validate_remote_shallower_ready(slurmClient, use_zarr_format)
+
             # Start tracking the workflow on a unique ID
             wf_id = ensure_tracking_uuid(
                 slurmClient.workflowTracker.initiate_workflow(
