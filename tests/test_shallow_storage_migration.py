@@ -314,3 +314,71 @@ def test_default_directory_path_is_reportable_before_creation():
     assert directory == Path(
         "/data/biomero-shallow-migrations/schema-1-to-2-test-uuid"
     )
+
+
+class _CanonicalSource:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def to_dict(self):
+        return self.payload
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, _CanonicalSource)
+            and self.payload == other.payload
+        )
+
+
+def _load_marker_status_helpers():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    wanted = {
+        "_canonical_content_signature",
+        "_canonical_marker_status",
+    }
+    nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {"json": json}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
+                 "exec"), namespace)
+    return namespace
+
+
+def test_missing_canonical_marker_is_planned_as_a_repair():
+    helpers = _load_marker_status_helpers()
+    source = _CanonicalSource({"pixelIdentity": {"iscc": "same"}})
+
+    assert helpers["_canonical_marker_status"](None, source, 17601) == (
+        "missing"
+    )
+
+
+def test_canonical_marker_locator_drift_is_repairable():
+    helpers = _load_marker_status_helpers()
+    marker = _CanonicalSource({
+        "relativePath": "canonical/Image-1.g2.ome.zarr",
+        "sourceGeneration": 2,
+        "canonicalPixelVerified": False,
+        "pixelIdentity": {"iscc": "same"},
+    })
+    annotation = _CanonicalSource({
+        "relativePath": "canonical/Image-1.g1.ome.zarr",
+        "sourceGeneration": 1,
+        "canonicalPixelVerified": True,
+        "pixelIdentity": {"iscc": "same"},
+    })
+
+    assert helpers["_canonical_marker_status"](
+        marker, annotation, 17601,
+    ) == "locator-drift"
+
+
+def test_canonical_marker_pixel_mismatch_remains_fatal():
+    helpers = _load_marker_status_helpers()
+    marker = _CanonicalSource({"pixelIdentity": {"iscc": "first"}})
+    annotation = _CanonicalSource({"pixelIdentity": {"iscc": "second"}})
+
+    with pytest.raises(ValueError, match="pixel identity disagrees"):
+        helpers["_canonical_marker_status"](marker, annotation, 17601)
