@@ -20,6 +20,7 @@ def _load_helpers():
         "_resolve_store_path",
         "_build_group_plan",
         "_apply_annotation_updates",
+        "_load_planning_manifest",
     }
     nodes = [
         node for node in tree.body
@@ -28,6 +29,11 @@ def _load_helpers():
     namespace = {
         "Path": Path,
         "json": json,
+        "SHALLOW_COLLECTION_MANIFEST": ".biomero-shallow.json",
+        "upgrade_manifest_v1": lambda value, **kwargs: (value, kwargs),
+        "ShallowManifest": SimpleNamespace(
+            from_dict=lambda value: value,
+        ),
         "upgrade_annotation_reference_v1": lambda values, _manifest: {
             **{key: value for key, value in values.items() if key != "model"},
             "schema": "2",
@@ -38,6 +44,24 @@ def _load_helpers():
                  "exec"), namespace)
     assert wanted.issubset(namespace)
     return namespace
+
+
+def test_schema_1_planning_supplies_store_for_label_reconstruction(tmp_path):
+    helpers = _load_helpers()
+    store = tmp_path / "result.zarr"
+    store.mkdir()
+    (store / ".biomero-shallow.json").write_text(
+        json.dumps({"schema": 1, "images": []}),
+        encoding="utf-8",
+    )
+
+    schema, upgraded = helpers["_load_planning_manifest"](store)
+
+    assert schema == 1
+    assert upgraded == (
+        {"schema": 1, "images": []},
+        {"store_path": store},
+    )
 
 
 def _record(annotation_id, relative_path="results/result.zarr"):
