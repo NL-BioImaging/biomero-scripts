@@ -43,6 +43,7 @@ def _load_canonical_functions():
         "_annotation_namespace",
         "_annotation_values",
         "get_canonical_source",
+        "bind_canonical_plate_source",
         "get_canonical_plate_source",
         "get_shallow_reference",
         "get_shallow_plate_reference",
@@ -513,6 +514,43 @@ def test_storage_backed_plate_index_round_trip(pixel_identity):
     assert writes[0]["object_type"] == "Plate"
     assert "images" not in writes[0]["kv_dict"]
     assert ns["get_canonical_plate_source"](plate) == canonical
+
+
+def test_storage_backed_plate_marker_can_be_shared_by_duplicate_imports(
+    pixel_identity,
+):
+    ns = _load_canonical_functions()
+    marker_source = plate_source(pixel_identity)
+    duplicate_index = CanonicalPlateIndex.from_source(
+        marker_source.model_copy(update={
+            "source_object_id": 10,
+            "images": tuple(
+                image.model_copy(update={
+                    "source": image.source.model_copy(update={
+                        "source_object_id": 10,
+                    }),
+                })
+                for image in marker_source.images
+            ),
+        })
+    )
+    plate = Object(10, [Annotation(
+        CANONICAL_PLATE_SOURCE_NAMESPACE,
+        duplicate_index.to_annotation_values(),
+    )])
+    ns["load_group_storage_roots"] = lambda: {}
+    ns["resolve_managed_source_path"] = lambda *_args: Path("/plate.zarr")
+    ns["load_canonical_marker"] = lambda _path: marker_source
+
+    restored = ns["get_canonical_plate_source"](plate)
+
+    assert restored.source_object_id == 10
+    assert restored.images[0].source.source_object_id == 10
+    assert (
+        restored.images[0].source.pixel_identity.iscc_code
+        == marker_source.images[0].source.pixel_identity.iscc_code
+    )
+    assert marker_source.source_object_id == 9
 
 
 def test_reads_legacy_split_plate_records(pixel_identity):
