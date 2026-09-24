@@ -911,7 +911,7 @@ def _migration_directory_path(value):
             raise ValueError("Backup Directory must be an absolute worker path")
     else:
         root = Path("/data/biomero-shallow-migrations")
-        directory = root / f"schema-1-to-2-{uuid4()}"
+        directory = root / f"shallow-storage-{uuid4()}"
     return directory
 
 
@@ -1003,7 +1003,8 @@ def migrate_schema_1_references(
         None if dry_run else _create_migration_directory(planned_directory)
     )
     report = {
-        "migration": "biomero-shallow-schema-1-to-2",
+        "migration": "biomero-shallow-storage",
+        "operations": ["schema-1-to-2", "canonical-single-store"],
         "dryRun": dry_run,
         "backupDirectory": str(planned_directory),
         "stores": [],
@@ -1137,9 +1138,9 @@ def _summary(report):
 def runScript():
     client = scripts.client(
         "BIOMERO Migrate Shallow Storage (Admin Only)",
-        """Upgrade prerelease BIOMERO shallow-Zarr schema-1 storage metadata
-        and its linked OMERO references to schema 2. Run a dry run first.
-        Applying always creates recovery files; image pixels are not copied.""",
+        """Migrate older BIOMERO shallow-storage metadata and consolidate
+        canonical source registrations. Run a dry run first. Applying always
+        creates recovery files; image pixels are not copied.""",
         scripts.String(
             OBJECT_TYPE,
             default="All",
