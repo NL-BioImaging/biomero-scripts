@@ -274,14 +274,6 @@ if not IMPORTER_ENABLED:
 VERSION = "2.8.3"
 
 
-def get_images_by_ids(conn, image_ids):
-    """Load source images without querying OMERO for an empty ID list."""
-    requested_ids = [int(image_id) for image_id in image_ids]
-    if not requested_ids:
-        return []
-    return [img for img in conn.getObjects("Image", ids=requested_ids) if img]
-
-
 def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
     """Load legacy and dedicated group mappings with dedicated values winning.
 
@@ -682,6 +674,33 @@ def find_best_matching_image(
         f"No good match for '{og_name}' among input images (best={best_ratio:.2f}), "
         f"falling back to name lookup")
     return None
+
+
+def get_images_in_id_order(
+    conn: BlitzGateway,
+    image_ids: List[int],
+) -> List[Any]:
+    """Load images while preserving the caller's requested ID order."""
+    requested_ids = [int(image_id) for image_id in image_ids]
+    if not requested_ids:
+        return []
+    images_by_id = {
+        int(image.getId()): image
+        for image in conn.getObjects("Image", ids=requested_ids)
+        if image is not None
+    }
+    missing_ids = [
+        image_id for image_id in requested_ids
+        if image_id not in images_by_id
+    ]
+    if missing_ids:
+        logger.warning(
+            f"Could not load source images with IDs: {missing_ids}")
+    return [
+        images_by_id[image_id]
+        for image_id in requested_ids
+        if image_id in images_by_id
+    ]
 
 
 def match_results_to_inputs(
@@ -4401,7 +4420,7 @@ def runScript() -> None:
             # and attachment matching (scenarios 1-3 + 4 with rename).
             _roi_target_ids = unwrap(client.getInput(
                 constants.results.ROI_TARGET_IMAGE_IDS)) or []
-            input_images = get_images_by_ids(conn, _roi_target_ids)
+            input_images = get_images_in_id_order(conn, _roi_target_ids)
             _lookup_task_id = task_id
             if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
                 try:
@@ -4443,11 +4462,8 @@ def runScript() -> None:
                         except Exception as _we:
                             logger.debug(f"Could not walk workflow tasks for image IDs: {_we}")
                     if _image_ids:
-                        input_images = [
-                            img for img in conn.getObjects(
-                                "Image", ids=[int(i) for i in _image_ids])
-                            if img
-                        ]
+                        input_images = get_images_in_id_order(
+                            conn, _image_ids)
                         logger.info(
                             f"Loaded {len(input_images)} input images for matching: "
                             f"{[img.getId() for img in input_images]}")
