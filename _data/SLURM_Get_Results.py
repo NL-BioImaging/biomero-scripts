@@ -80,6 +80,15 @@ from omero_metadata.populate import ParsingContext
 # Version constant for easy version management
 VERSION = "2.9.0"
 
+
+def get_images_by_ids(conn, image_ids):
+    """Load source images without querying OMERO for an empty ID list."""
+    requested_ids = [int(image_id) for image_id in image_ids]
+    if not requested_ids:
+        return []
+    return [img for img in conn.getObjects("Image", ids=requested_ids) if img]
+
+
 OBJECT_TYPES = (
     'Plate',
     'Screen',
@@ -2377,11 +2386,7 @@ def runScript():
                             # (handles workflows that rename outputs, e.g. NucleiLabels -> CellsLabels)
                             _roi_target_ids = unwrap(client.getInput(
                                 constants.results.ROI_TARGET_IMAGE_IDS)) or []
-                            input_images = [
-                                img for img in conn.getObjects(
-                                    "Image", ids=[int(i) for i in _roi_target_ids])
-                                if img
-                            ]
+                            input_images = get_images_by_ids(conn, _roi_target_ids)
                             _lookup_task_id = task_id
                             if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
                                 try:
