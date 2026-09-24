@@ -1,8 +1,10 @@
 import ast
 import json
 import os
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -141,3 +143,54 @@ def test_pairs_reject_duplicate_projection_keys():
 
     with pytest.raises(ValueError, match="Duplicate"):
         helpers["_pairs_to_values"]([["schema", "1"], ["schema", "2"]])
+
+
+def test_migration_requires_local_shallower_capabilities():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_require_migration_capabilities"
+    )
+    namespace = {
+        "REQUIRED_MIGRATION_CAPABILITIES": (
+            "schema-1-to-2",
+            "schema-1-path-only-labels",
+        ),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]),
+                 str(SCRIPT_PATH), "exec"), namespace)
+    capabilities = ModuleType("biomero_shallower.capabilities")
+    capabilities.require_migrations = Mock()
+
+    with patch.dict(sys.modules, {
+        "biomero_shallower.capabilities": capabilities,
+    }):
+        namespace["_require_migration_capabilities"]()
+
+    capabilities.require_migrations.assert_called_once_with(
+        "schema-1-to-2", "schema-1-path-only-labels"
+    )
+
+
+def test_migration_rejects_package_without_capability_api():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_require_migration_capabilities"
+    )
+    namespace = {
+        "REQUIRED_MIGRATION_CAPABILITIES": (
+            "schema-1-to-2",
+            "schema-1-path-only-labels",
+        ),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]),
+                 str(SCRIPT_PATH), "exec"), namespace)
+
+    with patch.dict(sys.modules, {
+        "biomero_shallower.capabilities": None,
+    }):
+        with pytest.raises(RuntimeError, match="Update biomeroworker"):
+            namespace["_require_migration_capabilities"]()

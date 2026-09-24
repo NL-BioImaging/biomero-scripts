@@ -137,6 +137,7 @@ def test_workflow_preflight_accepts_ready_remote_shallower():
     )
     remote_shallower = ModuleType("biomero.remote_shallower")
     remote_shallower.image_spec = Mock(return_value={"destination": destination})
+    remote_shallower.validate_installed_tool = Mock(return_value="0.1.0b4")
 
     validator.__globals__.update(
         IMPORTER_ENABLED=True,
@@ -147,6 +148,9 @@ def test_workflow_preflight_accepts_ready_remote_shallower():
 
     client._partition_existing_images.assert_called_once_with(
         [{"destination": destination}]
+    )
+    remote_shallower.validate_installed_tool.assert_called_once_with(
+        client, destination
     )
 
 
@@ -159,6 +163,7 @@ def test_workflow_preflight_rejects_missing_remote_shallower_before_launch():
     )
     remote_shallower = ModuleType("biomero.remote_shallower")
     remote_shallower.image_spec = Mock(return_value={"destination": destination})
+    remote_shallower.validate_installed_tool = Mock()
 
     validator.__globals__.update(
         IMPORTER_ENABLED=True,
@@ -166,4 +171,30 @@ def test_workflow_preflight_rejects_missing_remote_shallower_before_launch():
     )
     with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
         with pytest.raises(RuntimeError, match="SLURM Init Environment"):
+            validator(client, use_zarr_format=True)
+
+    remote_shallower.validate_installed_tool.assert_not_called()
+
+
+def test_workflow_preflight_rejects_incompatible_remote_shallower():
+    validator = load_function(RUN_SCRIPT, "validate_remote_shallower_ready")
+    destination = "/images/shallower.sif"
+    client = SimpleNamespace(
+        remote_shallow_zarr=True,
+        _partition_existing_images=Mock(
+            return_value=([{"destination": destination}], [])
+        ),
+    )
+    remote_shallower = ModuleType("biomero.remote_shallower")
+    remote_shallower.image_spec = Mock(return_value={"destination": destination})
+    remote_shallower.validate_installed_tool = Mock(
+        side_effect=RuntimeError("unsupported manifest schema")
+    )
+
+    validator.__globals__.update(
+        IMPORTER_ENABLED=True,
+        SHALLOW_ZARR_ENABLED=True,
+    )
+    with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
+        with pytest.raises(RuntimeError, match="unsupported manifest schema"):
             validator(client, use_zarr_format=True)
