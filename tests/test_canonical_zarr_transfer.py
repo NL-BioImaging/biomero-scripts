@@ -57,6 +57,9 @@ def _load_canonical_functions():
         "derive_canonical_source_directory",
         "attach_canonical_source",
         "attach_canonical_plate_source",
+        "_canonical_registration_annotations",
+        "_canonical_content_signature",
+        "_update_canonical_annotation",
         "promote_exported_image_zarr",
         "index_existing_image_zarr",
         "index_existing_plate_zarr",
@@ -199,12 +202,20 @@ class Annotation:
     def __init__(self, namespace, values):
         self.namespace = namespace
         self.values = values
+        self.save_count = 0
 
     def getNs(self):
         return self.namespace
 
     def getMapValue(self):
         return [NamedValue(key, value) for key, value in self.values.items()]
+
+    def setValue(self, pairs):
+        self.values = dict(pairs)
+
+    def save(self):
+        self.save_count += 1
+        return self
 
 
 class Object:
@@ -306,9 +317,7 @@ def pixel_identity():
 def source(pixel_identity, generation=1, node_path="."):
     return CanonicalZarrSource(
         storage_root="group-3-data",
-        relative_path=(
-            f".processed/Image-7.g{generation}.ome.zarr"
-        ),
+        relative_path=".processed/Image-7.ome.zarr",
         node_path=node_path,
         source_object_type="Image",
         source_object_id=7,
@@ -328,7 +337,7 @@ def annotation_for(source_record):
 
 
 def plate_source(pixel_identity, generation=1):
-    relative = f".processed/Plate-9.g{generation}.ome.zarr"
+    relative = ".processed/Plate-9.ome.zarr"
     image_identity = pixel_identity.model_copy(update={
         "node_path": "A/1/0",
     })
@@ -441,21 +450,15 @@ def test_rebuilds_plate_snapshot_from_materialized_managed_labels(
     assert restored.images[0].labels == (label,)
 
 
-def test_canonical_source_selection_is_independent_of_annotation_order(
+def test_canonical_source_rejects_multiple_generations(
     pixel_identity,
 ):
     ns = _load_canonical_functions()
     older = annotation_for(source(pixel_identity, generation=1))
     current = annotation_for(source(pixel_identity, generation=2))
-    unrelated = Annotation("other.namespace", {"relativePath": "bad"})
 
-    first = ns["get_canonical_source"](
-        Object(7, [older, unrelated, current]), "Image")
-    second = ns["get_canonical_source"](
-        Object(7, [current, older, unrelated]), "Image")
-
-    assert first == second
-    assert first.source_generation == 2
+    with pytest.raises(ValueError, match="multiple canonical"):
+        ns["get_canonical_source"](Object(7, [older, current]), "Image")
 
 
 def test_canonical_source_rejects_ambiguous_current_generation(pixel_identity):
@@ -465,24 +468,23 @@ def test_canonical_source_rejects_ambiguous_current_generation(pixel_identity):
         "relative_path": ".processed/other/Image-7.g2.ome.zarr"
     })
 
-    with pytest.raises(ValueError, match="ambiguous"):
+    with pytest.raises(ValueError, match="multiple canonical registrations"):
         ns["get_canonical_source"](
             Object(7, [annotation_for(first), annotation_for(second)]),
             "Image",
         )
 
 
-def test_resolves_latest_canonical_plate_source(pixel_identity):
+def test_canonical_plate_rejects_multiple_generations(pixel_identity):
     ns = _load_canonical_functions()
     old = plate_source(pixel_identity, generation=1)
     current = plate_source(pixel_identity, generation=2)
 
-    restored = ns["get_canonical_plate_source"](Object(
-        9,
-        [plate_annotation_for(current), plate_annotation_for(old)],
-    ))
-
-    assert restored == current
+    with pytest.raises(ValueError, match="multiple canonical"):
+        ns["get_canonical_plate_source"](Object(
+            9,
+            [plate_annotation_for(current), plate_annotation_for(old)],
+        ))
 
 
 def test_storage_backed_plate_index_round_trip(pixel_identity):
@@ -599,7 +601,7 @@ def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity):
         Object(9, []),
         tmp_path / "plate.zarr",
         "group-3-data",
-        ".processed/Plate-9.g1.ome.zarr",
+        ".processed/Plate-9.ome.zarr",
         identity_provider=Provider(),
     )
 
@@ -642,7 +644,7 @@ def test_group_mapping_resolves_managed_root_under_import_mount(
     ns = _load_canonical_functions()
     import_mount = tmp_path / "import-mount"
     managed_root = import_mount / "Project A"
-    canonical_path = managed_root / ".processed/Image-7.g1.ome.zarr"
+    canonical_path = managed_root / ".processed/Image-7.ome.zarr"
     canonical_path.mkdir(parents=True)
     config_path = tmp_path / "biomero-config.json"
     config_path.write_text(json.dumps({
@@ -715,7 +717,7 @@ def test_canonical_source_precedes_legacy_annotation(
 ):
     ns = _load_canonical_functions()
     managed_root = tmp_path / "managed"
-    canonical_path = managed_root / ".processed/Image-7.g1.ome.zarr"
+    canonical_path = managed_root / ".processed/Image-7.ome.zarr"
     canonical_path.mkdir(parents=True)
     legacy_path = tmp_path / "legacy.zarr"
     legacy_path.mkdir()
@@ -855,6 +857,38 @@ def test_attaches_canonical_source_annotation_once(pixel_identity):
     ) is None
 
 
+def test_trust_upgrade_updates_one_store_without_new_generation(
+    tmp_path, pixel_identity,
+):
+    ns = _load_canonical_functions()
+    path = tmp_path / ".processed/Image-7.ome.zarr"
+    path.mkdir(parents=True)
+    unverified = source(pixel_identity).model_copy(update={
+        "canonical_pixel_verified": False,
+        "pixel_identity_origin": "raw",
+    })
+    canonical_annotation = annotation_for(unverified)
+    obj = Object(7, [
+        canonical_annotation,
+        Annotation("legacy", {"Filepath": str(path)}),
+    ])
+    marker_writes = []
+    ns["write_indexed_canonical_marker"] = (
+        lambda *args: marker_writes.append(args)
+    )
+
+    upgraded = ns["upgrade_reused_canonical"](
+        "connection", obj, unverified, path,
+    )
+
+    assert upgraded.source_generation == 1
+    assert upgraded.relative_path == ".processed/Image-7.ome.zarr"
+    assert upgraded.canonical_pixel_verified is True
+    assert marker_writes == [(path, upgraded)]
+    assert canonical_annotation.save_count == 1
+    assert canonical_annotation.values == upgraded.to_annotation_values()
+
+
 def test_managed_zarr_location_uses_most_specific_root(tmp_path):
     ns = _load_canonical_functions()
     import_root = tmp_path / "import"
@@ -883,7 +917,7 @@ def test_promotes_verified_image_and_restores_task_copy(
     export = tmp_path / "task" / "image.zarr"
     export.mkdir(parents=True)
     (export / ".zgroup").write_text("{}", encoding="utf-8")
-    canonical_path = root / ".processed/Image-7.g1.ome.zarr"
+    canonical_path = root / ".processed/Image-7.ome.zarr"
     canonical = source(pixel_identity)
     identities = []
     writes = []

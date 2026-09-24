@@ -176,6 +176,7 @@ def test_migration_requires_local_shallower_capabilities():
     )
     namespace = {
         "REQUIRED_MIGRATION_CAPABILITIES": (
+            "canonical-single-store",
             "schema-1-to-2",
             "schema-1-path-only-labels",
         ),
@@ -191,7 +192,8 @@ def test_migration_requires_local_shallower_capabilities():
         namespace["_require_migration_capabilities"]()
 
     capabilities.require_migrations.assert_called_once_with(
-        "schema-1-to-2", "schema-1-path-only-labels"
+        "canonical-single-store", "schema-1-to-2",
+        "schema-1-path-only-labels"
     )
 
 
@@ -204,6 +206,7 @@ def test_migration_rejects_package_without_capability_api():
     )
     namespace = {
         "REQUIRED_MIGRATION_CAPABILITIES": (
+            "canonical-single-store",
             "schema-1-to-2",
             "schema-1-path-only-labels",
         ),
