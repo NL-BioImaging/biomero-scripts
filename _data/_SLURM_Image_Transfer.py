@@ -424,6 +424,38 @@ def get_canonical_source(obj, object_type):
     return source
 
 
+def bind_canonical_plate_source(source, index):
+    """Bind one physical Plate inventory to an OMERO Plate registration."""
+    images = []
+    for image in source.images:
+        image_source = image.source.model_copy(update={
+            "storage_root": index.storage_root,
+            "relative_path": index.relative_path,
+            "source_object_id": index.source_object_id,
+            "source_generation": index.source_generation,
+        })
+        labels = tuple(
+            label.model_copy(update={
+                "source": label.source.model_copy(update={
+                    "storage_root": index.storage_root,
+                    "relative_path": index.relative_path,
+                }) if label.source is not None else None,
+            })
+            for label in image.labels
+        )
+        images.append(image.model_copy(update={
+            "source": image_source,
+            "labels": labels,
+        }))
+    return source.model_copy(update={
+        "storage_root": index.storage_root,
+        "relative_path": index.relative_path,
+        "source_object_id": index.source_object_id,
+        "source_generation": index.source_generation,
+        "images": tuple(images),
+    })
+
+
 def get_canonical_plate_source(plate):
     """Resolve compact storage-backed or legacy canonical Plate metadata."""
     plate_id = int(plate.getId())
@@ -480,16 +512,18 @@ def get_canonical_plate_source(plate):
                 managed_source = load_canonical_marker(managed_path)
                 if (
                     isinstance(managed_source, CanonicalPlateSource)
-                    and managed_source.source_object_id == plate_id
-                    and managed_source.source_generation
-                        == index.source_generation
                     and managed_source.storage_root == index.storage_root
                     and managed_source.relative_path == index.relative_path
                     and len(managed_source.images) == index.image_count
                     and sum(len(image.labels) for image in managed_source.images)
                         == index.label_count
                 ):
-                    candidates.append(managed_source)
+                    # Multiple OMERO Plates may intentionally reuse the same
+                    # managed source Zarr. The marker inventories its pixels;
+                    # this Plate's compact index supplies the OMERO binding.
+                    candidates.append(bind_canonical_plate_source(
+                        managed_source, index,
+                    ))
                     continue
         except Exception as exc:
             logger.warning(

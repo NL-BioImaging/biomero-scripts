@@ -264,6 +264,38 @@ def _canonical_marker_status(marker, source, annotation_id):
     return "matching" if marker == source else "locator-drift"
 
 
+def _bind_canonical_plate_source(source, index):
+    """Bind a shared physical Plate inventory to one OMERO Plate."""
+    images = []
+    for image in source.images:
+        image_source = image.source.model_copy(update={
+            "storage_root": index.storage_root,
+            "relative_path": index.relative_path,
+            "source_object_id": index.source_object_id,
+            "source_generation": index.source_generation,
+        })
+        labels = tuple(
+            label.model_copy(update={
+                "source": label.source.model_copy(update={
+                    "storage_root": index.storage_root,
+                    "relative_path": index.relative_path,
+                }) if label.source is not None else None,
+            })
+            for label in image.labels
+        )
+        images.append(image.model_copy(update={
+            "source": image_source,
+            "labels": labels,
+        }))
+    return source.model_copy(update={
+        "storage_root": index.storage_root,
+        "relative_path": index.relative_path,
+        "source_object_id": index.source_object_id,
+        "source_generation": index.source_generation,
+        "images": tuple(images),
+    })
+
+
 def discover_canonical_registrations(
     conn, storage_roots, *, object_type="All", object_ids=None,
 ):
@@ -289,6 +321,7 @@ def discover_canonical_registrations(
                 annotation = link.getAnnotation()
                 pairs = [list(pair) for pair in annotation.getValue()]
                 values = _pairs_to_values(pairs)
+                shared_plate_marker = False
                 if kind == "Image":
                     source = CanonicalZarrSource.from_annotation_values(values)
                 elif "images" in values:
@@ -297,11 +330,15 @@ def discover_canonical_registrations(
                     index = CanonicalPlateIndex.from_annotation_values(values)
                     path = _resolve_store_path(index.to_annotation_values(),
                                                storage_roots)
-                    source = load_canonical_marker(path)
-                    if not isinstance(source, CanonicalPlateSource):
+                    marker_source = load_canonical_marker(path)
+                    if not isinstance(marker_source, CanonicalPlateSource):
                         raise ValueError(
                             f"Plate {ident} canonical marker is missing or invalid"
                         )
+                    source = _bind_canonical_plate_source(
+                        marker_source, index,
+                    )
+                    shared_plate_marker = True
                 if source.source_object_id != ident:
                     raise ValueError(
                         f"Canonical annotation {annotation.getId()} is linked "
@@ -318,9 +355,20 @@ def discover_canonical_registrations(
                 # Early prerelease registrations did not consistently write
                 # a sidecar for reused managed Zarrs. Apply mode repairs that
                 # omission, but a different pixel identity remains fatal.
-                marker_status = _canonical_marker_status(
-                    marker, source, annotation.getId(),
-                )
+                if shared_plate_marker and marker is not None:
+                    marker_status = (
+                        "matching"
+                        if marker.storage_root == source.storage_root
+                        and marker.relative_path == source.relative_path
+                        and len(marker.images) == len(source.images)
+                        and sum(len(image.labels) for image in marker.images)
+                        == sum(len(image.labels) for image in source.images)
+                        else "locator-drift"
+                    )
+                else:
+                    marker_status = _canonical_marker_status(
+                        marker, source, annotation.getId(),
+                    )
                 records.append({
                     "object_type": kind,
                     "object_id": ident,
