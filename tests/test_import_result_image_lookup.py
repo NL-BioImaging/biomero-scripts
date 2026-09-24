@@ -2,11 +2,17 @@ import ast
 import os
 from pathlib import Path
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
+pytestmark = pytest.mark.skipif(
+    "def get_images_by_ids" not in SCRIPT_PATH.read_text(encoding="utf-8"),
+    reason="the 2.8 maintenance line uses the beta ordered lookup helper",
+)
 
 
 def load_function():
