@@ -218,7 +218,7 @@ def _load_planning_manifest(store_path):
     raw = json.loads(path.read_text(encoding="utf-8"))
     schema = raw.get("schema")
     if schema == 1:
-        return schema, upgrade_manifest_v1(raw)
+        return schema, upgrade_manifest_v1(raw, store_path=store_path)
     if schema == 2:
         return schema, ShallowManifest.from_dict(raw)
     raise ValueError(f"Unsupported shallow manifest schema at {path}: {schema}")
