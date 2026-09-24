@@ -271,7 +271,15 @@ if not IMPORTER_ENABLED:
         "IMPORTER_ENABLED is false - dataset imports will not be supported")
 
 # Version constant for easy version management
-VERSION = "2.8.2"
+VERSION = "2.8.3"
+
+
+def get_images_by_ids(conn, image_ids):
+    """Load source images without querying OMERO for an empty ID list."""
+    requested_ids = [int(image_id) for image_id in image_ids]
+    if not requested_ids:
+        return []
+    return [img for img in conn.getObjects("Image", ids=requested_ids) if img]
 
 
 def load_group_mappings(config_file_path=None, group_mappings_file_path=None):
@@ -4393,11 +4401,7 @@ def runScript() -> None:
             # and attachment matching (scenarios 1-3 + 4 with rename).
             _roi_target_ids = unwrap(client.getInput(
                 constants.results.ROI_TARGET_IMAGE_IDS)) or []
-            input_images = [
-                img for img in conn.getObjects(
-                    "Image", ids=[int(i) for i in _roi_target_ids])
-                if img
-            ]
+            input_images = get_images_by_ids(conn, _roi_target_ids)
             _lookup_task_id = task_id
             if not _lookup_task_id and slurmClient.track_workflows and slurm_job_id:
                 try:
