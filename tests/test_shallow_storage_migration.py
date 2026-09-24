@@ -312,7 +312,7 @@ def test_default_directory_path_is_reportable_before_creation():
     directory = helpers["_migration_directory_path"](None)
 
     assert directory == Path(
-        "/data/biomero-shallow-migrations/schema-1-to-2-test-uuid"
+        "/data/biomero-shallow-migrations/shallow-storage-test-uuid"
     )
 
 
