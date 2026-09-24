@@ -16,6 +16,9 @@ scripts follow. Deployment and administration are documented in NL-BIOMERO.
   installation, workflow execution, result options and logging.
 - [NL-BIOMERO deployment](https://nl-bioimaging.github.io/NL-BIOMERO/):
   containers, worker configuration and shared storage.
+- [Provenance alignment plan](docs/provenance-alignment-plan.md): a shared,
+  versioned translation for result scripts, BIOMERO.importer and metadata
+  maintenance while retaining BIOMERO 2 CSV compatibility.
 - [Detached workflows](https://nl-bioimaging.github.io/NL-BIOMERO/master/sysadmin/detached-workflows.html)
   and [remote shallowing](https://nl-bioimaging.github.io/NL-BIOMERO/master/sysadmin/remote-shallower.html).
 - [Metadata administration](https://nl-bioimaging.github.io/NL-BIOMERO/master/sysadmin/metadata-refresh.html):
