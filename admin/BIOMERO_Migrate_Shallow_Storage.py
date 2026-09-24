@@ -34,6 +34,22 @@ OBJECT_TYPE = "Object Type"
 OBJECT_IDS = "Object IDs (optional)"
 DRY_RUN = "Dry Run"
 BACKUP_DIRECTORY = "Backup Directory (optional)"
+REQUIRED_MIGRATION_CAPABILITIES = (
+    "schema-1-to-2",
+    "schema-1-path-only-labels",
+)
+
+
+def _require_migration_capabilities():
+    """Reject an incompatible local Shallower before reading stored data."""
+    try:
+        from biomero_shallower.capabilities import require_migrations
+    except ImportError as error:
+        raise RuntimeError(
+            "The installed biomero-shallower package cannot perform this "
+            "migration. Update biomeroworker before retrying."
+        ) from error
+    require_migrations(*REQUIRED_MIGRATION_CAPABILITIES)
 
 
 def _pairs_to_values(pairs):
@@ -264,6 +280,7 @@ def migrate_schema_1_references(
     """Upgrade storage metadata and OMERO projections as one admin action."""
     if not conn.isAdmin():
         raise ValueError("Shallow-storage migration requires an administrator")
+    _require_migration_capabilities()
     roots = load_managed_storage_roots()
     records = discover_schema_1_references(
         conn, object_type=object_type, object_ids=object_ids,

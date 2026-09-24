@@ -553,7 +553,10 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
             and slurmClient.remote_shallow_zarr):
         return
 
-    from biomero.remote_shallower import image_spec
+    from biomero.remote_shallower import (
+        image_spec,
+        validate_installed_tool,
+    )
 
     spec = image_spec(slurmClient)
     ready, pending = slurmClient._partition_existing_images([spec])
@@ -563,6 +566,7 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
             "Ask an administrator to run SLURM Init Environment and verify "
             "the image with SLURM Check Setup before starting this workflow."
         )
+    validate_installed_tool(slurmClient, spec["destination"])
 
 
 def runScript():
