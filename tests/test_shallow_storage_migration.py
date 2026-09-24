@@ -194,3 +194,32 @@ def test_migration_rejects_package_without_capability_api():
     }):
         with pytest.raises(RuntimeError, match="Update biomeroworker"):
             namespace["_require_migration_capabilities"]()
+
+
+def test_incompatible_migration_package_stops_before_discovery():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "migrate_schema_1_references"
+    )
+    capability_check = Mock(
+        side_effect=RuntimeError("missing migration capability")
+    )
+    load_roots = Mock()
+    discover = Mock()
+    namespace = {
+        "_require_migration_capabilities": capability_check,
+        "load_managed_storage_roots": load_roots,
+        "discover_schema_1_references": discover,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]),
+                 str(SCRIPT_PATH), "exec"), namespace)
+    connection = SimpleNamespace(isAdmin=lambda: True)
+
+    with pytest.raises(RuntimeError, match="missing migration capability"):
+        namespace["migrate_schema_1_references"](connection)
+
+    capability_check.assert_called_once_with()
+    load_roots.assert_not_called()
+    discover.assert_not_called()

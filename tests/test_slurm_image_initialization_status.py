@@ -198,3 +198,7 @@ def test_workflow_preflight_rejects_incompatible_remote_shallower():
     with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
         with pytest.raises(RuntimeError, match="unsupported manifest schema"):
             validator(client, use_zarr_format=True)
+
+    remote_shallower.validate_installed_tool.assert_called_once_with(
+        client, destination
+    )
