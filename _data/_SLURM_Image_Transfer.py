@@ -210,6 +210,45 @@ def _annotation_values(annotation):
     return values
 
 
+def _canonical_registration_annotations(obj, namespace):
+    return [
+        annotation for annotation in obj.listAnnotations()
+        if _annotation_namespace(annotation) == namespace
+    ]
+
+
+def _canonical_content_signature(source):
+    """Compare canonical content while ignoring mutable trust metadata."""
+    ignored = {
+        "sourceGeneration",
+        "pixelIdentityOrigin",
+        "canonicalPixelVerified",
+    }
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {
+                key: normalize(item)
+                for key, item in value.items()
+                if key not in ignored
+            }
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        return value
+
+    return normalize(source.to_dict())
+
+
+def _update_canonical_annotation(annotation, values):
+    """Update one private BIOMERO MapAnnotation in place."""
+    setter = getattr(annotation, "setValue", None)
+    saver = getattr(annotation, "save", None)
+    if not callable(setter) or not callable(saver):
+        raise ValueError("Canonical MapAnnotation cannot be updated in place")
+    setter([[key, value] for key, value in values.items()])
+    return saver()
+
+
 def get_shallow_reference(obj):
     """Resolve one deterministic managed shallow reference from an OMERO Image."""
     candidates = []
@@ -365,23 +404,12 @@ def get_canonical_source(obj, object_type):
             object_id,
         )
         return None
-    current_generation = max(
-        candidate.source_generation for candidate in candidates
-    )
-    current = [
-        candidate for candidate in candidates
-        if candidate.source_generation == current_generation
-    ]
-    distinct = {
-        json.dumps(candidate.to_dict(), sort_keys=True)
-        for candidate in current
-    }
-    if len(distinct) != 1:
+    if len(candidates) != 1:
         raise ValueError(
-            f"Canonical source metadata is ambiguous for {object_type} "
-            f"{object_id} generation {current_generation}"
+            f"{object_type} {object_id} has multiple canonical registrations; "
+            "run BIOMERO Migrate Shallow Storage"
         )
-    source = current[0]
+    source = candidates[0]
     logger.info(
         "Located canonical Zarr for %s %s: generation=%s, "
         "storage=%s:%s, node=%s, pixel ISCC=%s",
@@ -564,19 +592,12 @@ def get_canonical_plate_source(plate):
     if not candidates:
         logger.info("No BIOMERO canonical Zarr record found for Plate %s", plate_id)
         return None
-    generation = max(item.source_generation for item in candidates)
-    current = [
-        item for item in candidates if item.source_generation == generation
-    ]
-    distinct = {
-        json.dumps(item.to_dict(), sort_keys=True) for item in current
-    }
-    if len(distinct) != 1:
+    if len(candidates) != 1:
         raise ValueError(
-            f"Canonical Plate metadata is ambiguous for Plate {plate_id} "
-            f"generation {generation}"
+            f"Plate {plate_id} has multiple canonical registrations; run "
+            "BIOMERO Migrate Shallow Storage"
         )
-    source = current[0]
+    source = candidates[0]
     logger.info(
         "Located canonical Zarr for Plate %s: generation=%s, storage=%s:%s, "
         "images=%s (cached ISCC-BIO identities; not recalculated)",
@@ -1100,19 +1121,34 @@ def attach_canonical_source(
     object_type,
     source,
     annotation_writer=None,
+    annotation_updater=None,
 ):
-    """Attach one canonical record without creating same-generation ambiguity."""
+    """Create or update the object's single canonical registration."""
     existing = get_canonical_source(obj, object_type)
     if existing == source:
         return None
-    if (
-        existing is not None
-        and existing.source_generation >= source.source_generation
-    ):
+    registrations = _canonical_registration_annotations(
+        obj, CANONICAL_SOURCE_NAMESPACE,
+    )
+    if existing is not None:
+        if len(registrations) != 1:
+            raise ValueError(
+                f"{object_type} {obj.getId()} has multiple canonical "
+                "registrations; run BIOMERO Migrate Shallow Storage"
+            )
+        if _canonical_content_signature(existing) != (
+            _canonical_content_signature(source)
+        ):
+            raise ValueError(
+                f"Cannot replace canonical pixels for {object_type} "
+                f"{obj.getId()}"
+            )
+        updater = annotation_updater or _update_canonical_annotation
+        return updater(registrations[0], source.to_annotation_values())
+    if registrations:
         raise ValueError(
-            f"Cannot replace canonical {object_type} {obj.getId()} generation "
-            f"{existing.source_generation} with generation "
-            f"{source.source_generation}"
+            f"{object_type} {obj.getId()} has an invalid canonical "
+            "registration; run BIOMERO Migrate Shallow Storage"
         )
     if annotation_writer is None:
         from ezomero import post_map_annotation
@@ -1133,25 +1169,39 @@ def attach_canonical_plate_source(
     plate,
     source,
     annotation_writer=None,
+    annotation_updater=None,
 ):
-    """Attach one compact Plate index; detailed identities live in storage."""
+    """Create or update one compact Plate canonical registration."""
     existing = get_canonical_plate_source(plate)
     if existing == source:
         return None
-    if (
-        existing is not None
-        and existing.source_generation >= source.source_generation
-    ):
+    registrations = _canonical_registration_annotations(
+        plate, CANONICAL_PLATE_SOURCE_NAMESPACE,
+    )
+    index = CanonicalPlateIndex.from_source(source)
+    if existing is not None:
+        if len(registrations) != 1:
+            raise ValueError(
+                f"Plate {plate.getId()} has multiple canonical registrations; "
+                "run BIOMERO Migrate Shallow Storage"
+            )
+        if _canonical_content_signature(existing) != (
+            _canonical_content_signature(source)
+        ):
+            raise ValueError(
+                f"Cannot replace canonical pixels for Plate {plate.getId()}"
+            )
+        updater = annotation_updater or _update_canonical_annotation
+        return updater(registrations[0], index.to_annotation_values())
+    if registrations:
         raise ValueError(
-            f"Cannot replace canonical Plate {plate.getId()} generation "
-            f"{existing.source_generation} with generation "
-            f"{source.source_generation}"
+            f"Plate {plate.getId()} has an invalid canonical registration; "
+            "run BIOMERO Migrate Shallow Storage"
         )
     if annotation_writer is None:
         from ezomero import post_map_annotation
 
         annotation_writer = post_map_annotation
-    index = CanonicalPlateIndex.from_source(source)
     return annotation_writer(
         conn=conn,
         object_type="Plate",
@@ -1421,7 +1471,7 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
 
     A cached export is not authoritative merely because it is on managed disk.
     Require the existing import provenance to identify the same backing store.
-    Publish a new metadata generation without copying or rehashing pixel data.
+    Update trust metadata in place without copying or rehashing pixel data.
     """
     is_plate = isinstance(source, CanonicalPlateSource)
     verified = (all(i.source.canonical_pixel_verified for i in source.images)
@@ -1434,14 +1484,6 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
     upgraded = (verified_plate_source(source) if is_plate else
                 source.model_copy(update={"canonical_pixel_verified": True,
                                           "pixel_identity_origin": "canonical-bootstrap"}))
-    generation = source.source_generation + 1
-    upgraded = upgraded.model_copy(update={"source_generation": generation})
-    if is_plate:
-        upgraded = upgraded.model_copy(update={"images": tuple(
-            image.model_copy(update={"source": image.source.model_copy(
-                update={"source_generation": generation})})
-            for image in upgraded.images
-        )})
     write_indexed_canonical_marker(source_path, upgraded)
     if is_plate:
         attach_canonical_plate_source(conn, obj, upgraded)
