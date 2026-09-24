@@ -33,6 +33,7 @@ from biomero_importer.utils.canonical_store import (
     CANONICAL_MARKER_NAME,
     external_canonical_marker_path,
     load_canonical_marker,
+    write_indexed_canonical_marker,
 )
 from biomero_shallower.migration import (
     migrate_shallow_store_v1,
@@ -249,6 +250,20 @@ def _annotation_links(conn, object_type, namespace):
         offset += len(page)
 
 
+def _canonical_marker_status(marker, source, annotation_id):
+    """Classify repairable marker drift without accepting new pixels."""
+    if marker is None:
+        return "missing"
+    if _canonical_content_signature(marker) != _canonical_content_signature(
+        source
+    ):
+        raise ValueError(
+            "Canonical marker pixel identity disagrees with annotation "
+            f"{annotation_id}"
+        )
+    return "matching" if marker == source else "locator-drift"
+
+
 def discover_canonical_registrations(
     conn, storage_roots, *, object_type="All", object_ids=None,
 ):
@@ -294,12 +309,18 @@ def discover_canonical_registrations(
                     )
                 path = _resolve_store_path(source.to_annotation_values(),
                                            storage_roots)
-                marker = load_canonical_marker(path)
-                if marker is None or marker != source:
+                if not path.is_dir():
                     raise ValueError(
-                        f"Canonical marker disagrees with annotation "
-                        f"{annotation.getId()}"
+                        f"Canonical store does not exist for annotation "
+                        f"{annotation.getId()}: {path}"
                     )
+                marker = load_canonical_marker(path)
+                # Early prerelease registrations did not consistently write
+                # a sidecar for reused managed Zarrs. Apply mode repairs that
+                # omission, but a different pixel identity remains fatal.
+                marker_status = _canonical_marker_status(
+                    marker, source, annotation.getId(),
+                )
                 records.append({
                     "object_type": kind,
                     "object_id": ident,
@@ -309,6 +330,7 @@ def discover_canonical_registrations(
                     "values": values,
                     "source": source,
                     "path": path,
+                    "marker_status": marker_status,
                 })
     finally:
         conn.SERVICE_OPTS.setOmeroGroup(original_group)
@@ -430,7 +452,14 @@ def _canonical_marker_path(path):
 
 
 def _write_canonical_marker(path, source):
-    marker_path = _canonical_marker_path(path)
+    try:
+        marker_path = _canonical_marker_path(path)
+    except ValueError:
+        internal = path / CANONICAL_MARKER_NAME
+        external = external_canonical_marker_path(path)
+        if internal.exists() or external.exists():
+            raise
+        return write_indexed_canonical_marker(path, source)
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     if marker.get("state") != "committed" or "markerSchema" not in marker:
         raise ValueError(f"Canonical marker is not committed: {marker_path}")
@@ -524,6 +553,8 @@ def plan_canonical_consolidation(
             len(group_records) != 1
             or selected_path != plan["destination"]
             or plan["selected"]["source"] != plan["source"]
+            or any(record["marker_status"] != "matching"
+                   for record in group_records)
             or bool(legacy_metadata)
         )
         if not changed:
@@ -590,13 +621,21 @@ def _apply_canonical_consolidation(
             "destination": str(destination),
             "annotations": [record["annotation_id"]
                             for record in plan["records"]],
+            "markerStatus": {
+                str(record["annotation_id"]): record["marker_status"]
+                for record in plan["records"]
+            },
             "reclaim": plan["reclaim"],
         }
         _write_json(directory / f"canonical-{index:06d}.json", snapshot)
         _move_canonical_store(selected_path, destination)
-        marker_path = _canonical_marker_path(destination)
         marker_backup = directory / f"canonical-{index:06d}-marker.json"
-        shutil.copy2(marker_path, marker_backup)
+        try:
+            marker_path = _canonical_marker_path(destination)
+        except ValueError:
+            marker_path = None
+        if marker_path is not None:
+            shutil.copy2(marker_path, marker_backup)
         _write_canonical_marker(destination, plan["source"])
         results.append(snapshot)
 
