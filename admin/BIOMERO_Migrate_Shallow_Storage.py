@@ -256,15 +256,68 @@ def _write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _migration_directory(value):
+def _migration_directory_path(value):
     if value:
         directory = Path(value)
         if not directory.is_absolute():
             raise ValueError("Backup Directory must be an absolute worker path")
     else:
         root = Path("/data/biomero-shallow-migrations")
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory = root / f"schema-1-to-2-{uuid4()}"
+    return directory
+
+
+def _preflight_migration_directory(directory):
+    """Verify that the exact worker path can be created, then clean it up."""
+    if directory.exists():
+        raise FileExistsError(
+            f"Backup Directory already exists inside biomeroworker: {directory}"
+        )
+
+    missing = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            raise FileNotFoundError(
+                f"Cannot resolve Backup Directory inside biomeroworker: "
+                f"{directory}"
+            )
+        current = parent
+    if not current.is_dir():
+        raise NotADirectoryError(
+            f"Backup Directory parent is not a directory inside "
+            f"biomeroworker: {current}"
+        )
+
+    created = []
+    try:
+        for path in reversed(missing):
+            path.mkdir(mode=0o700)
+            created.append(path)
+    except OSError as error:
+        raise PermissionError(
+            error.errno,
+            "Cannot create Backup Directory inside biomeroworker: "
+            f"{directory}: {error}",
+            str(directory),
+        ) from error
+    finally:
+        for path in reversed(created):
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(
+                    "Could not remove migration preflight directory %s", path,
+                )
+                break
+    return directory
+
+
+def _create_migration_directory(directory):
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     return directory
 
@@ -281,6 +334,8 @@ def migrate_schema_1_references(
     if not conn.isAdmin():
         raise ValueError("Shallow-storage migration requires an administrator")
     _require_migration_capabilities()
+    planned_directory = _migration_directory_path(backup_directory)
+    _preflight_migration_directory(planned_directory)
     roots = load_managed_storage_roots()
     records = discover_schema_1_references(
         conn, object_type=object_type, object_ids=object_ids,
@@ -293,11 +348,13 @@ def migrate_schema_1_references(
         )
         grouped.setdefault(key, []).append(record)
 
-    directory = None if dry_run else _migration_directory(backup_directory)
+    directory = (
+        None if dry_run else _create_migration_directory(planned_directory)
+    )
     report = {
         "migration": "biomero-shallow-schema-1-to-2",
         "dryRun": dry_run,
-        "backupDirectory": str(directory) if directory else None,
+        "backupDirectory": str(planned_directory),
         "stores": [],
         "counts": {
             "stores": len(grouped),
@@ -381,7 +438,8 @@ def _summary(report):
             "Shallow-storage migration dry run: "
             f"{counts['stores']} stores and {counts['annotations']} OMERO "
             "references would be upgraded from schema 1 to schema 2. "
-            "No data was changed."
+            "No data was changed. Backup location validated inside "
+            f"biomeroworker: {report['backupDirectory']}"
         )
     return (
         "Shallow-storage migration complete: "
@@ -415,7 +473,10 @@ def runScript():
         scripts.Bool(
             DRY_RUN,
             default=True,
-            description="Preview the complete migration without writing.",
+            description=(
+                "Preview the complete migration and verify the exact Backup "
+                "Directory inside biomeroworker without retaining files."
+            ),
         ),
         scripts.String(
             BACKUP_DIRECTORY,
