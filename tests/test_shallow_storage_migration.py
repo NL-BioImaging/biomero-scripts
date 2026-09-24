@@ -48,6 +48,28 @@ def _load_helpers():
     return namespace
 
 
+def _load_directory_helpers():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    wanted = {
+        "_migration_directory_path",
+        "_preflight_migration_directory",
+        "_create_migration_directory",
+    }
+    nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path,
+        "uuid4": lambda: "test-uuid",
+        "logger": Mock(),
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
+                 "exec"), namespace)
+    assert wanted.issubset(namespace)
+    return namespace
+
+
 def test_schema_1_planning_supplies_store_for_label_reconstruction(tmp_path):
     helpers = _load_helpers()
     store = tmp_path / "result.zarr"
@@ -223,3 +245,69 @@ def test_incompatible_migration_package_stops_before_discovery():
     capability_check.assert_called_once_with()
     load_roots.assert_not_called()
     discover.assert_not_called()
+
+
+def test_dry_run_preflights_backup_location_before_discovery():
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "migrate_schema_1_references"
+    )
+    planned = Path("/data/biomero-shallow-migrations/schema-1-to-2-test")
+    resolve_directory = Mock(return_value=planned)
+    preflight = Mock(side_effect=PermissionError("backup location is not writable"))
+    load_roots = Mock()
+    discover = Mock()
+    namespace = {
+        "_require_migration_capabilities": Mock(),
+        "_migration_directory_path": resolve_directory,
+        "_preflight_migration_directory": preflight,
+        "load_managed_storage_roots": load_roots,
+        "discover_schema_1_references": discover,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]),
+                 str(SCRIPT_PATH), "exec"), namespace)
+    connection = SimpleNamespace(isAdmin=lambda: True)
+
+    with pytest.raises(PermissionError, match="not writable"):
+        namespace["migrate_schema_1_references"](
+            connection, dry_run=True,
+        )
+
+    resolve_directory.assert_called_once_with(None)
+    preflight.assert_called_once_with(planned)
+    load_roots.assert_not_called()
+    discover.assert_not_called()
+
+
+def test_directory_preflight_checks_exact_nested_path_and_cleans_up(tmp_path):
+    helpers = _load_directory_helpers()
+    mount = tmp_path / "mounted-storage"
+    mount.mkdir()
+    directory = mount / "backups" / "migration-run"
+
+    result = helpers["_preflight_migration_directory"](directory)
+
+    assert result == directory
+    assert mount.exists()
+    assert list(mount.iterdir()) == []
+
+
+def test_directory_preflight_rejects_existing_exact_path(tmp_path):
+    helpers = _load_directory_helpers()
+    directory = tmp_path / "existing-backup"
+    directory.mkdir()
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        helpers["_preflight_migration_directory"](directory)
+
+
+def test_default_directory_path_is_reportable_before_creation():
+    helpers = _load_directory_helpers()
+
+    directory = helpers["_migration_directory_path"](None)
+
+    assert directory == Path(
+        "/data/biomero-shallow-migrations/schema-1-to-2-test-uuid"
+    )
