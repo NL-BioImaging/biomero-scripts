@@ -202,3 +202,30 @@ def test_workflow_preflight_rejects_incompatible_remote_shallower():
     remote_shallower.validate_installed_tool.assert_called_once_with(
         client, destination
     )
+
+
+@pytest.mark.parametrize(
+    "importer_enabled,shallow_enabled,use_zarr,remote_enabled",
+    [
+        (False, True, True, True),
+        (True, False, True, True),
+        (True, True, False, True),
+        (True, True, True, False),
+    ],
+)
+def test_workflow_preflight_is_inert_unless_remote_shallow_path_is_enabled(
+    importer_enabled, shallow_enabled, use_zarr, remote_enabled,
+):
+    validator = load_function(RUN_SCRIPT, "validate_remote_shallower_ready")
+    client = SimpleNamespace(
+        remote_shallow_zarr=remote_enabled,
+        _partition_existing_images=Mock(),
+    )
+    validator.__globals__.update(
+        IMPORTER_ENABLED=importer_enabled,
+        SHALLOW_ZARR_ENABLED=shallow_enabled,
+    )
+
+    validator(client, use_zarr_format=use_zarr)
+
+    client._partition_existing_images.assert_not_called()
