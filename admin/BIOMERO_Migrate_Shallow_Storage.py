@@ -4,6 +4,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -901,7 +902,15 @@ def _json_record(item):
 
 
 def _write_json(path, value):
-    path.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as output:
+            output.write(json.dumps(value, indent=2, sort_keys=True))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _migration_directory_path(value):
