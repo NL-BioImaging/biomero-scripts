@@ -57,7 +57,7 @@ def test_cached_plate_upgrade_requires_matching_backing_path(
     result = ns["upgrade_reused_canonical"](None, object(), source, path)
     assert all(i.source.canonical_pixel_verified for i in result.images) == same_backing
     assert bool(writes) == same_backing
-    assert result.source_generation == source.source_generation + int(same_backing)
+    assert result.source_generation == source.source_generation
     assert all(i.source.source_generation == result.source_generation for i in result.images)
 
 
@@ -70,12 +70,13 @@ def test_cached_image_upgrade_persists_unambiguous_generation(tmp_path, pixel_id
     writes = []
     attach = ns["attach_canonical_source"]
     ns["attach_canonical_source"] = lambda conn, obj, kind, updated: attach(
-        conn, obj, kind, updated, annotation_writer=lambda **kw: writes.append(kw))
+        conn, obj, kind, updated,
+        annotation_updater=lambda _annotation, values: writes.append(values))
     result = ns["upgrade_reused_canonical"](None, image, source, tmp_path)
     assert result.canonical_pixel_verified == same_backing
     assert result.pixel_identity == source.pixel_identity
     assert bool(writes) == same_backing
-    assert result.source_generation == source.source_generation + int(same_backing)
+    assert result.source_generation == source.source_generation
 
 
 @pytest.mark.parametrize("match", [True, False])
