@@ -383,6 +383,26 @@ def test_default_is_read_only(connection, planner):
     ann.save.assert_not_called()
     ann.setValue.assert_not_called()
     conn.SERVICE_OPTS.setOmeroGroup.assert_called_with('4')
+    assert 'refresh_storage' not in planner.call_args.kwargs
+
+
+@pytest.mark.skipif(
+    'refresh_storage' not in refresh_workflow_metadata.__code__.co_varnames
+    and not os.environ.get('BIOMERO_TEST_SCHEMA2_STORAGE'),
+    reason='Explicit storage repair refresh is unavailable')
+@pytest.mark.parametrize('dry_run', [True, False])
+def test_storage_repair_refresh_is_explicit_and_uses_existing_backup_adapter(
+        connection, planner, tmp_path, dry_run):
+    conn, ann = connection
+    backup = tmp_path / 'before-storage-repair.json'
+    report = refresh_workflow_metadata(
+        conn, object(), 'Plate', 10, 'wf', refresh_storage=True,
+        dry_run=dry_run, backup_path=backup)
+    assert planner.call_args.kwargs['refresh_storage'] is True
+    assert planner.call_args.kwargs['target_key'] == 'Plate:10'
+    assert report['refresh_storage'] is True
+    assert ann.save.call_count == (0 if dry_run else 1)
+    assert backup.exists() is (not dry_run)
 
 
 def test_apply_preserves_annotation_id_and_backs_up(connection, planner, tmp_path):
