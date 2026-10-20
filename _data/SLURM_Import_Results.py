@@ -1023,7 +1023,10 @@ def saveImagesToOmeroAsAttachments(
     input_images: Optional[List[Any]] = None,
     og_name_map: Optional[Dict[str, str]] = None
 ) -> str:
-    """Save image from a (unzipped) folder to OMERO as attachments.
+    """Attach regular image files without moving registered result data.
+
+    Directory-backed stores are handled by result registration or a bulk ZIP
+    attachment. Workflow-qualified attachment names are OMERO metadata only.
 
     Args:
         conn: Connection to OMERO.
@@ -1040,8 +1043,19 @@ def saveImagesToOmeroAsAttachments(
     Returns:
         Message to add to script output.
     """
-    # Handle both regular image files and ZARR directories
-    files = find_supported_image_paths(folder)
+    # A FileAnnotation accepts a file, while Zarr stores are registered in
+    # place. Filter before source matching so directories cannot consume a
+    # regular file's input match.
+    files = []
+    skipped_directories = 0
+    for path in find_supported_image_paths(folder):
+        if os.path.isfile(path):
+            files.append(path)
+        elif os.path.isdir(path):
+            skipped_directories += 1
+            logger.info(
+                "Skipping directory-backed result for file attachment: %s",
+                path)
     logger.info(f"Found the following files in {folder}: {files}")
     namespace = NSCREATED + "/SLURM/SLURM_GET_RESULTS"
     job_id = unwrap(client.getInput(
@@ -1071,25 +1085,9 @@ def saveImagesToOmeroAsAttachments(
 
         if images:
             try:
-                original_name = name  # Store original name
-                # Rename file with workflow ID before first extension
-                if wf_id:
-                    filename = os.path.basename(name)
-                    first_dot = filename.find('.')
-                    if first_dot != -1:
-                        # Insert wf_id before the first dot
-                        new_name = os.path.join(
-                            os.path.dirname(name),
-                            f"{filename[:first_dot]}.{wf_id}{filename[first_dot:]}"
-                        )
-                        try:
-                            os.rename(name, new_name)
-                            name = new_name  # Update name for the rest of the process
-                        except OSError as e:
-                            logger.warning(
-                                f"Could not rename file {name}: {e}")
-
-                # Create annotation with renamed file
+                # The source may already back an OMERO image, and an in-place
+                # annotation also retains this path. Keep it stable throughout
+                # creation, linking, and any failure.
                 ext = os.path.splitext(name)[1][1:]
                 source_img = images[0] if images else None
                 file_ann = create_file_annotation_inplace(
@@ -1097,13 +1095,15 @@ def saveImagesToOmeroAsAttachments(
                     namespace=namespace,
                     description=f"Result from job {job_id}" + (f" (Workflow {wf_id})" if wf_id else "") + f" | analysis {folder}" + (f" | source: {source_img.getName()} (id: {source_img.getId()})" if source_img else ""))
 
-                # Restore original filename after annotation is created
-                if name != original_name:
-                    try:
-                        os.rename(name, original_name)
-                    except OSError as e:
-                        logger.warning(
-                            f"Could not restore original filename {original_name}: {e}")
+                if wf_id:
+                    filename = os.path.basename(name)
+                    first_dot = filename.find('.')
+                    if first_dot != -1:
+                        original_file = file_ann.getFile()
+                        original_file.setName(
+                            f"{filename[:first_dot]}.{wf_id}"
+                            f"{filename[first_dot:]}")
+                        original_file.save()
 
                 logger.info(f"Attaching {name} to image {og_name}")
                 # image = load_image(conn, image_id)
@@ -1122,6 +1122,10 @@ def saveImagesToOmeroAsAttachments(
             logger.info(msg)
 
     message = f"\nTried attaching result images to OMERO original images!\n{msg}"
+    if skipped_directories:
+        message += (
+            f"\nSkipped {skipped_directories} directory-backed result(s) "
+            "for file attachment.")
 
     return message
 

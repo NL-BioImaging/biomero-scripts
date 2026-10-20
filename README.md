@@ -51,6 +51,12 @@ missing or false feature flags leave them disabled. Within enabled shallow
 storage, remote normalization is preferred; set `BIOMERO_REMOTE_SHALLOW_ZARR=false`
 to use importer-side normalization. NL-BIOMERO's demo enables these features.
 
+Result file attachments use the existing on-disk paths. Workflow-qualified
+attachment names are stored in OMERO metadata, so in-place image registrations
+and attachment links remain valid. Directory-backed Zarr stores are available
+through result registration or the bulk results ZIP; individual file
+attachments skip those directories and report the skipped count.
+
 ## Development
 
 Tests live on the separate
