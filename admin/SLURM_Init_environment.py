@@ -120,7 +120,7 @@ def _read_values(pairs):
 
 def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id,
                               *, view_version='v0', dry_run=True, backup_path=None,
-                              backup_enabled=True):
+                              backup_enabled=True, refresh_storage=False):
     """Refresh existing maps in place; unlink obsolete internal-task maps.
 
     Default is a dry run. Applying normally saves a new backup file; disabling
@@ -129,6 +129,8 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
     annotation, image data or event is modified. Shared annotations are refused.
     Writes are not one transaction: errors propagate and the backup remains.
     Quiesce metadata writers for the target during an administrative refresh.
+    Explicit refresh_storage asks core to advance only the import-task snapshot
+    when new storage evidence has been backfilled. Normal refresh stays pinned.
     """
     if object_type not in ('Image', 'Plate'):
         raise ValueError('Only Image and Plate result targets are supported')
@@ -153,9 +155,11 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
             rows.append(MetadataAnnotation(ns, values))
             records.append({'annotation_id': ann.getId(), 'namespace': ns,
                             'pairs': [list(p) for p in pairs]})
+        repair_options = {'refresh_storage': True} if refresh_storage else {}
         plan = plan_metadata_refresh(tracker, workflow_id, rows,
                                      view_version=view_version,
-                                     target_key=f'{object_type}:{object_id}')
+                                     target_key=f'{object_type}:{object_id}',
+                                     **repair_options)
         actions = []
         for record, change in zip(records, plan):
             pairs = metadata_pairs(change.after.values) if change.after else None
@@ -172,6 +176,8 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
                                     'before_pairs': a['pairs'],
                                     'after_pairs': a['new_pairs'] or []}
                                    for a in actions]}
+        if refresh_storage:
+            summary['refresh_storage'] = True
         if dry_run:
             return summary
         if all(action['action'] == 'unchanged' for action in actions):
