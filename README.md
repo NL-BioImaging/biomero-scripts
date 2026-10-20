@@ -57,6 +57,76 @@ and attachment links remain valid. Directory-backed Zarr stores are available
 through result registration or the bulk results ZIP; individual file
 attachments skip those directories and report the skipped count.
 
+## Storage provenance and repair
+
+Shallow-result provenance uses the shared schema-2 manifest parser from
+`biomero-schema>=0.3.0b1,<0.4` (also required by the matching BIOMERO core).
+Plate annotations collect the source identities from the manifest's image
+bindings; Image annotations select their own image node. Both v2 and v3
+interchange profiles are read without converting the store. Unsupported
+manifest versions, inconsistent bindings or ambiguous references produce a
+metadata warning rather than guessed provenance.
+
+The import records storage evidence before rendering workflow annotations.
+If this step or annotation persistence fails, the script's `Message` reports
+`WARNING` with the complete/reduced/incomplete counts and points to the activity
+log. The imported data remains available; a completed import does not imply
+that all its metadata was written.
+
+For an existing result whose storage evidence is missing, an administrator can
+use `backfill_import_storage_provenance()` from the installed import script.
+Run this in the worker's Python environment, with an authenticated administrator
+`conn` in the result's group and the normal workflow event-store configuration:
+
+```python
+import json
+import runpy
+from pathlib import Path
+from types import SimpleNamespace
+from biomero import WorkflowTracker
+
+scripts_root = Path("/opt/omero/server/OMERO.server/lib/scripts/biomero")
+adapter = runpy.run_path(str(scripts_root / "_data/SLURM_Import_Results.py"))
+backfill = adapter["backfill_import_storage_provenance"]
+maintenance = runpy.run_path(str(scripts_root / "admin/SLURM_Init_environment.py"))
+refresh = maintenance["refresh_workflow_metadata"]
+# Select the existing result and the workflow that imported it.
+result_type, result_id, workflow_id = "Plate", 123, "your-workflow-uuid"
+
+with WorkflowTracker() as tracker:
+    client = SimpleNamespace(workflowTracker=tracker)
+    preview = backfill(conn, client, result_type, result_id, workflow_id)
+    print(json.dumps(preview, indent=2))
+    # After reviewing the preview, append its evidence:
+    # backfill(conn, client, result_type, result_id, workflow_id, dry_run=False)
+
+    # After recording, preview the corresponding OMERO annotation changes:
+    # plan = refresh(conn, tracker, result_type, result_id, workflow_id,
+    #                refresh_storage=True)
+    # print(json.dumps(plan, indent=2))
+    # Apply with a new backup filename after reviewing that plan:
+    # refresh(conn, tracker, result_type, result_id, workflow_id,
+    #         refresh_storage=True, dry_run=False,
+    #         backup_path="/data/biomero-metadata-backups/result-before-repair.json")
+```
+
+The default is a read-only preview. Apply validates the matching workflow
+annotation, managed storage evidence and unique import task, then appends the
+observed evidence to the event store. Identical evidence is not recorded twice.
+Missing files, mismatched workflows, conflicting recorded evidence and ambiguous
+results must be resolved before applying. Source and result pixels are never read, rewritten or
+renormalized by this operation.
+
+The explicit `refresh_storage=True` option requires a coordinated core build
+whose `plan_metadata_refresh()` supports that option. It advances only the
+import-task snapshot needed to expose newly recorded storage evidence, including
+its paired job maps. Other task snapshots remain pinned. Normal metadata
+refresh, including the Slurm Init UI, preserves the old snapshots and therefore
+does not expose later evidence by itself. See
+[metadata administration](https://nl-bioimaging.github.io/NL-BIOMERO/master/sysadmin/metadata-refresh.html)
+for backup and refresh controls. Recording evidence and refreshing maps are two
+separate steps. If refresh fails, retry it; repeating the backfill is also safe.
+
 ## Development
 
 Tests live on the separate

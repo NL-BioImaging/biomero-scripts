@@ -3217,9 +3217,10 @@ def add_metadata_to_imported_images(
                 message = f"Added workflow metadata to {metadata_added}/{len(imported_images)} imported images"
             else:
                 message = (
-                    f"Workflow metadata for {len(imported_images)} imported images: "
+                    f"WARNING: Workflow metadata for {len(imported_images)} imported images: "
                     f"{metadata_added} complete, {metadata_reduced} reduced, "
-                    f"{len(imported_images) - metadata_added - metadata_reduced} incomplete")
+                    f"{len(imported_images) - metadata_added - metadata_reduced} incomplete. "
+                    "Imported data remains available. Details: activity log (i button).")
         else:
             message = f"Matched {len(imported_images)} imported screen images to workflow inputs"
         messages.append(message)
@@ -3228,7 +3229,9 @@ def add_metadata_to_imported_images(
         return "\n".join(messages)
 
     except Exception as e:
-        error_msg = f"Failed to add metadata to imported images: {str(e)}"
+        error_msg = (
+            f"WARNING: Could not complete metadata for imported images: {e}. "
+            "Details: activity log (i button).")
         logger.error(error_msg, exc_info=True)
         return error_msg
 
@@ -3351,11 +3354,17 @@ def add_metadata_to_imported_plates(
             f"Workflow metadata for {len(imported_plates)} imported plates: "
             f"{metadata_added} complete, {metadata_reduced} reduced, "
             f"{len(imported_plates) - metadata_added - metadata_reduced} incomplete")
+        if metadata_added != len(imported_plates):
+            message = (
+                f"WARNING: {message}. Imported data remains available. "
+                "Details: activity log (i button).")
         logger.info(message)
         return message
 
     except Exception as e:
-        error_msg = f"Failed to add metadata to imported plates: {str(e)}"
+        error_msg = (
+            f"WARNING: Could not complete metadata for imported plates: {e}. "
+            "Details: activity log (i button).")
         logger.error(error_msg, exc_info=True)
         return error_msg
 
@@ -3566,7 +3575,10 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
     import hashlib
 
     target = conn.getObject(object_type, object_id)
+    if target is None:
+        raise ValueError('Imported result target not found')
     refs, paths = [], set()
+    other_workflow_reference = False
     for ann in target.listAnnotations():
         ns = ann.getNs()
         if ns not in ('biomero.zarr.shallow',
@@ -3576,6 +3588,8 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
         if ns == 'biomero.zarr.shallow':
             if values.get('workflowId') == str(wf_id):
                 refs.append(values)
+            else:
+                other_workflow_reference = True
         else:
             path = values.get('Imported_from') or values.get('Filepath')
             if path:
@@ -3589,6 +3603,8 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
         root = (mount / reference['relativePath']).resolve()
         root.relative_to(mount)
     else:
+        if other_workflow_reference:
+            raise ValueError('Shallow reference belongs to another workflow')
         roots = set()
         for path in paths:
             candidate = Path(path).resolve()
@@ -3626,22 +3642,44 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
     elif shallow:
         evidence['location'] = 'unknown'
     if shallow:
+        from biomero_schema.zarr import ShallowManifest
+
         raw = manifest.read_bytes()
-        collection = json.loads(raw)
-        if collection.get('workflowId') != str(wf_id):
+        collection = ShallowManifest.from_dict(json.loads(raw))
+        if str(collection.workflow_id) != str(wf_id):
             raise ValueError('Shallow manifest belongs to another workflow')
-        images = collection['images']
+        images = collection.collection.images
         if reference and 'imageNodePath' in reference:
             images = [image for image in images
-                      if image['imageNodePath'] == reference['imageNodePath']]
+                      if image.node_path == reference['imageNodePath']]
+        elif object_type == 'Image':
+            # Older imports may only have biomero.import/Filepath. Select the
+            # exact image node it identifies; a Plate root cannot identify one
+            # of its fields. Never assign all Plate biocodes to one Image.
+            image_paths = {Path(path).resolve() for path in paths}
+            images = [image for image in images
+                      if (root / image.node_path).resolve() in image_paths]
+        if object_type == 'Image' and len(images) != 1:
+            raise ValueError('Cannot identify a unique image in shallow manifest')
         if not images:
             raise ValueError('Result missing from shallow manifest')
         evidence.update(
             manifest='import-mount-data/' + manifest.relative_to(mount).as_posix(),
             manifest_sha256=hashlib.sha256(raw).hexdigest(),
-            source_biocodes=sorted({image['source']['pixelIdentity']['iscc']
+            source_biocodes=sorted({collection.image_binding(image.node_id)
+                                   .source.pixel_identity.iscc_code
                                    for image in images}))
     return evidence
+
+
+def storage_provenance_import_task(tracker, wf_id):
+    """Resolve one import task from durable workflow history."""
+    workflow = tracker.repository.get(uuid.UUID(str(wf_id)))
+    tasks = [tracker.repository.get(tid) for tid in workflow.tasks]
+    imports = [task for task in tasks if task.task_name == 'SLURM_Import_Results.py']
+    if len(imports) != 1:
+        raise ValueError('Cannot identify a unique import task for storage provenance')
+    return imports[0]
 
 
 def record_import_storage_provenance(conn, slurm_client, object_type, object_id, wf_id):
@@ -3650,13 +3688,51 @@ def record_import_storage_provenance(conn, slurm_client, object_type, object_id,
     if evidence is None:
         return
     tracker = slurm_client.workflowTracker
-    workflow = tracker.repository.get(uuid.UUID(str(wf_id)))
-    tasks = [tracker.repository.get(tid) for tid in workflow.tasks]
-    imports = [task for task in tasks if task.task_name == 'SLURM_Import_Results.py']
-    if len(imports) != 1:
-        raise ValueError('Cannot identify a unique import task for storage provenance')
+    task = storage_provenance_import_task(tracker, wf_id)
     tracker.record_storage_provenance(
-        imports[0].id, f'{object_type}:{object_id}', evidence)
+        task.id, f'{object_type}:{object_id}', evidence)
+
+
+def backfill_import_storage_provenance(
+        conn, slurm_client, object_type, object_id, wf_id, *, dry_run=True):
+    """Preview or append missing storage evidence for an existing result.
+
+    Administrator-only, using the target's group context. Reads managed
+    metadata files, not pixel arrays. After apply, use the administrative
+    metadata refresh with refresh_storage=True to expose the new evidence.
+    Repeating either step is safe after interruption.
+    """
+    if not conn.isAdmin():
+        raise ValueError('Storage provenance backfill requires an administrator')
+    if object_type not in ('Image', 'Plate'):
+        raise ValueError('Only Image and Plate result targets are supported')
+    wf_id = str(uuid.UUID(str(wf_id)))
+    target = conn.getObject(object_type, int(object_id))
+    if target is None:
+        raise ValueError('Imported result target not found')
+    if not any(
+            ann.getNs() == 'biomero/workflow'
+            and ['Workflow_ID', wf_id] in [list(pair) for pair in ann.getValue()]
+            for ann in target.listAnnotations()):
+        raise ValueError('Target has no workflow metadata matching this workflow')
+    evidence = collect_import_storage_provenance(
+        conn, object_type, int(object_id), wf_id)
+    if evidence is None:
+        raise ValueError('No managed storage evidence is available for this result')
+    tracker = slurm_client.workflowTracker
+    task = storage_provenance_import_task(tracker, wf_id)
+    target_key = f'{object_type}:{int(object_id)}'
+    previous = getattr(task, 'storage_provenance', {}).get(target_key)
+    if previous is not None and previous != evidence:
+        raise ValueError('Import task already contains different storage evidence')
+    unchanged = previous == evidence
+    status = 'unchanged' if unchanged else 'planned'
+    if not dry_run and not unchanged:
+        tracker.record_storage_provenance(task.id, target_key, evidence)
+        status = 'recorded'
+    return {'target_key': target_key, 'workflow_id': wf_id,
+            'task_id': str(task.id), 'dry_run': dry_run, 'status': status,
+            'evidence': evidence, 'metadata_refresh_required': True}
 
 
 def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf_id=None):
