@@ -128,6 +128,11 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
             pixel_identities_match,
             read_zarr_v2_semantic_guard,
         )
+        try:
+            from biomero_importer.utils.pixel_identity import read_zarr_semantic_guard
+        except ImportError:
+            # Older deployments retain their v2-only behavior until upgraded.
+            read_zarr_semantic_guard = read_zarr_v2_semantic_guard
         from biomero_importer.utils.result_zarr import (
             discover_ngff_nodes,
         )
@@ -140,7 +145,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0"
+VERSION = "2.9.0b15"
 BIOMERO_CONFIG_FILE = os.getenv(
     "OMERO_BIOMERO_CONFIG_FILE",
     os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
@@ -684,6 +689,18 @@ def discover_canonical_inputs(objects, object_type):
     return sources, tuple(canonical_inputs) if complete else ()
 
 
+def canonical_interchange_profile(guard):
+    """Record the supported format actually backing this canonical node."""
+    profiles = {
+        ("0.4", 2): "ngff-0.4-zarr-v2",
+        ("0.5", 3): "ngff-0.5-zarr-v3",
+    }
+    try:
+        return profiles[(guard.ngff_version, guard.zarr_format)]
+    except KeyError as exc:
+        raise ValueError("Unsupported canonical OME-Zarr format") from exc
+
+
 def discover_canonical_label_components(
     source,
     storage_roots,
@@ -703,7 +720,7 @@ def discover_canonical_label_components(
             or node.parent_image_node_path != source.node_path
         ):
             continue
-        guard = read_zarr_v2_semantic_guard(root, node.node_path)
+        guard = read_zarr_semantic_guard(root, node.node_path)
         identity = provider.generate(
             root,
             node_path=node.node_path,
@@ -761,7 +778,8 @@ def build_canonical_plate_source(
         raise ValueError("Identity workers must be a positive integer")
 
     def generate_identity(node):
-        guard = read_zarr_v2_semantic_guard(root, node.node_path)
+        guard = read_zarr_semantic_guard(root, node.node_path)
+        profile = canonical_interchange_profile(guard)
         logger.info(
             "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
             plate.getId(),
@@ -787,9 +805,10 @@ def build_canonical_plate_source(
             identity.data_code,
             identity.instance_code,
         )
-        return node.node_path, identity
+        return node.node_path, identity, profile
 
     identities = {}
+    profiles = set()
     last_keepalive = monotonic()
     with ThreadPoolExecutor(
         max_workers=min(identity_workers, len(nodes)),
@@ -797,8 +816,9 @@ def build_canonical_plate_source(
     ) as executor:
         # map preserves discovery order in the canonical manifest even though
         # the identity work and its diagnostic logging happen concurrently.
-        for node_path, identity in executor.map(generate_identity, nodes):
+        for node_path, identity, profile in executor.map(generate_identity, nodes):
             identities[node_path] = identity
+            profiles.add(profile)
             if (
                 keepalive is not None
                 and monotonic() - last_keepalive >= keepalive_interval
@@ -817,6 +837,9 @@ def build_canonical_plate_source(
             "Lost the OMERO connection while indexing the canonical Plate Zarr"
         )
 
+    if len(profiles) != 1:
+        raise ValueError("Canonical Plate image/label nodes use different Zarr formats")
+    profile = profiles.pop()
     relative_path = Path(relative_path).as_posix()
     images = []
     for image_node in image_nodes:
@@ -827,7 +850,7 @@ def build_canonical_plate_source(
             source_object_type="Plate",
             source_object_id=int(plate.getId()),
             source_generation=source_generation,
-            interchange_profile="ngff-0.4-zarr-v2",
+            interchange_profile=profile,
             pixel_identity=identities[image_node.node_path],
             pixel_identity_origin="canonical-bootstrap",
             canonical_pixel_verified=False,
@@ -858,7 +881,7 @@ def build_canonical_plate_source(
         relative_path=relative_path,
         source_object_id=int(plate.getId()),
         source_generation=source_generation,
-        interchange_profile="ngff-0.4-zarr-v2",
+        interchange_profile=profile,
         images=tuple(images),
     )
 
@@ -1307,7 +1330,7 @@ def promote_exported_image_zarr(
         image, storage_roots)
     source_directory = derive_canonical_source_directory(image, storage_root)
     semantic_guard_reader = (
-        semantic_guard_reader or read_zarr_v2_semantic_guard
+        semantic_guard_reader or read_zarr_semantic_guard
     )
     guard = semantic_guard_reader(export_path, ".")
     validate_omero_image_semantics(image, guard)
@@ -1380,6 +1403,7 @@ def promote_exported_image_zarr(
         original_identity=original_identity,
         exported_identity=exported_identity,
         pixel_identity_origin="omero-pixels",
+        interchange_profile=canonical_interchange_profile(guard),
     )
     logger.info(
         "ISCC-BIO verification matched OMERO Pixels and exported Zarr for "
@@ -1428,7 +1452,7 @@ def index_existing_image_zarr(
         storage_roots,
     )
     semantic_guard_reader = (
-        semantic_guard_reader or read_zarr_v2_semantic_guard
+        semantic_guard_reader or read_zarr_semantic_guard
     )
     guard = semantic_guard_reader(existing_path, ".")
     validate_omero_image_semantics(image, guard)
@@ -1466,7 +1490,7 @@ def index_existing_image_zarr(
         source_object_id=int(image.getId()),
         source_generation=source_generation,
         node_path=".",
-        interchange_profile="ngff-0.4-zarr-v2",
+        interchange_profile=canonical_interchange_profile(guard),
         pixel_identity=existing_identity,
         pixel_identity_origin="canonical-bootstrap",
         canonical_pixel_verified=True,

@@ -51,6 +51,13 @@ missing or false feature flags leave them disabled. Within enabled shallow
 storage, remote normalization is preferred; set `BIOMERO_REMOTE_SHALLOW_ZARR=false`
 to use importer-side normalization. NL-BIOMERO's demo enables these features.
 
+Canonical indexing records the backing store's actual OME-Zarr profile: 0.4/v2
+or 0.5/v3. Existing v2 stores are reused as v2, and importing an existing v3
+Image or Plate does not require conversion to v2. V3 indexing requires the
+generic semantic-guard API from the matching v3-capable shallower/importer;
+older installations retain v2-only indexing. Mixed-format Plate inventories
+are rejected rather than recorded under an incorrect profile.
+
 Result file attachments use the existing on-disk paths. Workflow-qualified
 attachment names are stored in OMERO metadata, so in-place image registrations
 and attachment links remain valid. Directory-backed Zarr stores are available
