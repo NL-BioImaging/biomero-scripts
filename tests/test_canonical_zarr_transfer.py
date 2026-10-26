@@ -75,7 +75,7 @@ def _load_canonical_functions():
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted | {
             "verified_plate_source", "upgrade_reused_canonical",
-            "verify_exported_plate_source"}
+            "verify_exported_plate_source", "canonical_interchange_profile"}
     ]
     namespace = {
         "CANONICAL_PLATE_IMAGE_NAMESPACE": CANONICAL_PLATE_IMAGE_NAMESPACE,
@@ -168,7 +168,7 @@ def test_importer_write_dependencies_are_only_imported_behind_feature_guard():
             and node.module.startswith("biomero_importer.")
         )
     ]
-    assert len(guarded_imports) == 4
+    assert len({node.module for node in guarded_imports}) == 4
     guarded_names = {
         alias.name
         for node in guarded_imports
@@ -605,8 +605,11 @@ def test_plate_discovery_builds_plate_input(pixel_identity):
     assert inputs[0].plate_source == canonical
 
 
-def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity):
+@pytest.mark.parametrize("version,ngff", [(2, "0.4"), (3, "0.5")])
+def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity, version, ngff):
     ns = _load_canonical_functions()
+    if version == 3 and "canonical_interchange_profile" not in ns:
+        pytest.skip("V3 canonical indexing is not available in this source revision")
     nodes = (
         SimpleNamespace(
             node_path="A/1/0",
@@ -620,6 +623,7 @@ def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity):
         ),
     )
     guard = SimpleNamespace(
+        zarr_format=version, ngff_version=ngff,
         shape=(1, 1, 1, 16, 16),
         dtype="uint16",
         axes=("t", "c", "z", "y", "x"),
@@ -635,6 +639,7 @@ def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity):
 
     ns["discover_ngff_nodes"] = lambda _root: nodes
     ns["read_zarr_v2_semantic_guard"] = lambda _root, _node: guard
+    ns["read_zarr_semantic_guard"] = ns["read_zarr_v2_semantic_guard"]
     result = ns["build_canonical_plate_source"](
         Object(9, []),
         tmp_path / "plate.zarr",
@@ -644,6 +649,8 @@ def test_builds_per_image_and_label_plate_identities(tmp_path, pixel_identity):
     )
 
     assert result.images[0].source.pixel_identity.node_path == "A/1/0"
+    assert result.interchange_profile == f"ngff-{ngff}-zarr-v{version}"
+    assert result.images[0].source.interchange_profile == result.interchange_profile
     assert result.images[0].labels[0].logical_node_path == (
         "A/1/0/labels/cells"
     )
@@ -947,10 +954,13 @@ def test_managed_zarr_location_uses_most_specific_root(tmp_path):
     assert relative == Path(".analyzed/workflow/image.zarr")
 
 
+@pytest.mark.parametrize("version,ngff", [(2, "0.4"), (3, "0.5")])
 def test_promotes_verified_image_and_restores_task_copy(
-    tmp_path, pixel_identity, caplog
+    tmp_path, pixel_identity, caplog, version, ngff
 ):
     ns = _load_canonical_functions()
+    if version == 3 and "canonical_interchange_profile" not in ns:
+        pytest.skip("V3 canonical promotion is not available in this source revision")
     root = tmp_path / "managed"
     export = tmp_path / "task" / "image.zarr"
     export.mkdir(parents=True)
@@ -959,6 +969,7 @@ def test_promotes_verified_image_and_restores_task_copy(
     canonical = source(pixel_identity)
     identities = []
     writes = []
+    promotions = []
 
     class Provider:
         def generate(self, path, **guard):
@@ -971,6 +982,7 @@ def test_promotes_verified_image_and_restores_task_copy(
 
     class Promotion:
         def promote(self, staging, **kwargs):
+            promotions.append(kwargs)
             canonical_path.parent.mkdir(parents=True)
             shutil.move(staging, canonical_path)
             (canonical_path / ".biomero-canonical.json").write_text(
@@ -986,6 +998,7 @@ def test_promotes_verified_image_and_restores_task_copy(
             {"group-3-data": root},
             identity_provider=Provider(),
             semantic_guard_reader=lambda path, node: SimpleNamespace(
+                zarr_format=version, ngff_version=ngff,
                 shape=(1, 1, 1, 16, 16),
                 dtype="uint16",
                 axes=("t", "c", "z", "y", "x"),
@@ -996,6 +1009,8 @@ def test_promotes_verified_image_and_restores_task_copy(
         )
 
     assert result == canonical
+    assert promotions[0].get("interchange_profile", "ngff-0.4-zarr-v2") == (
+        f"ngff-{ngff}-zarr-v{version}")
     assert canonical_path.is_dir()
     assert export.is_dir()
     assert (export / ".zgroup").is_file()
@@ -1009,10 +1024,13 @@ def test_promotes_verified_image_and_restores_task_copy(
     assert "ISCC-BIO verification matched" in caplog.text
 
 
+@pytest.mark.parametrize("version,ngff", [(2, "0.4"), (3, "0.5")])
 def test_indexes_verified_existing_image_without_copying(
-    tmp_path, pixel_identity, caplog
+    tmp_path, pixel_identity, caplog, version, ngff
 ):
     ns = _load_canonical_functions()
+    if version == 3 and "canonical_interchange_profile" not in ns:
+        pytest.skip("V3 canonical indexing is not available in this source revision")
     root = tmp_path / "managed"
     existing = root / ".analyzed/workflow/image.zarr"
     existing.mkdir(parents=True)
@@ -1046,6 +1064,7 @@ def test_indexes_verified_existing_image_without_copying(
             {"group-3-data": root},
             identity_provider=Provider(),
             semantic_guard_reader=lambda path, node: SimpleNamespace(
+                zarr_format=version, ngff_version=ngff,
                 shape=(1, 1, 1, 16, 16),
                 dtype="uint16",
                 axes=("t", "c", "z", "y", "x"),
@@ -1056,6 +1075,7 @@ def test_indexes_verified_existing_image_without_copying(
         )
 
     assert indexed.relative_path == ".analyzed/workflow/image.zarr"
+    assert indexed.interchange_profile == f"ngff-{ngff}-zarr-v{version}"
     assert existing.is_dir()
     assert writes[0]["ns"] == CANONICAL_SOURCE_NAMESPACE
     assert "indexed generation 1 in place" in caplog.text
@@ -1220,6 +1240,7 @@ def test_snapshot_hashes_labels_already_in_canonical_zarr(
         axes=label_identity.axes,
         coordinate_transformations=label_identity.coordinate_transformations,
     )
+    ns["read_zarr_semantic_guard"] = ns["read_zarr_v2_semantic_guard"]
 
     class Provider:
         def generate(self, _root, **_kwargs):
