@@ -318,7 +318,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0"
+VERSION = "2.9.0b15"
 
 
 def load_canonical_input_snapshot(slurm_client, workflow_id):

@@ -47,7 +47,7 @@ from biomero_shallower.result_zarr import load_managed_storage_roots
 
 
 logger = logging.getLogger(__name__)
-VERSION = "2.9.0"
+VERSION = "2.9.0b15"
 
 OBJECT_TYPE = "Object Type"
 OBJECT_IDS = "Object IDs (optional)"
