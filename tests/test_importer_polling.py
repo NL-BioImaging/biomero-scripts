@@ -161,7 +161,9 @@ def test_importer_polling_defaults_to_one_day_and_workflow_uses_it():
     timeout = eval(compile(
         ast.Expression(timeout_assignment.value), str(SCRIPT_PATH), "eval"
     ))
-    process = next(
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+    process = functions.get("_process_importer_workflow_locked") or next(
         node for node in tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name == "process_importer_workflow"
