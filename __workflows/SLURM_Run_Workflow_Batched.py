@@ -178,7 +178,7 @@ def runScript():
             omscripts.String(
                             constants.transfer.OME_VERSION, grouping="01.5.1",
                             description="Ome-zarr version", values=ome_zarr_versions,
-                            default=constants.transfer.OME_ZARR_VERSION_0_4),
+                            default=constants.transfer.OME_ZARR_VERSION_0_5),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",

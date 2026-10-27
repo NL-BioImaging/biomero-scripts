@@ -293,11 +293,11 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     if use_zarr_format is None:
         use_zarr_format = unwrap(client.getInput(
             constants.workflow.USE_ZARR_FORMAT))
-    ome_zarr_version = params.get("ome_zarr_version")
-    if not ome_zarr_version:
-        ome_zarr_version = (unwrap(client.getInput(
-            constants.transfer.OME_VERSION)) if use_zarr_format
-            else constants.transfer.OME_ZARR_VERSION_0_4)
+    ome_zarr_version = (
+        params.get("ome_zarr_version")
+        or unwrap(client.getInput(constants.transfer.OME_VERSION))
+        or constants.transfer.OME_ZARR_VERSION_0_5
+    ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
     return {
         "workflows": workflows,
         "selected_output": selected_output,
@@ -655,7 +655,7 @@ def runScript():
             omscripts.String(
                             constants.transfer.OME_VERSION, grouping="01.4.1",
                             description="Ome-zarr version", values=ome_zarr_versions,
-                            default=constants.transfer.OME_ZARR_VERSION_0_4),
+                            default=constants.transfer.OME_ZARR_VERSION_0_5),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
@@ -940,7 +940,9 @@ def runScript():
             # Get ZARR format preference
             use_zarr_format = unwrap(client.getInput(constants.workflow.USE_ZARR_FORMAT))
             if use_zarr_format:
-                ome_zarr_version = unwrap(client.getInput(constants.transfer.OME_VERSION))
+                ome_zarr_version = (
+                    unwrap(client.getInput(constants.transfer.OME_VERSION))
+                    or constants.transfer.OME_ZARR_VERSION_0_5)
             else:
                 ome_zarr_version = constants.transfer.OME_ZARR_VERSION_0_4 # backward compatible
 
