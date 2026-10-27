@@ -58,6 +58,20 @@ generic semantic-guard API from the matching v3-capable shallower/importer;
 older installations retain v2-only indexing. Mixed-format Plate inventories
 are rejected rather than recorded under an incorrect profile.
 
+Fresh exports for Zarr-consuming workflows default to OME-NGFF 0.5 / Zarr v3;
+an explicit 0.4 choice remains available. This is an export preference, not a
+request to rewrite existing managed stores: native Zarr workflows reuse v2 and
+v3 sources in their existing format.
+
+TIFF-consuming workflows keep using the legacy HPC converter. Their transfer
+route requires actual OME-NGFF 0.4 / Zarr v2 material: compatible v2 sources are
+reused, while v3 sources are exported temporarily from the selected OMERO
+pixels as v2. Shallow selections also export their selected pixels, including
+label views, instead of reconstructing a different image. These temporary
+exports are not indexed or promoted to canonical storage; the original store
+and its annotations remain unchanged. Deploy the matching OMERO.biomero web
+change after these scripts so the web default and transfer safeguards agree.
+
 Result file attachments use the existing on-disk paths. Workflow-qualified
 attachment names are stored in OMERO metadata, so in-place image registrations
 and attachment links remain valid. Directory-backed Zarr stores are available

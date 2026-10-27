@@ -2203,6 +2203,23 @@ def build_zarr_export_error(object, data_type, stderr):
     return " ".join(context)
 
 
+def is_legacy_tiff_conversion_source(source_path):
+    """Check storage metadata without reading pixels or requiring the importer.
+
+    The legacy HPC helper uses Zarr 2. Reuse a v2 store, but export selected
+    OMERO pixels for v3 or unrecognized stores instead of sending unreadable
+    material to that helper. An ambiguous mixed root is not reusable here.
+    """
+    root = Path(source_path)
+    if (root / "zarr.json").exists():
+        return False
+    try:
+        metadata = json.loads((root / ".zgroup").read_text(encoding="utf-8"))
+        return isinstance(metadata, dict) and metadata.get("zarr_format") == 2
+    except (OSError, ValueError):
+        return False
+
+
 def save_as_zarr(
     conn,
     suuid,
@@ -2229,6 +2246,12 @@ def save_as_zarr(
     Raises:
         ValueError: If unsupported data_type is provided.
     """
+    conversion_material = not reconstruct_shallow_zarr
+    if conversion_material:
+        # This is a required format for the legacy helper, not just an export
+        # preference. Reused sources are checked below as well.
+        ome_zarr_version = constants.transfer.OME_ZARR_VERSION_0_4
+
     extension = "zarr"
     name = os.path.basename(object.getName())
     img_name = "%s.%s" % (name, extension)
@@ -2246,18 +2269,6 @@ def save_as_zarr(
         shallow_reference = get_shallow_reference(object)
     elif data_type == constants.transfer.DATA_TYPE_PLATE:
         shallow_reference = get_shallow_plate_reference(object)
-    if (
-        shallow_reference is not None
-        and data_type == constants.transfer.DATA_TYPE_PLATE
-        and not reconstruct_shallow_zarr
-    ):
-        logger.warning(
-            "Ignoring selected-pixels transfer mode for shallow Plate %s; "
-            "Plate inputs always require full Zarr reconstruction",
-            object.getId(),
-        )
-        reconstruct_shallow_zarr = True
-
     if (
         shallow_reference is not None
         and reconstruct_shallow_zarr
@@ -2280,10 +2291,10 @@ def save_as_zarr(
     )
     if selected_pixel_export:
         logger.info(
-            "Bypassing full shallow reconstruction for Image %s because the "
+            "Bypassing full shallow reconstruction for %s %s because the "
             "temporary Zarr will be converted to TIFF; exporting the exact "
             "OMERO PixelBuffer and excluding it from canonical promotion",
-            object.getId(),
+            data_type, object.getId(),
         )
         log(" Exporting selected OMERO pixels as TIFF conversion material")
         canonical_source = None
@@ -2330,14 +2341,23 @@ def save_as_zarr(
     if not selected_pixel_export:
         source_path = select_zarr_source_path(
             object, canonical_source, storage_roots or {})
+    if (conversion_material and source_path is not None
+            and not is_legacy_tiff_conversion_source(source_path)):
+        logger.info(
+            "Exporting temporary NGFF 0.4 / Zarr v2 material for %s %s; "
+            "the managed source at %s and its canonical registration remain "
+            "unchanged", data_type, object.getId(), source_path)
+        source_path = None
+        canonical_source = None
     if source_path is not None:
-        if shallow_zarr_storage and canonical_source is not None:
+        if (shallow_zarr_storage and canonical_source is not None
+                and not conversion_material):
             canonical_source = upgrade_reused_canonical(
                 conn, object, canonical_source, source_path)
         if (
             shallow_zarr_storage
             and canonical_source is None
-            and not selected_pixel_export
+            and not conversion_material
         ):
             try:
                 if data_type == constants.transfer.DATA_TYPE_PLATE:
@@ -2469,7 +2489,7 @@ def save_as_zarr(
         if (
             shallow_zarr_storage
             and canonical_source is None
-            and not selected_pixel_export
+            and not conversion_material
         ):
             try:
                 if data_type == constants.transfer.DATA_TYPE_PLATE:
@@ -3168,7 +3188,7 @@ def run_script():
             scripts.String(
                 constants.transfer.OME_VERSION, grouping="5.2",
                 description="Ome-zarr version", values=ome_zarr_versions,
-                default=constants.transfer.OME_ZARR_VERSION_0_4),
+                default=constants.transfer.OME_ZARR_VERSION_0_5),
 
             scripts.Bool(
                 constants.transfer.RECONSTRUCT_SHALLOW_ZARR,
