@@ -155,13 +155,31 @@ confirmed complete. An import failure, polling timeout or lost database
 connection fails the script and preserves the Slurm results, downloaded archive
 and staged files. Requested cleanup runs only after successful finalization.
 
-Each staged result directory contains a durable `.biomero-result-import.json`
-recovery record. It saves the destination, rename mapping, options and order UUIDs
-before queueing any imports. Rerun **Import Results** for the same workflow/job
+Durable recovery is a separate opt-in: set `BIOMERO_RESULT_RECOVERY=true` on the
+workflow worker and importer. Missing, empty or false leaves it disabled, even
+when shallow storage is enabled. The default path adds no filesystem locks,
+recovery records, directory synchronization or recovery database lookups. Failure
+reporting, database acknowledgement and preservation of failed results remain
+active in both modes. Without recovery, review prior orders before retrying an
+import: automatic reuse of order IDs is unavailable.
+
+When enabled on compatible storage, each new workflow-result import plan creates one small
+`.biomero-result-import.json` in its staged result directory. It saves the
+destination, rename mapping, options and order UUIDs before queueing any imports.
+It does not create a record per image, hash pixels, scan historical OMERO objects
+or migrate already-imported data. Rerun **Import Results** for the same workflow/job
 with the same import settings to resume those orders. Pending orders are polled;
 completed orders are reused without registering their images again. Concurrent
 finalizers are rejected using filesystem locks, which are released on process
-exit. Shared storage must support locks across the worker processes.
+exit. Opt-in storage must support locks across worker processes, atomic file
+replacement, file synchronization and (on POSIX) directory synchronization.
+
+If lock acquisition explicitly reports that locking is unsupported, a fresh
+attempt uses the legacy import path and logs that saved-order recovery and
+concurrency protection are unavailable. This fallback happens before saving
+an import plan or submitting orders. It does not apply to busy locks, permission
+errors, storage outages or failures after recovery has begun. An existing recovery
+record requires working locks; it cannot be bypassed through this fallback.
 
 An order marked failed can already contain partial OMERO registrations. Retrying
 does not automatically submit a replacement: review its order UUID, importer log
@@ -169,6 +187,8 @@ and destination objects first. Interrupted preparation (renaming or destination
 creation), unreadable recovery records, changed settings and older staged imports
 with orders but no recovery record also require review. Preserve the record and
 files; deleting the record to bypass the check can create duplicate imports.
+Disabling recovery does not bypass a saved plan: re-enable it to resume that
+attempt safely. Historical imports are inspected only when explicitly retried.
 This protects image registration; it does not make optional ROI creation and
 attachment postprocessing exactly-once operations.
 

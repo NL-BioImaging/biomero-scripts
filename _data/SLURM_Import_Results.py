@@ -72,6 +72,7 @@ License: GPL v2+ (see LICENSE.txt)
 
 import csv
 import difflib
+import errno
 import fnmatch
 import glob
 import json
@@ -3804,8 +3805,17 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
     return status
 
 
+def result_recovery_enabled():
+    """Additional shared-filesystem guarantees require explicit opt-in."""
+    return os.getenv("BIOMERO_RESULT_RECOVERY", "false").strip().lower() == "true"
+
+
 class ResultFinalizationBusy(RuntimeError):
     """A competing finalizer must not change the active task's status."""
+
+
+class ResultFinalizationLockUnsupported(RuntimeError):
+    """The filesystem explicitly cannot implement the recovery lock."""
 
 
 @contextmanager
@@ -3826,6 +3836,11 @@ def acquire_result_import_lock(results_path, name=".biomero-result-import.lock")
                 import fcntl
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
+            if exc.errno in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise ResultFinalizationLockUnsupported(
+                    "Filesystem locking is unsupported") from exc
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
             raise ResultFinalizationBusy(
                 "Result finalization is already running or its lock is "
                 "unavailable; no new import was submitted"
@@ -3838,6 +3853,31 @@ def acquire_result_import_lock(results_path, name=".biomero-result-import.lock")
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+@contextmanager
+def result_import_recovery(results_path, name=".biomero-result-import.lock", *, enabled=None):
+    """Choose recovery before side effects; never retry the body on lock errors."""
+    if enabled is None:
+        enabled = result_recovery_enabled()
+    if not enabled:
+        yield False
+        return
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(acquire_result_import_lock(results_path, name))
+        except ResultFinalizationLockUnsupported:
+            if (Path(results_path) / RESULT_IMPORT_STATE).exists():
+                raise RuntimeError(
+                    "These results have a recovery record and need working locks "
+                    "to resume; no replacement import was submitted")
+            logger.warning(
+                "Filesystem locking is unsupported for %s; using the legacy "
+                "import path without saved-order recovery or concurrency protection",
+                results_path)
+            yield False
+            return
+        yield True
 
 
 def write_result_import_state(results_path, state):
@@ -3979,8 +4019,9 @@ def process_importer_workflow(*args, **kwargs):
     results_path = kwargs.get("permanent_storage_path")
     if results_path is None:
         results_path = args[6]
-    with acquire_result_import_lock(results_path):
-        return _process_importer_workflow_locked(*args, **kwargs)
+    with result_import_recovery(
+            results_path, enabled=kwargs.pop("recovery", None)) as recovery:
+        return _process_importer_workflow_locked(*args, recovery=recovery, **kwargs)
 
 
 def _process_importer_workflow_locked(
@@ -3997,7 +4038,7 @@ def _process_importer_workflow_locked(
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
     canonical_inputs=None,
     provenance_targets=None,
-
+    recovery=None,
 ) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
 
@@ -4023,9 +4064,15 @@ def _process_importer_workflow_locked(
     og_name_map: Dict[str, str] = {}
     logger.info("Processing importer workflow...")
 
-    request = result_import_request(
-        client, group_name, username, wf_id, slurm_job_id)
-    state = read_result_import_state(permanent_storage_path)
+    if recovery is None:
+        recovery = result_recovery_enabled()
+    if not recovery and (Path(permanent_storage_path) / RESULT_IMPORT_STATE).exists():
+        raise RuntimeError(
+            "These results have a recovery record. Enable BIOMERO_RESULT_RECOVERY "
+            "to resume their saved orders; no replacement import was submitted")
+    request = (result_import_request(
+        client, group_name, username, wf_id, slurm_job_id) if recovery else None)
+    state = read_result_import_state(permanent_storage_path) if recovery else None
     if state is not None:
         if state["request"] != request:
             raise RuntimeError(
@@ -4039,17 +4086,18 @@ def _process_importer_workflow_locked(
         og_name_map = state["rename_map"]
         orders = state["orders"]
     else:
-        previous = find_previous_result_import_orders(
-            permanent_storage_path, group_name, username)
-        if previous:
-            raise RuntimeError(
-                "These staged results already have importer orders but no "
-                "recovery record. Review existing registrations before retrying: "
-                + ", ".join(previous))
-        # A crash during renaming or OMERO destination creation is ambiguous.
-        # Preserve that fact instead of repeating those side effects blindly.
-        write_result_import_state(permanent_storage_path, {
-            "schema": 1, "phase": "preparing", "request": request})
+        if recovery:
+            previous = find_previous_result_import_orders(
+                permanent_storage_path, group_name, username)
+            if previous:
+                raise RuntimeError(
+                    "These staged results already have importer orders but no "
+                    "recovery record. Review existing registrations before retrying: "
+                    + ", ".join(previous))
+            # A crash during renaming or OMERO destination creation is ambiguous.
+            # Preserve that fact instead of repeating those side effects blindly.
+            write_result_import_state(permanent_storage_path, {
+                "schema": 1, "phase": "preparing", "request": request})
         # Determine destination type (dataset or screen)
         use_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET))
         use_screen = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN))
@@ -4151,7 +4199,7 @@ def _process_importer_workflow_locked(
         orders = create_upload_orders_for_results(
             group_name, username, destination_type, destination_id,
             permanent_storage_path, wf_id, client, canonical_inputs,
-            submit=False,
+            submit=not recovery,
             **({"remote_receipts": remote_receipts} if remote_receipts else {}))
 
         if not orders:
@@ -4162,10 +4210,12 @@ def _process_importer_workflow_locked(
             "destination": {"type": destination_type, "id": destination_id},
             "rename_map": og_name_map, "orders": orders,
         }
-        write_result_import_state(permanent_storage_path, state)
+        if recovery:
+            write_result_import_state(permanent_storage_path, state)
     if provenance_targets is not None and destination_type.lower() == "dataset":
         provenance_targets.append(destination_wrapper)
-    ensure_result_import_orders(orders, allow_submit=state["phase"] != "registered")
+    if recovery:
+        ensure_result_import_orders(orders, allow_submit=state["phase"] != "registered")
 
     if orders:
         message += f"\nUsing {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
@@ -4188,8 +4238,9 @@ def _process_importer_workflow_locked(
         message += f"\n{summary}"
 
         if all_successful:
-            state["phase"] = "registered"
-            write_result_import_state(permanent_storage_path, state)
+            if recovery:
+                state["phase"] = "registered"
+                write_result_import_state(permanent_storage_path, state)
             logger.info("All imports completed successfully")
             message += f"\nAll {destination_type.lower()} imports completed successfully!"
 
@@ -4213,11 +4264,15 @@ def _process_importer_workflow_locked(
         else:
             logger.error(f"Some imports failed: {failed_uuids}")
             message += f"\nSome imports failed for UUIDs: {failed_uuids}"
+            retry_advice = (
+                "Retry finalization with recovery enabled to resume these orders. "
+                if recovery else "Review existing orders before retrying. "
+            )
             raise RuntimeError(
                 f"{summary}. Import orders not confirmed complete: "
                 + ", ".join(failed_uuids)
-                + ". Result files were preserved; retry finalization to resume "
-                "these orders. Failed or partial registrations need review.")
+                + ". Result files were preserved. " + retry_advice
+                + "Failed or partial registrations need review.")
     else:
         error_msg = "CRITICAL: No image files found for importer processing - workflow failed!"
         logger.error(error_msg)
@@ -5304,7 +5359,7 @@ def runScript() -> None:
 
             # Serialize retrieval and finalization for the same workflow/job,
             # including concurrent first attempts before a result folder exists.
-            recovery_locks.enter_context(acquire_result_import_lock(
+            result_recovery = recovery_locks.enter_context(result_import_recovery(
                 os.path.join(get_importer_group_base_path(group_name),
                              ".analyzed", str(wf_id)),
                 name=f".biomero-finalize-{uuid.uuid5(uuid.NAMESPACE_URL, str(slurm_job_id))}.lock"))
@@ -5536,7 +5591,8 @@ def runScript() -> None:
                     permanent_storage_path, wf_id, task_id,
                     input_images=input_images, roi_pairs=roi_pairs,
                     canonical_inputs=canonical_input_manifest,
-                    provenance_targets=provenance_targets)
+                    provenance_targets=provenance_targets,
+                    recovery=result_recovery)
                 message += importer_message
 
             if unwrap(client.getInput(constants.results.OUTPUT_CREATE_ROIS)):
