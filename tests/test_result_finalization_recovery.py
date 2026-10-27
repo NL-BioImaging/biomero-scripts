@@ -4,6 +4,7 @@ import errno
 import json
 import logging
 import os
+import stat
 from datetime import datetime
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -22,9 +23,9 @@ pytestmark = pytest.mark.skipif(
     "def write_result_import_state(" not in SCRIPT.read_text(encoding="utf-8"),
     reason="result recovery implementation is not present in selected source",
 )
-requires_opt_in = pytest.mark.skipif(
-    "def result_recovery_enabled(" not in SCRIPT.read_text(encoding="utf-8"),
-    reason="selected source predates the opt-in recovery switch",
+requires_automatic_recovery = pytest.mark.skipif(
+    "def probe_result_recovery_storage(" not in SCRIPT.read_text(encoding="utf-8"),
+    reason="selected source predates automatic recovery",
 )
 requires_lock_fallback = pytest.mark.skipif(
     "def result_import_recovery(" not in SCRIPT.read_text(encoding="utf-8"),
@@ -45,6 +46,9 @@ def load_functions():
         "create_upload_orders_for_results", "cleanup_resources",
         "acquire_result_import_lock", "result_recovery_enabled",
         "result_import_recovery", "ResultFinalizationLockUnsupported",
+        "probe_result_recovery_storage", "ResultRecoveryUnsupported",
+        "_write_result_import_json", "_sync_result_import_directory",
+        "_sync_result_import_fd",
         "_process_importer_workflow_locked",
     }
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
@@ -68,7 +72,11 @@ def load_functions():
 
 @pytest.fixture
 def flow(tmp_path, monkeypatch):
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    # Older remote revisions still need opt-in; the new source must work without it.
+    if "def probe_result_recovery_storage(" in SCRIPT.read_text(encoding="utf-8"):
+        monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    else:
+        monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
     namespace = load_functions()
     values = {
         "OUTPUT_ATTACH_NEW_DATASET": True,
@@ -117,20 +125,16 @@ def test_failed_or_unknown_import_cannot_finalize_successfully(flow, summary):
     flow.namespace["add_metadata_to_imported_images"].assert_not_called()
 
 
-@requires_opt_in
-@pytest.mark.parametrize("value", [None, "", "false", "FALSE"])
+@requires_automatic_recovery
+@pytest.mark.parametrize("value", [None, "", "false", "TRUE"])
 @pytest.mark.parametrize("successful", [True, False])
-def test_recovery_opt_out_needs_no_new_filesystem_or_database_operations(
+def test_supported_storage_uses_recovery_without_a_feature_flag(
     flow, monkeypatch, value, successful,
 ):
     if value is None:
         monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     else:
         monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", value)
-    for name in ("acquire_result_import_lock", "write_result_import_state",
-                 "read_result_import_state", "find_previous_result_import_orders",
-                 "get_existing_import_order"):
-        flow.namespace[name] = Mock(side_effect=OSError("unsupported filesystem operation"))
     flow.namespace["wait_for_import_completion"].return_value = (
         successful, "import status", [] if successful else ["failed-order"])
     if successful:
@@ -139,16 +143,92 @@ def test_recovery_opt_out_needs_no_new_filesystem_or_database_operations(
         with pytest.raises(RuntimeError, match="failed-order"):
             flow.run()
     assert len(flow.submissions) == 1
-    assert not list(flow.directory.glob(".biomero*"))
+    record = json.loads((flow.directory / ".biomero-result-import.json").read_text())
+    assert record["orders"][0]["UUID"] == flow.submissions[0]["UUID"]
+    assert not list(flow.directory.glob(".biomero-recovery-probe-*"))
 
 
-@requires_opt_in
-def test_recovery_cannot_be_disabled_to_duplicate_a_saved_import(flow, monkeypatch):
+@requires_automatic_recovery
+def test_obsolete_flag_does_not_disable_saved_order_recovery(flow, monkeypatch):
     flow.run()
     monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "false")
-    with pytest.raises(RuntimeError, match="BIOMERO_RESULT_RECOVERY"):
+    flow.run()
+    assert len(flow.submissions) == 1
+
+
+def fail_durable_operation(monkeypatch, operation, code):
+    if operation == "replace":
+        monkeypatch.setattr(os, "replace", Mock(side_effect=OSError(code, "unsupported replacement")))
+        return
+    original = os.fsync
+
+    def fsync(fd):
+        is_directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+        if is_directory == (operation == "directory-sync"):
+            raise OSError(code, "unsupported synchronization")
+        return original(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+durable_operations = [
+    "file-sync", "replace",
+    pytest.param("directory-sync", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX directory sync")),
+]
+
+
+@requires_automatic_recovery
+@pytest.mark.parametrize("operation", durable_operations)
+def test_unsupported_durable_write_uses_legacy_import_before_queueing(
+    flow, monkeypatch, caplog, operation,
+):
+    fail_durable_operation(monkeypatch, operation, errno.EOPNOTSUPP)
+    flow.namespace["find_previous_result_import_orders"] = Mock(
+        side_effect=AssertionError("legacy path does not use recovery database checks"))
+    flow.run()
+    assert len(flow.submissions) == 1
+    assert "legacy" in caplog.text.lower()
+    assert not (flow.directory / ".biomero-result-import.json").exists()
+    assert not list(flow.directory.glob(".biomero-recovery-probe-*"))
+
+
+@requires_automatic_recovery
+@pytest.mark.parametrize("operation", durable_operations)
+def test_unsupported_durable_write_never_bypasses_a_saved_plan(flow, monkeypatch, operation):
+    flow.run()
+    original = (flow.directory / ".biomero-result-import.json").read_bytes()
+    fail_durable_operation(monkeypatch, operation, errno.EOPNOTSUPP)
+    with pytest.raises(RuntimeError, match="recovery record"):
         flow.run()
     assert len(flow.submissions) == 1
+    assert (flow.directory / ".biomero-result-import.json").read_bytes() == original
+
+
+@requires_automatic_recovery
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EIO, errno.ENOSPC])
+def test_durable_write_failure_does_not_downgrade_or_enqueue(flow, monkeypatch, code):
+    fail_durable_operation(monkeypatch, "file-sync", code)
+    with pytest.raises(OSError):
+        flow.run()
+    assert not flow.submissions
+    assert not list(flow.directory.glob(".biomero-recovery-probe-*"))
+
+
+@requires_automatic_recovery
+@pytest.mark.parametrize("operation", [durable_operations[0], durable_operations[2]])
+def test_filesystem_rejecting_sync_with_einval_uses_legacy_import(flow, monkeypatch, operation):
+    fail_durable_operation(monkeypatch, operation, errno.EINVAL)
+    flow.run()
+    assert len(flow.submissions) == 1
+    assert not (flow.directory / ".biomero-result-import.json").exists()
+
+
+@requires_automatic_recovery
+def test_einval_during_replace_does_not_mean_sync_is_unsupported(flow, monkeypatch):
+    fail_durable_operation(monkeypatch, "replace", errno.EINVAL)
+    with pytest.raises(OSError):
+        flow.run()
+    assert not flow.submissions
 
 
 def fail_lock(monkeypatch, error):
