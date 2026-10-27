@@ -3805,17 +3805,12 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
     return status
 
 
-def result_recovery_enabled():
-    """Additional shared-filesystem guarantees require explicit opt-in."""
-    return os.getenv("BIOMERO_RESULT_RECOVERY", "false").strip().lower() == "true"
-
-
 class ResultFinalizationBusy(RuntimeError):
     """A competing finalizer must not change the active task's status."""
 
 
-class ResultFinalizationLockUnsupported(RuntimeError):
-    """The filesystem explicitly cannot implement the recovery lock."""
+class ResultRecoveryUnsupported(RuntimeError):
+    """The filesystem explicitly cannot implement a recovery requirement."""
 
 
 @contextmanager
@@ -3837,7 +3832,7 @@ def acquire_result_import_lock(results_path, name=".biomero-result-import.lock")
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
-                raise ResultFinalizationLockUnsupported(
+                raise ResultRecoveryUnsupported(
                     "Filesystem locking is unsupported") from exc
             if exc.errno not in (errno.EACCES, errno.EAGAIN):
                 raise
@@ -3856,48 +3851,83 @@ def acquire_result_import_lock(results_path, name=".biomero-result-import.lock")
 
 
 @contextmanager
-def result_import_recovery(results_path, name=".biomero-result-import.lock", *, enabled=None):
+def result_import_recovery(results_path, name=".biomero-result-import.lock", *, enabled=True):
     """Choose recovery before side effects; never retry the body on lock errors."""
-    if enabled is None:
-        enabled = result_recovery_enabled()
     if not enabled:
         yield False
         return
     with ExitStack() as stack:
         try:
             stack.enter_context(acquire_result_import_lock(results_path, name))
-        except ResultFinalizationLockUnsupported:
+            probe_result_recovery_storage(results_path)
+        except ResultRecoveryUnsupported as exc:
             if (Path(results_path) / RESULT_IMPORT_STATE).exists():
                 raise RuntimeError(
-                    "These results have a recovery record and need working locks "
+                    "These results have a recovery record and need supported recovery storage "
                     "to resume; no replacement import was submitted")
             logger.warning(
-                "Filesystem locking is unsupported for %s; using the legacy "
-                "import path without saved-order recovery or concurrency protection",
-                results_path)
+                "Recovery storage is unsupported for %s (%s); using the legacy "
+                "import path without saved-order recovery",
+                results_path, exc)
             yield False
             return
         yield True
 
 
-def write_result_import_state(results_path, state):
-    """Commit the order plan before submitting anything to the importer."""
-    root = Path(results_path)
-    temporary = root / f"{RESULT_IMPORT_STATE}.{uuid.uuid4().hex}.tmp"
+def _sync_result_import_fd(descriptor):
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        # Valid regular-file/directory descriptors can still reject fsync.
+        if exc.errno == errno.EINVAL:
+            raise ResultRecoveryUnsupported(
+                "Filesystem synchronization is unsupported") from exc
+        raise
+
+
+def _sync_result_import_directory(root):
+    if os.name != "nt":
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _sync_result_import_fd(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _write_result_import_json(path, state):
+    root = path.parent
+    temporary = root / f"{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         with temporary.open("w", encoding="utf-8") as stream:
             json.dump(state, stream, indent=2, sort_keys=True, default=str)
             stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, root / RESULT_IMPORT_STATE)
-        if os.name != "nt":
-            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            _sync_result_import_fd(stream.fileno())
+        os.replace(temporary, path)
+        _sync_result_import_directory(root)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def probe_result_recovery_storage(results_path):
+    """Check new durable-write requirements using only disposable metadata."""
+    probe = Path(results_path) / f".biomero-recovery-probe-{uuid.uuid4().hex}.json"
+    try:
+        # Exercise replacement of an existing file, as later plan updates do.
+        with probe.open("x", encoding="utf-8"):
+            pass
+        _write_result_import_json(probe, {"probe": True})
+    except OSError as exc:
+        if exc.errno in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise ResultRecoveryUnsupported(
+                "Durable recovery writes are unsupported") from exc
+        raise
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def write_result_import_state(results_path, state):
+    """Commit the order plan before submitting anything to the importer."""
+    _write_result_import_json(Path(results_path) / RESULT_IMPORT_STATE, state)
 
 
 def read_result_import_state(results_path):
@@ -4020,7 +4050,7 @@ def process_importer_workflow(*args, **kwargs):
     if results_path is None:
         results_path = args[6]
     with result_import_recovery(
-            results_path, enabled=kwargs.pop("recovery", None)) as recovery:
+            results_path, enabled=kwargs.pop("recovery", True)) as recovery:
         return _process_importer_workflow_locked(*args, recovery=recovery, **kwargs)
 
 
@@ -4038,7 +4068,7 @@ def _process_importer_workflow_locked(
     roi_pairs: Optional[List[Tuple[int, int]]] = None,
     canonical_inputs=None,
     provenance_targets=None,
-    recovery=None,
+    recovery=True,
 ) -> Tuple[str, Dict[str, str], Optional[Any]]:
     """Process dataset or screen image imports via biomero-importer from comprehensive permanent storage.
 
@@ -4064,12 +4094,10 @@ def _process_importer_workflow_locked(
     og_name_map: Dict[str, str] = {}
     logger.info("Processing importer workflow...")
 
-    if recovery is None:
-        recovery = result_recovery_enabled()
     if not recovery and (Path(permanent_storage_path) / RESULT_IMPORT_STATE).exists():
         raise RuntimeError(
-            "These results have a recovery record. Enable BIOMERO_RESULT_RECOVERY "
-            "to resume their saved orders; no replacement import was submitted")
+            "These results have a recovery record. Restore supported recovery "
+            "storage to resume their saved orders; no replacement import was submitted")
     request = (result_import_request(
         client, group_name, username, wf_id, slurm_job_id) if recovery else None)
     state = read_result_import_state(permanent_storage_path) if recovery else None
@@ -4265,7 +4293,7 @@ def _process_importer_workflow_locked(
             logger.error(f"Some imports failed: {failed_uuids}")
             message += f"\nSome imports failed for UUIDs: {failed_uuids}"
             retry_advice = (
-                "Retry finalization with recovery enabled to resume these orders. "
+                "Retry finalization on supported storage to resume these orders. "
                 if recovery else "Review existing orders before retrying. "
             )
             raise RuntimeError(

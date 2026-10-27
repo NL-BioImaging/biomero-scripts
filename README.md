@@ -155,15 +155,13 @@ confirmed complete. An import failure, polling timeout or lost database
 connection fails the script and preserves the Slurm results, downloaded archive
 and staged files. Requested cleanup runs only after successful finalization.
 
-Durable recovery is a separate opt-in: set `BIOMERO_RESULT_RECOVERY=true` on the
-workflow worker and importer. Missing, empty or false leaves it disabled, even
-when shallow storage is enabled. The default path adds no filesystem locks,
-recovery records, directory synchronization or recovery database lookups. Failure
-reporting, database acknowledgement and preservation of failed results remain
-active in both modes. Without recovery, review prior orders before retrying an
-import: automatic reuse of order IDs is unavailable.
+Recovery is automatic on compatible storage; no additional feature flag is
+needed. Before preparing an import, the script acquires a filesystem lock and
+tests durable writes using disposable metadata in the same directory. The check
+covers file synchronization, replacement of an existing file and POSIX directory
+synchronization. It does not read or copy image pixels.
 
-When enabled on compatible storage, each new workflow-result import plan creates one small
+On compatible storage, each new workflow-result import plan creates one small
 `.biomero-result-import.json` in its staged result directory. It saves the
 destination, rename mapping, options and order UUIDs before queueing any imports.
 It does not create a record per image, hash pixels, scan historical OMERO objects
@@ -171,15 +169,19 @@ or migrate already-imported data. Rerun **Import Results** for the same workflow
 with the same import settings to resume those orders. Pending orders are polled;
 completed orders are reused without registering their images again. Concurrent
 finalizers are rejected using filesystem locks, which are released on process
-exit. Opt-in storage must support locks across worker processes, atomic file
+exit. Recovery storage must support locks across worker processes, atomic file
 replacement, file synchronization and (on POSIX) directory synchronization.
 
-If lock acquisition explicitly reports that locking is unsupported, a fresh
-attempt uses the legacy import path and logs that saved-order recovery and
-concurrency protection are unavailable. This fallback happens before saving
-an import plan or submitting orders. It does not apply to busy locks, permission
-errors, storage outages or failures after recovery has begun. An existing recovery
-record requires working locks; it cannot be bypassed through this fallback.
+If the preflight explicitly reports an unsupported lock or durable-write
+operation, a fresh attempt uses the legacy import path and logs that saved-order
+recovery is unavailable. This fallback happens before preparing a destination,
+renaming results or submitting orders. It adds no recovery-record writes or
+recovery database lookups. File/directory synchronization rejected with `EINVAL` also
+uses this fallback. Busy locks, permission errors, disk-full errors, storage
+outages and failures after recovery has begun do not fall back. An existing
+recovery record requires supported storage; it cannot be bypassed. Without
+recovery, review prior orders before retrying. Failure reporting, database
+acknowledgement and preservation of failed results remain active in both paths.
 
 An order marked failed can already contain partial OMERO registrations. Retrying
 does not automatically submit a replacement: review its order UUID, importer log
@@ -187,8 +189,7 @@ and destination objects first. Interrupted preparation (renaming or destination
 creation), unreadable recovery records, changed settings and older staged imports
 with orders but no recovery record also require review. Preserve the record and
 files; deleting the record to bypass the check can create duplicate imports.
-Disabling recovery does not bypass a saved plan: re-enable it to resume that
-attempt safely. Historical imports are inspected only when explicitly retried.
+Historical imports are inspected only when explicitly retried.
 This protects image registration; it does not make optional ROI creation and
 attachment postprocessing exactly-once operations.
 
