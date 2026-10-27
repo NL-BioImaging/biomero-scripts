@@ -50,6 +50,10 @@ Detached execution and shallow storage are opt-in for existing deployments:
 missing or false feature flags leave them disabled. Within enabled shallow
 storage, remote normalization is preferred; set `BIOMERO_REMOTE_SHALLOW_ZARR=false`
 to use importer-side normalization. NL-BIOMERO's demo enables these features.
+Slurm Init acquires the remote shallower image only when `IMPORTER_ENABLED`,
+`BIOMERO_SHALLOW_ZARR` and the remote preference are all enabled. Disabling new
+shallowing preserves reconstruction of existing shallow inputs; their source
+stores and reconstruction dependencies must remain available.
 
 Canonical indexing records the backing store's actual OME-Zarr profile: 0.4/v2
 or 0.5/v3. Existing v2 stores are reused as v2, and importing an existing v3
@@ -147,6 +151,61 @@ does not expose later evidence by itself. See
 [metadata administration](https://nl-bioimaging.github.io/NL-BIOMERO/master/sysadmin/metadata-refresh.html)
 for backup and refresh controls. Recording evidence and refreshing maps are two
 separate steps. If refresh fails, retry it; repeating the backfill is also safe.
+
+## Result import failures and retries
+
+Importer-enabled finalization succeeds only when every image import order is
+confirmed complete. An import failure, polling timeout or lost database
+connection fails the script and preserves the Slurm results, downloaded archive
+and staged files. Requested cleanup runs only after successful finalization.
+
+Recovery is automatic on compatible storage; no additional feature flag is
+needed. Before preparing an import, the script acquires a filesystem lock and
+tests durable writes using disposable metadata in the same directory. The check
+covers file synchronization, replacement of an existing file and POSIX directory
+synchronization. It does not read or copy image pixels.
+
+This protects importer-enabled result orders, including full Zarr and TIFF
+results, independently of detached execution and shallow storage. It does not
+enable either feature. Importer-side shallow transaction recovery runs only for
+an explicitly requested shallow operation with `BIOMERO_SHALLOW_ZARR=true`;
+ordinary import orders do not enter that lifecycle.
+
+On compatible storage, each new workflow-result import plan creates one small
+`.biomero-result-import.json` in its staged result directory. It saves the
+destination, rename mapping, options and order UUIDs before queueing any imports.
+It does not create a record per image, hash pixels, scan historical OMERO objects
+or migrate already-imported data. Rerun **Import Results** for the same workflow/job
+with the same import settings to resume those orders. Pending orders are polled;
+completed orders are reused without registering their images again. Concurrent
+finalizers are rejected using filesystem locks, which are released on process
+exit. Recovery storage must support locks across worker processes, atomic file
+replacement, file synchronization and (on POSIX) directory synchronization.
+
+If the preflight explicitly reports an unsupported lock or durable-write
+operation, a fresh attempt uses the legacy import path and logs that saved-order
+recovery is unavailable. This fallback happens before preparing a destination,
+renaming results or submitting orders. It adds no recovery-record writes or
+recovery database lookups. File/directory synchronization rejected with `EINVAL` also
+uses this fallback. Busy locks, permission errors, disk-full errors, storage
+outages and failures after recovery has begun do not fall back. An existing
+recovery record requires supported storage; it cannot be bypassed. Without
+recovery, review prior orders before retrying. Failure reporting, database
+acknowledgement and preservation of failed results remain active in both paths.
+
+An order marked failed can already contain partial OMERO registrations. Retrying
+does not automatically submit a replacement: review its order UUID, importer log
+and destination objects first. Interrupted preparation (renaming or destination
+creation), unreadable recovery records, changed settings and older staged imports
+with orders but no recovery record also require review. Preserve the record and
+files; deleting the record to bypass the check can create duplicate imports.
+Historical imports are inspected only when explicitly retried.
+This protects image registration; it does not make optional ROI creation and
+attachment postprocessing exactly-once operations.
+
+Use an importer release that checks database write acknowledgement and recovers
+interrupted shallow transactions before reading a store. These recovery changes
+support v2 and v3 and do not change canonical-store format or identity policy.
 
 ## Development
 
