@@ -145,7 +145,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b16"
+VERSION = "2.9.0b17"
 BIOMERO_CONFIG_FILE = os.getenv(
     "OMERO_BIOMERO_CONFIG_FILE",
     os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
@@ -335,6 +335,10 @@ def get_shallow_plate_reference(plate):
 
 def canonical_plate_source_from_collection(collection, managed_labels):
     """Restore one Plate snapshot using managed labels from materialization."""
+    # Schema 2 separates the scientific graph from its canonical bindings.
+    # Retain the older materializer's combined collection representation too.
+    manifest = collection if hasattr(collection, "bindings") else None
+    graph = manifest.collection if manifest is not None else collection
     managed_labels = tuple(managed_labels)
     labels_by_path = {
         label.logical_node_path: label for label in managed_labels
@@ -343,19 +347,30 @@ def canonical_plate_source_from_collection(collection, managed_labels):
         raise ValueError("Materialized Plate label paths are ambiguous")
     images = []
     expected_paths = set()
-    for image in collection.images:
-        expected_paths.update(image.label_node_paths)
+    for image in graph.images:
+        if manifest is not None:
+            image_path = image.node_path
+            source = manifest.image_binding(image.node_id).source
+            label_paths = tuple(
+                label.node_path for label in graph.labels
+                if label.source_image_id == image.node_id
+            )
+        else:
+            image_path = image.image_node_path
+            source = image.source
+            label_paths = image.label_node_paths
+        expected_paths.update(label_paths)
         labels = tuple(
-            labels_by_path[path] for path in image.label_node_paths
+            labels_by_path[path] for path in label_paths
             if path in labels_by_path
         )
-        if len(labels) != len(image.label_node_paths):
+        if len(labels) != len(label_paths):
             raise ValueError(
-                f"Materialized Plate lost labels for image {image.image_node_path}"
+                f"Materialized Plate lost labels for image {image_path}"
             )
         images.append(CanonicalPlateImage(
-            image_node_path=image.image_node_path,
-            source=image.source,
+            image_node_path=image_path,
+            source=source,
             labels=labels,
         ))
     if set(labels_by_path) != expected_paths:
@@ -2306,8 +2321,9 @@ def save_as_zarr(
             storage_roots or {},
         )
         if isinstance(shallow_reference, ShallowPlateReference):
+            manifest = getattr(materialized, "manifest", None)
             canonical_source = canonical_plate_source_from_collection(
-                materialized.collection,
+                manifest if manifest is not None else materialized.collection,
                 materialized.labels,
             )
             logger.info(

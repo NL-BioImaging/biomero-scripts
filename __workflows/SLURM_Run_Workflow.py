@@ -102,7 +102,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
-VERSION = "2.9.0b16"
+VERSION = "2.9.0b17"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 

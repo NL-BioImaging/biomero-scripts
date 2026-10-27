@@ -50,7 +50,7 @@ CONV_OPTIONS_SOURCE = ['zarr']
 CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 
 # Version constant for easy version management
-VERSION = "2.9.0b16"
+VERSION = "2.9.0b17"
 
 
 def resolve_log_fallback_target(client, conn):

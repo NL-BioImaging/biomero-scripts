@@ -321,7 +321,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b16"
+VERSION = "2.9.0b17"
 
 
 def load_canonical_input_snapshot(slurm_client, workflow_id):
@@ -2205,14 +2205,8 @@ def extract_slurm_results_zip(
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        zip_size = os.path.getsize(temporary_zip_file_path)
-        if zip_size < 1024:  # Less than 1KB
-            error_msg = (f"SLURM transfer failed: Zip file is too small ({zip_size} bytes), indicating no meaningful data was transferred. "
-                         f"This usually means the original image export failed - check SLURM_Image_Transfer logs for errors.")
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        # Validate zip can be opened and contains files
+        # Small or highly compressible results can form a valid sub-KB ZIP.
+        # Validate its contents instead of imposing a compressed-size minimum.
         try:
             with zipfile.ZipFile(temporary_zip_file_path, 'r') as zip_ref:
                 file_list = zip_ref.namelist()
