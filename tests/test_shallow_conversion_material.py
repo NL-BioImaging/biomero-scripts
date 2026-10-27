@@ -1,4 +1,5 @@
 import ast
+import json
 import logging
 import os
 from pathlib import Path
@@ -13,6 +14,9 @@ SOURCE_ROOT = Path(os.environ.get(
 ))
 TRANSFER_PATH = SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py"
 RUNNER_PATH = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
+FORMAT_ROUTING_AVAILABLE = "def is_legacy_tiff_conversion_source(" in TRANSFER_PATH.read_text(encoding="utf-8")
+requires_format_routing = pytest.mark.skipif(
+    not FORMAT_ROUTING_AVAILABLE, reason="Requires workflow format-routing source change")
 
 
 class ImageObject:
@@ -32,10 +36,9 @@ def load_save_as_zarr(
     restore_available=True,
 ):
     tree = ast.parse(TRANSFER_PATH.read_text(encoding="utf-8"))
-    function = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "save_as_zarr"
-    )
+    functions = [node for node in tree.body
+                 if isinstance(node, ast.FunctionDef) and node.name in {
+                     "save_as_zarr", "is_legacy_tiff_conversion_source"}]
     commands = []
     materializations = []
     promotions = []
@@ -76,7 +79,9 @@ def load_save_as_zarr(
         "constants": SimpleNamespace(transfer=SimpleNamespace(
             DATA_TYPE_IMAGE="Image",
             DATA_TYPE_PLATE="Plate",
+            OME_ZARR_VERSION_0_4="0.4",
         )),
+        "json": json,
         "get_shallow_plate_reference": lambda _obj: shallow_reference,
         "get_shallow_reference": lambda _obj: shallow_reference,
         "log": lambda _message: None,
@@ -102,7 +107,7 @@ def load_save_as_zarr(
             Popen=Process,
         ),
     }
-    exec(compile(ast.Module(body=[function], type_ignores=[]),
+    exec(compile(ast.Module(body=functions, type_ignores=[]),
                  str(TRANSFER_PATH), "exec"), namespace)
     return (
         namespace["save_as_zarr"],
@@ -275,7 +280,8 @@ def test_existing_shallow_fails_clearly_without_restore_support(
         )
 
 
-def test_plate_cannot_enter_selected_pixel_conversion_mode(
+@requires_format_routing
+def test_tiff_bound_shallow_plate_exports_selected_pixels_as_v2(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -305,13 +311,95 @@ def test_plate_cannot_enter_selected_pixel_conversion_mode(
         reconstruct_shallow_zarr=False,
     )
 
-    assert source is plate_source
+    assert source is None
     assert artifact == "nuclei-mask.zarr"
-    assert labels == ("managed-label",)
-    assert len(materializations) == 1
-    assert commands == []
+    assert labels == ()
+    assert materializations == []
+    assert len(commands) == 1
+    assert "--format 0.4" in commands[0]
+    assert "Plate:42" in commands[0]
     assert promotions == []
     assert selections == []
+
+
+@requires_format_routing
+@pytest.mark.parametrize("shallow_enabled", [False, True])
+@pytest.mark.parametrize("data_type", ["Image", "Plate"])
+@pytest.mark.parametrize("requested", ["0.4", "0.5"])
+def test_v3_source_for_tiff_is_exported_as_temporary_v2(
+    tmp_path, monkeypatch, data_type, requested, shallow_enabled,
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "batch").mkdir()
+    reusable = tmp_path / "canonical.zarr"
+    reusable.mkdir()
+    (reusable / "zarr.json").write_text(
+        json.dumps({"zarr_format": 3, "node_type": "group"}))
+    (reusable / "pixels").write_bytes(b"original pixels")
+    before = {p.name: p.read_bytes() for p in reusable.iterdir()}
+    canonical = object()
+    save, commands, materializations, promotions, _selections, _plate = (
+        load_save_as_zarr(tmp_path, shallow_reference=None,
+                          reusable_path=reusable))
+    direct_sources = {}
+
+    source, _artifact, labels = save(
+        SimpleNamespace(host="omero"), "session", ImageObject(), "batch",
+        data_type, requested, canonical_source=canonical,
+        storage_roots={"group-0-data": tmp_path}, shallow_zarr_storage=shallow_enabled,
+        reconstruct_shallow_zarr=False,
+        direct_directory_sources=direct_sources,
+    )
+
+    assert len(commands) == 1
+    assert "--format 0.4" in commands[0]
+    assert source is None
+    assert labels == ()
+    assert direct_sources == {}
+    assert materializations == promotions == []
+    assert {p.name: p.read_bytes() for p in reusable.iterdir()} == before
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_zarr_workflow_reuses_existing_format_with_new_default(
+    tmp_path, monkeypatch, version,
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "batch").mkdir()
+    reusable = tmp_path / "canonical.zarr"
+    reusable.mkdir()
+    metadata = "zarr.json" if version == 3 else ".zgroup"
+    (reusable / metadata).write_text(json.dumps({"zarr_format": version}))
+    canonical = object()
+    save, commands, _materializations, promotions, _selections, _plate = (
+        load_save_as_zarr(tmp_path, shallow_reference=None,
+                          reusable_path=reusable))
+    source, artifact, _labels = save(
+        SimpleNamespace(host="omero"), "session", ImageObject(), "batch",
+        "Image", "0.5", canonical_source=canonical,
+        shallow_zarr_storage=True, reconstruct_shallow_zarr=True,
+    )
+    assert source is canonical
+    assert commands == promotions == []
+    assert (tmp_path / "batch" / artifact / metadata).is_file()
+
+
+@requires_format_routing
+def test_fresh_tiff_input_ignores_v3_request_and_is_not_promoted(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "batch").mkdir()
+    save, commands, _materializations, promotions, _selections, _plate = (
+        load_save_as_zarr(tmp_path, shallow_reference=None))
+    source, _artifact, _labels = save(
+        SimpleNamespace(host="omero"), "session", ImageObject(), "batch",
+        "Image", "0.5", shallow_zarr_storage=True,
+        reconstruct_shallow_zarr=False,
+    )
+    assert "--format 0.4" in commands[0]
+    assert source is None
+    assert promotions == []
 
 
 def test_workflow_forwards_zarr_preference_as_reconstruction_policy():
