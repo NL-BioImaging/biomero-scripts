@@ -1,2 +1,3 @@
 pytest>=8,<9
 biomero-schema>=0.3.0b1,<0.4
+biomero-shallower>=0.1.0b6,<0.2
