@@ -132,7 +132,8 @@ def test_disabled_shallow_path_does_not_request_importer_operation(disabled_gate
     )
 
     # No constructors or canonical-store access should be needed on this path.
-    assert build_options(None) is None
+    manifest = SimpleNamespace(inputs=(object(),))
+    assert build_options(manifest) is None
 
 
 def test_lifecycle_path_selection_prunes_nested_label_zarrs(tmp_path):
