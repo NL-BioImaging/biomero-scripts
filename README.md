@@ -50,6 +50,10 @@ Detached execution and shallow storage are opt-in for existing deployments:
 missing or false feature flags leave them disabled. Within enabled shallow
 storage, remote normalization is preferred; set `BIOMERO_REMOTE_SHALLOW_ZARR=false`
 to use importer-side normalization. NL-BIOMERO's demo enables these features.
+Slurm Init acquires the remote shallower image only when `IMPORTER_ENABLED`,
+`BIOMERO_SHALLOW_ZARR` and the remote preference are all enabled. Disabling new
+shallowing preserves reconstruction of existing shallow inputs; their source
+stores and reconstruction dependencies must remain available.
 
 Canonical indexing records the backing store's actual OME-Zarr profile: 0.4/v2
 or 0.5/v3. Existing v2 stores are reused as v2, and importing an existing v3
@@ -160,6 +164,12 @@ needed. Before preparing an import, the script acquires a filesystem lock and
 tests durable writes using disposable metadata in the same directory. The check
 covers file synchronization, replacement of an existing file and POSIX directory
 synchronization. It does not read or copy image pixels.
+
+This protects importer-enabled result orders, including full Zarr and TIFF
+results, independently of detached execution and shallow storage. It does not
+enable either feature. Importer-side shallow transaction recovery runs only for
+an explicitly requested shallow operation with `BIOMERO_SHALLOW_ZARR=true`;
+ordinary import orders do not enter that lifecycle.
 
 On compatible storage, each new workflow-result import plan creates one small
 `.biomero-result-import.json` in its staged result directory. It saves the
