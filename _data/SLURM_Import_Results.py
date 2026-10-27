@@ -84,6 +84,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager, ExitStack
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -111,6 +112,7 @@ USE_INPLACE_ATTACHMENTS = os.getenv("USE_INPLACE_ATTACHMENTS", "true").lower() =
 logger = logging.getLogger(__name__)
 
 RESULTS_RETRIEVED_MARKER = ".biomero-results-retrieved.json"
+RESULT_IMPORT_STATE = ".biomero-result-import.json"
 IMPORT_POLL_TIMEOUT_SECONDS = 24 * 60 * 60
 IMPORT_POLL_INTERVAL_SECONDS = 5
 IMPORT_POLL_BACKOFF_AFTER_SECONDS = 60
@@ -2555,10 +2557,12 @@ def create_upload_order(order_dict: Dict[str, Any]) -> None:
                 raise RuntimeError(
                     "Importer lifecycle order API is not available"
                 )
-            submit_import_order(order_dict)
+            if submit_import_order(order_dict) != str(order_dict["UUID"]):
+                raise RuntimeError("Importer did not acknowledge the upload order")
         else:
             # Preserve the established database writer for legacy importers.
-            log_ingestion_step(order_dict, STAGE_NEW_ORDER)
+            if not log_ingestion_step(order_dict, STAGE_NEW_ORDER):
+                raise RuntimeError("Could not persist the upload order")
         logger.info(f"Created upload order: {order_dict['UUID']}")
     except Exception as e:
         logger.error(f"Failed to create upload order: {e}")
@@ -2777,8 +2781,12 @@ def create_upload_orders_for_results(
     client: Any = None,
     canonical_inputs=None,
     remote_receipts=(),
+    submit=True,
 ) -> List[Dict[str, Any]]:
-    """Create upload orders for SLURM results (images and optionally label zarrs).
+    """Build orders for SLURM results (images and optionally label zarrs).
+
+    With ``submit=False``, return the complete plan without enqueueing it.
+    Finalization persists this plan before submitting any of its orders.
 
     Args:
         group_name: OMERO group name.
@@ -2824,9 +2832,10 @@ def create_upload_orders_for_results(
             "wf_id": wf_id,
             "source": "SLURM_Results_Lifecycle",
         }
-        create_upload_order(order)
+        if submit:
+            create_upload_order(order)
         logger.info(
-            "Handed %s result path(s) to BIOMERO.importer for asynchronous "
+            "Prepared %s result path(s) for BIOMERO.importer asynchronous "
             "shallow evaluation, normalization, and registration planning",
             len(image_files),
         )
@@ -2871,7 +2880,8 @@ def create_upload_orders_for_results(
             "wf_id": wf_id,
             "source": "SLURM_Results"
         }
-        create_upload_order(image_order)
+        if submit:
+            create_upload_order(image_order)
         orders.append(image_order)
         logger.info(f"Created image upload order for {len(image_files)} files")
     elif image_files and skip_main_images:
@@ -2890,7 +2900,8 @@ def create_upload_orders_for_results(
             "wf_id": wf_id,
             "source": "SLURM_Results_Labels"
         }
-        create_upload_order(label_order)
+        if submit:
+            create_upload_order(label_order)
         orders.append(label_order)
         logger.info(f"Created label zarr upload order for {len(label_zarr_files)} label zarr directories")
     elif import_label_zarrs:
@@ -3793,7 +3804,186 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
     return status
 
 
-def process_importer_workflow(
+class ResultFinalizationBusy(RuntimeError):
+    """A competing finalizer must not change the active task's status."""
+
+
+@contextmanager
+def acquire_result_import_lock(results_path, name=".biomero-result-import.lock"):
+    """Serialize finalization; kernel locks are released if a worker dies."""
+    root = Path(results_path)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / name).open("a+b") as stream:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                stream.write(b"0")
+                stream.flush()
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ResultFinalizationBusy(
+                "Result finalization is already running or its lock is "
+                "unavailable; no new import was submitted"
+            ) from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def write_result_import_state(results_path, state):
+    """Commit the order plan before submitting anything to the importer."""
+    root = Path(results_path)
+    temporary = root / f"{RESULT_IMPORT_STATE}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(state, stream, indent=2, sort_keys=True, default=str)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, root / RESULT_IMPORT_STATE)
+        if os.name != "nt":
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_result_import_state(results_path):
+    path = Path(results_path) / RESULT_IMPORT_STATE
+    if not path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(state, dict) or state.get("schema") != 1
+                or not isinstance(state.get("request"), dict)):
+            raise ValueError("Unsupported recovery record")
+        if state.get("phase") not in ("orders-ready", "registered"):
+            raise ValueError("Preparation was interrupted before orders were saved")
+        if not isinstance(state.get("orders"), list) or not state["orders"]:
+            raise ValueError("Missing saved import orders")
+        if not isinstance(state.get("rename_map"), dict):
+            raise ValueError("Missing rename mapping")
+        destination = state["destination"]
+        if (destination["type"] not in ("Dataset", "Screen")
+                or int(destination["id"]) <= 0):
+            raise ValueError("Invalid saved destination")
+        seen = set()
+        for order in state["orders"]:
+            ident = str(UUID(order["UUID"]))
+            if ident in seen:
+                raise ValueError("Duplicate saved order")
+            seen.add(ident)
+            if (order["Group"] != state["request"]["group"]
+                    or order["Username"] != state["request"]["user"]
+                    or str(order["wf_id"]) != state["request"]["workflow"]
+                    or order["DestinationType"] != destination["type"]
+                    or int(order["DestinationID"]) != int(destination["id"])
+                    or not isinstance(order["Files"], list) or not order["Files"]):
+                raise ValueError("Saved order does not match its destination")
+            for filename in order["Files"]:
+                Path(filename).resolve().relative_to(Path(results_path).resolve())
+        return state
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Result import recovery record needs review: {path}. "
+            "Files and existing registrations were preserved; no new orders "
+            "will be submitted."
+        ) from exc
+
+
+def result_import_request(client, group_name, username, wf_id, job_id):
+    settings = (
+        "OUTPUT_ATTACH_NEW_DATASET", "OUTPUT_ATTACH_NEW_SCREEN",
+        "OUTPUT_ATTACH_NEW_DATASET_NAME", "OUTPUT_ATTACH_NEW_SCREEN_NAME",
+        "OUTPUT_ATTACH_NEW_DATASET_ID", "OUTPUT_ATTACH_NEW_SCREEN_ID",
+        "OUTPUT_ATTACH_NEW_DATASET_DUPLICATE", "OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE",
+        "OUTPUT_ATTACH_NEW_DATASET_RENAME", "OUTPUT_ATTACH_NEW_DATASET_RENAME_NAME",
+        "IMPORT_LABEL_ZARRS", "IMPORT_ONLY_LABELS",
+        "IMPORT_PLATE_LABEL_PREVIEW", "PLATE_LABEL_PREVIEW_NAME",
+    )
+    values = {name: unwrap(client.getInput(getattr(constants.results, name)))
+              for name in settings if hasattr(constants.results, name)}
+    return {"group": group_name, "user": username, "workflow": str(wf_id),
+            "job": str(job_id), "settings": values}
+
+
+def get_existing_import_order(order_id):
+    """Read the original committed order; uncertainty must stop a retry."""
+    tracker = get_ingest_tracker()
+    if tracker is None:
+        raise RuntimeError("Importer database unavailable; cannot safely resume")
+    with tracker.Session() as session:
+        entry = session.query(IngestionTracking).filter(
+            IngestionTracking.uuid == str(order_id)
+        ).order_by(IngestionTracking.id.asc()).first()
+        if entry is None:
+            return None
+        return {"UUID": entry.uuid, "Group": entry.group_name,
+                "Username": entry.user_name, "DestinationID": entry.destination_id,
+                "DestinationType": entry.destination_type, "Files": entry.files,
+                "ImportOptions": entry.import_options}
+
+
+def find_previous_result_import_orders(results_path, group_name, username):
+    """Do not unknowingly duplicate an older import without a recovery record."""
+    tracker = get_ingest_tracker()
+    if tracker is None:
+        raise RuntimeError("Importer database unavailable; cannot safely submit")
+    root = Path(results_path).resolve()
+    with tracker.Session() as session:
+        entries = session.query(IngestionTracking).filter(
+            IngestionTracking.group_name == group_name,
+            IngestionTracking.user_name == username,
+            IngestionTracking._files.contains(
+                json.dumps(str(root))[1:-1], autoescape=True),
+        ).all()
+        return sorted({entry.uuid for entry in entries
+                       if any(root == Path(filename).resolve()
+                              or root in Path(filename).resolve().parents
+                              for filename in entry.files)})
+
+
+def ensure_result_import_orders(orders, *, allow_submit=True):
+    for order in orders:
+        existing = get_existing_import_order(order["UUID"])
+        if existing is None:
+            if not allow_submit:
+                raise RuntimeError(
+                    f"Completed import order {order['UUID']} is missing from "
+                    "the database; review registrations before retrying")
+            create_upload_order(order)
+            continue
+        fields = ("UUID", "Group", "Username", "DestinationType", "Files")
+        if (any(existing.get(key) != order.get(key) for key in fields)
+                or str(existing.get("DestinationID")) != str(order["DestinationID"])
+                or (existing.get("ImportOptions") or {}) != (order.get("ImportOptions") or {})):
+            raise RuntimeError(
+                f"Saved import settings conflict with order {order['UUID']}; "
+                "no replacement order was submitted")
+        logger.info("Resuming existing import order %s", order["UUID"])
+
+
+def process_importer_workflow(*args, **kwargs):
+    results_path = kwargs.get("permanent_storage_path")
+    if results_path is None:
+        results_path = args[6]
+    with acquire_result_import_lock(results_path):
+        return _process_importer_workflow_locked(*args, **kwargs)
+
+
+def _process_importer_workflow_locked(
     client: Any,
     conn: BlitzGateway,
     slurmClient: SlurmClient,
@@ -3833,112 +4023,152 @@ def process_importer_workflow(
     og_name_map: Dict[str, str] = {}
     logger.info("Processing importer workflow...")
 
-    # Determine destination type (dataset or screen)
-    use_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET))
-    use_screen = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN))
+    request = result_import_request(
+        client, group_name, username, wf_id, slurm_job_id)
+    state = read_result_import_state(permanent_storage_path)
+    if state is not None:
+        if state["request"] != request:
+            raise RuntimeError(
+                "Import settings differ from the saved attempt; existing "
+                "orders and result files were preserved")
+        destination_type = state["destination"]["type"]
+        destination_id = state["destination"]["id"]
+        destination_wrapper = conn.getObject(destination_type, destination_id)
+        if destination_wrapper is None:
+            raise RuntimeError("Saved import destination is unavailable")
+        og_name_map = state["rename_map"]
+        orders = state["orders"]
+    else:
+        previous = find_previous_result_import_orders(
+            permanent_storage_path, group_name, username)
+        if previous:
+            raise RuntimeError(
+                "These staged results already have importer orders but no "
+                "recovery record. Review existing registrations before retrying: "
+                + ", ".join(previous))
+        # A crash during renaming or OMERO destination creation is ambiguous.
+        # Preserve that fact instead of repeating those side effects blindly.
+        write_result_import_state(permanent_storage_path, {
+            "schema": 1, "phase": "preparing", "request": request})
+        # Determine destination type (dataset or screen)
+        use_dataset = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET))
+        use_screen = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN))
     
-    if use_dataset and use_screen:
-        logger.warning("Both dataset and screen output selected - using dataset")
-        use_screen = False
-    elif not use_dataset and not use_screen:
-        logger.error("Neither dataset nor screen output selected")
-        return "Error: No valid destination type selected", {}, None
+        if use_dataset and use_screen:
+            logger.warning("Both dataset and screen output selected - using dataset")
+            use_screen = False
+        elif not use_dataset and not use_screen:
+            logger.error("Neither dataset nor screen output selected")
+            raise RuntimeError("No valid import destination type selected")
     
-    destination_type = "Screen" if use_screen else "Dataset"
-    logger.info(f"Selected destination type: {destination_type}")
+        destination_type = "Screen" if use_screen else "Dataset"
+        logger.info(f"Selected destination type: {destination_type}")
 
-    # Handle file renaming if enabled (only for datasets, skip for screens)
-    if use_dataset:
-        rename_enabled = unwrap(client.getInput(
-            constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
+        # Handle file renaming if enabled (only for datasets, skip for screens)
+        if use_dataset:
+            rename_enabled = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_DATASET_RENAME))
 
-        if rename_enabled:
-            logger.info("Renaming files in importer storage...")
-            rename_message, og_name_map = rename_files_in_importer_storage(client,
-                                                                            permanent_storage_path)
-            message += rename_message
-            logger.info("File renaming completed")
+            if rename_enabled:
+                logger.info("Renaming files in importer storage...")
+                rename_message, og_name_map = rename_files_in_importer_storage(client,
+                                                                                permanent_storage_path)
+                message += rename_message
+                logger.info("File renaming completed")
+            else:
+                og_name_map = {}
+                logger.info("Skipping file renaming (not enabled)")
         else:
             og_name_map = {}
-            logger.info("Skipping file renaming (not enabled)")
-    else:
-        og_name_map = {}
-        logger.info("Skipping file renaming for screen destination")
+            logger.info("Skipping file renaming for screen destination")
 
-    # Get destination info from parameters
-    if use_screen:
-        destination_name = unwrap(client.getInput(
-            constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME))
-        create_new_destination = unwrap(client.getInput(
-            constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE))
-        explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
-    else:
-        destination_name = unwrap(client.getInput(
-            constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
-        create_new_destination = unwrap(client.getInput(
-            constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
-        explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
-    
-    logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
-    destination_id = None
-    destination_wrapper = None
-
-    # If an explicit ID is provided, use it directly — skip name lookup entirely
-    if explicit_destination_id:
-        destination_id = int(explicit_destination_id)
-        create_new_destination = False
-        logger.info(
-            f"Using explicit {destination_type}_ID: {destination_id} (skipping name lookup)")
-    # Check if destination exists or create new one
-    elif not create_new_destination:
-        try:
-            existing_objects_w_name = [d.id for d in conn.getObjects(
-                destination_type, attributes={"name": destination_name})]
-            if existing_objects_w_name:
-                destination_id = existing_objects_w_name[0]
-                create_new_destination = False
-                logger.info(f"Using existing {destination_type.lower()} ID: {destination_id}")
-            else:
-                create_new_destination = True
-                logger.info(f"{destination_type} not found, will create new one")
-        except Exception:
-            create_new_destination = True
-            logger.info(
-                f"Error checking for existing {destination_type.lower()}, will create new one")
-
-    if create_new_destination:
-        logger.info(f"Creating new {destination_type.lower()}...")
+        # Get destination info from parameters
         if use_screen:
-            destination_obj = omero.model.ScreenI()
+            destination_name = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_SCREEN_NAME))
+            create_new_destination = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_SCREEN_DUPLICATE))
+            explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID))
         else:
-            destination_obj = omero.model.DatasetI()
-        
-        destination_obj.name = rstring(destination_name)
-        desc = f"Images from SLURM job {slurm_job_id}"
-        if wf_id:
-            desc += f" (Workflow {wf_id})"
-        destination_obj.description = rstring(desc)
-        update_service = conn.getUpdateService()
-        destination_obj = update_service.saveAndReturnObject(destination_obj)
-        destination_id = destination_obj.id.val
-        logger.info(f"Created new {destination_type.lower()} ID: {destination_id}")
+            destination_name = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_DATASET_NAME))
+            create_new_destination = unwrap(client.getInput(
+                constants.results.OUTPUT_ATTACH_NEW_DATASET_DUPLICATE))
+            explicit_destination_id = unwrap(client.getInput(constants.results.OUTPUT_ATTACH_NEW_DATASET_ID))
 
-    destination_wrapper = conn.getObject(destination_type, destination_id)
+        logger.info(f"Setting up {destination_type.lower()} '{destination_name}'...")
+        destination_id = None
+        destination_wrapper = None
+
+        # If an explicit ID is provided, use it directly — skip name lookup entirely
+        if explicit_destination_id:
+            destination_id = int(explicit_destination_id)
+            create_new_destination = False
+            logger.info(
+                f"Using explicit {destination_type}_ID: {destination_id} (skipping name lookup)")
+        # Check if destination exists or create new one
+        elif not create_new_destination:
+            try:
+                existing_objects_w_name = [d.id for d in conn.getObjects(
+                    destination_type, attributes={"name": destination_name})]
+                if existing_objects_w_name:
+                    destination_id = existing_objects_w_name[0]
+                    create_new_destination = False
+                    logger.info(f"Using existing {destination_type.lower()} ID: {destination_id}")
+                else:
+                    create_new_destination = True
+                    logger.info(f"{destination_type} not found, will create new one")
+            except Exception:
+                logger.error("Cannot resolve existing import destination")
+                raise
+
+        if create_new_destination:
+            logger.info(f"Creating new {destination_type.lower()}...")
+            if use_screen:
+                destination_obj = omero.model.ScreenI()
+            else:
+                destination_obj = omero.model.DatasetI()
+
+            destination_obj.name = rstring(destination_name)
+            desc = f"Images from SLURM job {slurm_job_id}"
+            if wf_id:
+                desc += f" (Workflow {wf_id})"
+            destination_obj.description = rstring(desc)
+            update_service = conn.getUpdateService()
+            destination_obj = update_service.saveAndReturnObject(destination_obj)
+            destination_id = destination_obj.id.val
+            logger.info(f"Created new {destination_type.lower()} ID: {destination_id}")
+        
+        destination_wrapper = conn.getObject(destination_type, destination_id)
+        if destination_wrapper is None:
+            raise RuntimeError("Import destination is unavailable")
+
+        # Create upload order for images only
+        logger.info("Creating upload orders for biomero-importer...")
+        remote_receipts = ()
+        if getattr(slurmClient, "remote_shallow_zarr", False) and canonical_inputs is not None:
+            remote_receipts = slurmClient.get_remote_shallower_receipts(wf_id, canonical_inputs)
+        orders = create_upload_orders_for_results(
+            group_name, username, destination_type, destination_id,
+            permanent_storage_path, wf_id, client, canonical_inputs,
+            submit=False,
+            **({"remote_receipts": remote_receipts} if remote_receipts else {}))
+
+        if not orders:
+            raise RuntimeError(
+                "No image files found for importer processing; results preserved")
+        state = {
+            "schema": 1, "phase": "orders-ready", "request": request,
+            "destination": {"type": destination_type, "id": destination_id},
+            "rename_map": og_name_map, "orders": orders,
+        }
+        write_result_import_state(permanent_storage_path, state)
     if provenance_targets is not None and destination_type.lower() == "dataset":
         provenance_targets.append(destination_wrapper)
-
-    # Create upload order for images only
-    logger.info("Creating upload orders for biomero-importer...")
-    remote_receipts = ()
-    if getattr(slurmClient, "remote_shallow_zarr", False) and canonical_inputs is not None:
-        remote_receipts = slurmClient.get_remote_shallower_receipts(wf_id, canonical_inputs)
-    orders = create_upload_orders_for_results(
-        group_name, username, destination_type, destination_id,
-        permanent_storage_path, wf_id, client, canonical_inputs,
-        **({"remote_receipts": remote_receipts} if remote_receipts else {}))
+    ensure_result_import_orders(orders, allow_submit=state["phase"] != "registered")
 
     if orders:
-        message += f"\nCreated {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
+        message += f"\nUsing {len(orders)} upload orders for biomero-importer ({destination_type.lower()}):"
         for order in orders:
             file_count = len(order.get('Files', []))
             message += f"\n  - Order {order['UUID']}: {file_count} files"
@@ -3958,6 +4188,8 @@ def process_importer_workflow(
         message += f"\n{summary}"
 
         if all_successful:
+            state["phase"] = "registered"
+            write_result_import_state(permanent_storage_path, state)
             logger.info("All imports completed successfully")
             message += f"\nAll {destination_type.lower()} imports completed successfully!"
 
@@ -3981,13 +4213,17 @@ def process_importer_workflow(
         else:
             logger.error(f"Some imports failed: {failed_uuids}")
             message += f"\nSome imports failed for UUIDs: {failed_uuids}"
-            # Import failures are logged but don't stop the workflow
+            raise RuntimeError(
+                f"{summary}. Import orders not confirmed complete: "
+                + ", ".join(failed_uuids)
+                + ". Result files were preserved; retry finalization to resume "
+                "these orders. Failed or partial registrations need review.")
     else:
         error_msg = "CRITICAL: No image files found for importer processing - workflow failed!"
         logger.error(error_msg)
         logger.error(f"Searched in: {permanent_storage_path}")
         logger.error(f"Supported extensions: {SUPPORTED_IMAGE_EXTENSIONS}")
-        sys.exit(1)  # Exit with failure code - this should trigger workflow failure
+        raise RuntimeError(error_msg)
 
     return message, og_name_map, destination_wrapper
 
@@ -4279,7 +4515,9 @@ def cleanup_resources(
     slurm_job_id: str,
     data_location: Optional[str],
     folder: Optional[str],
-    log_file: Optional[str]
+    log_file: Optional[str],
+    *,
+    completed: bool = False,
 ) -> str:
     """Handle cleanup of SLURM and local resources.
 
@@ -4302,11 +4540,17 @@ def cleanup_resources(
         data_location: Path to SLURM data location.
         folder: Path to local folder to clean.
         log_file: Path to local log file to clean.
+        completed: True only after result finalization succeeds.
 
     Returns:
         Status message describing cleanup results.
     """
     message = ""
+
+    if not completed:
+        logger.warning("Finalization incomplete; preserving all recovery material")
+        return ("\nFinalization incomplete: SLURM results, archives and local "
+                "files preserved for recovery.")
 
     # Cleanup SLURM files if requested
     if unwrap(client.getInput(constants.CLEANUP)):
@@ -4904,6 +5148,8 @@ def runScript() -> None:
             folder = None
             log_file = None
             script_failed = False
+            finalization_completed = False
+            recovery_locks = ExitStack()
             # Log-upload bookkeeping for the outer-except fallback below.
             # projects: attachment targets, referenced by the fallback if the
             #   happy-path upload never ran.
@@ -5056,6 +5302,12 @@ def runScript() -> None:
 
             logger.info(f"Starting import: {workflow_config}")
 
+            # Serialize retrieval and finalization for the same workflow/job,
+            # including concurrent first attempts before a result folder exists.
+            recovery_locks.enter_context(acquire_result_import_lock(
+                os.path.join(get_importer_group_base_path(group_name),
+                             ".analyzed", str(wf_id)),
+                name=f".biomero-finalize-{uuid.uuid5(uuid.NAMESPACE_URL, str(slurm_job_id))}.lock"))
             # Update task status to IMPORTING if task_id is available
             if task_id and slurmClient.track_workflows:
                 try:
@@ -5064,7 +5316,6 @@ def runScript() -> None:
                     logger.info(f"Updated task {task_id} status to IMPORTING")
                 except Exception as db_e:
                     logger.warning(f"Failed to update task status: {db_e}")
-
             permanent_storage_path, staged_log_file = (
                 find_existing_result_storage(
                     group_name, wf_id, slurm_job_id))
@@ -5446,6 +5697,7 @@ def runScript() -> None:
                     message += f"\nCould not remove bulk zip: {_zip_del_e}"
 
             logger.info("Results imported successfully")
+            finalization_completed = True
             message += "\nWorkflow execution completed successfully."
 
             # Update task status to IMPORTED on successful import
@@ -5458,7 +5710,7 @@ def runScript() -> None:
                     logger.warning(
                         f"Failed to update task completion status: {db_e}")
 
-        except Exception as e:
+        except BaseException as e:
             script_failed = True
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
@@ -5495,7 +5747,8 @@ def runScript() -> None:
                             f"Best-effort log upload on failure failed: {_fallback_err}")
 
             # Update task status to FAILED if task_id is available
-            if task_id and slurmClient and slurmClient.track_workflows:
+            if (task_id and slurmClient and slurmClient.track_workflows
+                    and not isinstance(e, ResultFinalizationBusy)):
                 try:
                     slurmClient.workflowTracker.update_task_status(
                         task_id, "FAILED")
@@ -5515,20 +5768,26 @@ def runScript() -> None:
             # Critical errors should cause script failure
             raise e
         finally:
-            # Step 6: Cleanup resources - always runs regardless of success/failure
+            # Cleanup is allowed only after successful finalization.
             # Be defensive - don't let cleanup errors mask the original failure
             # Only run cleanup if we have the required variables
             if slurm_job_id is not None and slurmClient is not None:
                 try:
                     cleanup_message = cleanup_resources(
                         client, slurmClient, slurm_job_id,
-                        slurm_data_path, folder, log_file)
+                        slurm_data_path, folder, log_file,
+                        completed=finalization_completed)
                     message += cleanup_message
                 except Exception as cleanup_error:
                     logger.error(f"Cleanup failed: {cleanup_error}", exc_info=True)
                     # Don't add cleanup errors to message if script already failed
             else:
                 logger.debug("Skipping cleanup - required variables not initialized")
+
+            try:
+                recovery_locks.close()
+            except Exception as lock_error:
+                logger.warning("Could not release finalization lock: %s", lock_error)
 
             # Always try to set outputs - but don't overwrite failure messages
             try:

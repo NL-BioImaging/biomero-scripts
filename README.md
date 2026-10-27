@@ -148,6 +148,34 @@ does not expose later evidence by itself. See
 for backup and refresh controls. Recording evidence and refreshing maps are two
 separate steps. If refresh fails, retry it; repeating the backfill is also safe.
 
+## Result import failures and retries
+
+Importer-enabled finalization succeeds only when every image import order is
+confirmed complete. An import failure, polling timeout or lost database
+connection fails the script and preserves the Slurm results, downloaded archive
+and staged files. Requested cleanup runs only after successful finalization.
+
+Each staged result directory contains a durable `.biomero-result-import.json`
+recovery record. It saves the destination, rename mapping, options and order UUIDs
+before queueing any imports. Rerun **Import Results** for the same workflow/job
+with the same import settings to resume those orders. Pending orders are polled;
+completed orders are reused without registering their images again. Concurrent
+finalizers are rejected using filesystem locks, which are released on process
+exit. Shared storage must support locks across the worker processes.
+
+An order marked failed can already contain partial OMERO registrations. Retrying
+does not automatically submit a replacement: review its order UUID, importer log
+and destination objects first. Interrupted preparation (renaming or destination
+creation), unreadable recovery records, changed settings and older staged imports
+with orders but no recovery record also require review. Preserve the record and
+files; deleting the record to bypass the check can create duplicate imports.
+This protects image registration; it does not make optional ROI creation and
+attachment postprocessing exactly-once operations.
+
+Use an importer release that checks database write acknowledgement and recovers
+interrupted shallow transactions before reading a store. These recovery changes
+support v2 and v3 and do not change canonical-store format or identity policy.
+
 ## Development
 
 Tests live on the separate
