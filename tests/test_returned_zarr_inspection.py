@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -111,6 +113,27 @@ def test_missing_snapshot_preserves_legacy_import():
 
     assert build_options(None) is None
     assert "no canonical" in logger.info_calls[-1][0][0]
+
+
+@pytest.mark.parametrize("disabled_gate", [
+    "IMPORTER_ENABLED", "SHALLOW_ZARR_ENABLED",
+    "IMPORTER_ORDER_API_AVAILABLE", "SHALLOW_ZARR_OPERATION_AVAILABLE",
+])
+def test_disabled_shallow_path_does_not_request_importer_operation(disabled_gate):
+    namespace = {
+        "IMPORTER_ENABLED": True,
+        "SHALLOW_ZARR_ENABLED": True,
+        "IMPORTER_ORDER_API_AVAILABLE": True,
+        "SHALLOW_ZARR_OPERATION_AVAILABLE": True,
+        disabled_gate: False,
+    }
+    (build_options,) = _load_functions(
+        ("build_shallow_import_options",), namespace
+    )
+
+    # No constructors or canonical-store access should be needed on this path.
+    manifest = SimpleNamespace(inputs=(object(),))
+    assert build_options(manifest) is None
 
 
 def test_lifecycle_path_selection_prunes_nested_label_zarrs(tmp_path):

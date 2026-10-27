@@ -41,6 +41,24 @@ def test_absent_flag_is_a_noop():
     client.shallow_results_on_slurm.assert_not_called()
 
 
+@pytest.mark.parametrize("disabled_gate", [
+    "IMPORTER_ENABLED", "SHALLOW_ZARR_ENABLED",
+    "SHALLOW_ZARR_OPERATION_AVAILABLE", "IMPORTER_ORDER_API_AVAILABLE",
+])
+def test_disabled_shallow_path_does_not_read_canonical_or_contact_hpc(disabled_gate):
+    function = load()
+    snapshot = Mock(side_effect=AssertionError("canonical inputs accessed"))
+    function.__globals__.update({
+        disabled_gate: False, "load_canonical_input_snapshot": snapshot,
+    })
+    client = SimpleNamespace(remote_shallow_zarr=True, shallow_results_on_slurm=Mock())
+
+    function(client, "/data", "workflow")
+
+    snapshot.assert_not_called()
+    client.shallow_results_on_slurm.assert_not_called()
+
+
 def test_shallower_receives_workflow_connection():
     function = load()
     if 'omero_conn' not in function.__code__.co_varnames and not os.environ.get('BIOMERO_TEST_REMOTE_SHALLOWER'):

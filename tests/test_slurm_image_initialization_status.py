@@ -128,6 +128,66 @@ def test_initializer_adds_configured_remote_shallower_to_image_array():
     assert "converter_specs.append(image_spec(slurmClient))" in source
 
 
+@pytest.mark.skipif(
+    'os.getenv("BIOMERO_SHALLOW_ZARR", "false")' not in
+    INIT_SCRIPT.read_text(encoding="utf-8"),
+    reason="initializer feature gates are not present on this source revision",
+)
+@pytest.mark.parametrize(
+    "importer,shallow,remote,image,expected",
+    [
+        (None, None, True, "shallower.sif", False),
+        ("false", "true", True, "shallower.sif", False),
+        ("true", "false", True, "shallower.sif", False),
+        ("true", "", True, "shallower.sif", False),
+        ("true", "true", False, "shallower.sif", False),
+        ("true", "true", True, None, False),
+        ("true", "true", True, "shallower.sif", True),
+        ("TRUE", "TRUE", True, "shallower.sif", True),
+    ],
+)
+def test_initializer_only_acquires_enabled_remote_shallower(
+    monkeypatch, importer, shallow, remote, image, expected,
+):
+    source = INIT_SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    # Exercise the actual image-acquisition branch without booting OMERO.
+    branch = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(statement, ast.ImportFrom)
+            and statement.module == "biomero.remote_shallower"
+            for statement in node.body
+        )
+    )
+    for name, value in (("IMPORTER_ENABLED", importer),
+                        ("BIOMERO_SHALLOW_ZARR", shallow)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    client = SimpleNamespace(
+        remote_shallow_zarr=remote, remote_shallower_image=image,
+    )
+    helper = ModuleType("biomero.remote_shallower")
+    spec = {"kind": "shallower", "destination": image}
+    helper.image_spec = Mock(return_value=spec)
+    converter_spec = {"kind": "converter", "destination": "converter.sif"}
+    specs = [converter_spec]
+    namespace = {"os": os, "slurmClient": client, "converter_specs": specs}
+
+    with patch.dict(sys.modules, {"biomero.remote_shallower": helper}):
+        exec(compile(ast.Module(body=[branch], type_ignores=[]),
+                     str(INIT_SCRIPT), "exec"), namespace)
+
+    assert specs == [converter_spec] + ([spec] if expected else [])
+    if expected:
+        helper.image_spec.assert_called_once_with(client)
+    else:
+        helper.image_spec.assert_not_called()
+
+
 def test_workflow_preflight_accepts_ready_remote_shallower():
     validator = load_function(RUN_SCRIPT, "validate_remote_shallower_ready")
     destination = "/images/shallower.sif"
