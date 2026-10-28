@@ -52,7 +52,6 @@ License: GPL v2+ (see LICENSE.txt)
 """
 
 import shutil
-import tempfile
 import subprocess
 import shlex
 import json
@@ -75,7 +74,6 @@ try:
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
-from biomero.zarr_transfer import convert_zarr_for_transfer, zarr_ome_version
 from biomero.zarr_contracts import (
     CANONICAL_PLATE_IMAGE_NAMESPACE,
     CANONICAL_PLATE_LABEL_NAMESPACE,
@@ -147,7 +145,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b18"
+VERSION = "2.9.0b17"
 BIOMERO_CONFIG_FILE = os.getenv(
     "OMERO_BIOMERO_CONFIG_FILE",
     os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
@@ -2237,6 +2235,20 @@ def is_legacy_tiff_conversion_source(source_path):
         return False
 
 
+def is_compatible_zarr_source(source_path, ome_zarr_version):
+    """Check format metadata before reuse; never read pixels for this decision."""
+    if ome_zarr_version == constants.transfer.OME_ZARR_VERSION_0_4:
+        return is_legacy_tiff_conversion_source(source_path)
+    root = Path(source_path)
+    if ome_zarr_version != "0.5" or (root / ".zgroup").exists():
+        return False
+    try:
+        metadata = json.loads((root / "zarr.json").read_text(encoding="utf-8"))
+        return isinstance(metadata, dict) and metadata.get("zarr_format") == 3
+    except (OSError, ValueError):
+        return False
+
+
 def save_as_zarr(
     conn,
     suuid,
@@ -2287,6 +2299,22 @@ def save_as_zarr(
         shallow_reference = get_shallow_reference(object)
     elif data_type == constants.transfer.DATA_TYPE_PLATE:
         shallow_reference = get_shallow_plate_reference(object)
+
+    requested_profile = {
+        "0.4": "ngff-0.4-zarr-v2", "0.5": "ngff-0.5-zarr-v3",
+    }.get(ome_zarr_version)
+    format_mismatch = any(
+        getattr(source, "interchange_profile", requested_profile) != requested_profile
+        for source in (canonical_source, shallow_reference) if source is not None
+    )
+    if format_mismatch:
+        log(" Source format differs; exporting selected OMERO pixels as OME-Zarr %s"
+            % ome_zarr_version)
+        # Treat this run as having no reusable canonical. Do not replace the
+        # stored registration or promote this temporary export later.
+        canonical_source = None
+        shallow_reference = None
+
     if (
         shallow_reference is not None
         and reconstruct_shallow_zarr
@@ -2318,20 +2346,9 @@ def save_as_zarr(
         canonical_source = None
 
     if shallow_reference is not None and reconstruct_shallow_zarr:
-        # Reconstruct every inherited label before optional format conversion.
-        # Both representations are temporary; canonical references stay original.
-        with tempfile.TemporaryDirectory(
-            dir=Path(img_name).parent, prefix=".biomero-reconstruct-"
-        ) as staging:
-            restored_path = Path(staging) / "input.zarr"
-            materialized = materialize_shallow_zarr(
-                shallow_reference, restored_path, storage_roots or {},
-            )
-            if zarr_ome_version(restored_path) != ome_zarr_version:
-                log(" Converting reconstructed input to OME-Zarr %s" % ome_zarr_version)
-                convert_zarr_for_transfer(restored_path, img_name, ome_zarr_version)
-            else:
-                os.rename(restored_path, img_name)
+        materialized = materialize_shallow_zarr(
+            shallow_reference, img_name, storage_roots or {},
+        )
         if isinstance(shallow_reference, ShallowPlateReference):
             manifest = getattr(materialized, "manifest", None)
             canonical_source = canonical_plate_source_from_collection(
@@ -2366,25 +2383,19 @@ def save_as_zarr(
         )
 
     source_path = None
-    if not selected_pixel_export:
+    if not selected_pixel_export and not format_mismatch:
         source_path = select_zarr_source_path(
             object, canonical_source, storage_roots or {})
-    if (conversion_material and source_path is not None
-            and not is_legacy_tiff_conversion_source(source_path)):
+    if (source_path is not None
+            and not is_compatible_zarr_source(source_path, ome_zarr_version)):
         logger.info(
-            "Exporting temporary NGFF 0.4 / Zarr v2 material for %s %s; "
+            "Exporting temporary OME-Zarr %s material for %s %s; "
             "the managed source at %s and its canonical registration remain "
-            "unchanged", data_type, object.getId(), source_path)
+            "unchanged", ome_zarr_version, data_type, object.getId(), source_path)
+        format_mismatch = True
         source_path = None
         canonical_source = None
     if source_path is not None:
-        if (not conversion_material
-                and zarr_ome_version(source_path) != ome_zarr_version):
-            log(" Preparing temporary OME-Zarr %s workflow input" % ome_zarr_version)
-            convert_zarr_for_transfer(source_path, img_name, ome_zarr_version)
-            # No indexing or promotion of a compatibility copy. Existing cached
-            # canonical metadata, when available, still points at the original.
-            return canonical_source, os.path.basename(img_name), ()
         if (shallow_zarr_storage and canonical_source is not None
                 and not conversion_material):
             canonical_source = upgrade_reused_canonical(
@@ -2525,6 +2536,7 @@ def save_as_zarr(
             shallow_zarr_storage
             and canonical_source is None
             and not conversion_material
+            and not format_mismatch
         ):
             try:
                 if data_type == constants.transfer.DATA_TYPE_PLATE:
@@ -2852,6 +2864,8 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             label_components_by_object[object_id] = label_components
             if promoted_source is not None:
                 canonical_sources[object_id] = promoted_source
+            else:
+                canonical_sources.pop(object_id, None)
             write_logfile(exp_dir)
             
     for img in images:
@@ -2891,6 +2905,8 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             label_components_by_object[object_id] = label_components
             if promoted_source is not None:
                 canonical_sources[object_id] = promoted_source
+            else:
+                canonical_sources.pop(object_id, None)
         else:
             size_x = pixels.getSizeX()
             size_y = pixels.getSizeY()

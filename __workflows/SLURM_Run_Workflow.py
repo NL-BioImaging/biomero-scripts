@@ -102,7 +102,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
-VERSION = "2.9.0b18"
+VERSION = "2.9.0b17"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 
@@ -246,21 +246,6 @@ def resolve_selected_output(client) -> dict:
             logger.debug(
                 f"Selected: {output_option} >> [{selected_op}]")
     return selected_output
-
-
-def resolve_workflow_input_version(slurmClient, selected_workflows, descriptors,
-                                   use_zarr_format):
-    """Resolve the admin policy before a shared transfer, without user overrides."""
-    versions = {
-        slurmClient.resolve_workflow_zarr_version(
-            name, descriptor=descriptors[name], use_zarr=use_zarr_format)
-        for name, selected in selected_workflows.items() if selected
-    }
-    if len(versions) != 1:
-        raise ValueError(
-            "Selected workflows need different Zarr input formats. "
-            "Run these workflows separately.")
-    return versions.pop()
 
 
 def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
@@ -952,11 +937,12 @@ def runScript():
             email = getOmeroEmail(client, conn)
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
-            # The worker enforces compatibility for fresh launches, regardless
-            # of old UI/raw script input. Detached resume keeps its recorded value.
+            # The web app passes its format choice through the existing input.
             use_zarr_format = unwrap(client.getInput(constants.workflow.USE_ZARR_FORMAT))
-            ome_zarr_version = resolve_workflow_input_version(
-                slurmClient, selected_workflows, _workflow_descriptors, use_zarr_format)
+            ome_zarr_version = (
+                unwrap(client.getInput(constants.transfer.OME_VERSION))
+                or constants.transfer.OME_ZARR_VERSION_0_4
+            ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")

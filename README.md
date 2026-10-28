@@ -65,16 +65,18 @@ are rejected rather than recorded under an incorrect profile.
 Workflow inputs default to OME-Zarr 0.4 / Zarr v2. Administrators opt individual
 native Zarr workflows into v3 using the JSON list `[UI] zarr_v3_workflows` or the
 corresponding suboption of **Zarr Format Required** in OMERO.biomero Settings.
-This applies to both Bilayers and BIAFLOWS descriptors. TIFF conversion uses v2. The
-worker enforces this policy for new runs, including batched and inline execution;
-old user forms cannot override it. Detached resume keeps its recorded version.
+The web form passes this choice through the existing `OME-Zarr_version` input.
+Scripts honour explicit versions, including batched and inline execution;
+detached resume keeps its recorded version. Core does not read the UI list.
+This applies to both Bilayers and BIAFLOWS descriptors. TIFF conversion uses v2.
 
-Matching-format sources are reused directly. Mismatches are converted to temporary
-workflow inputs with pixels, pyramids and labels preserved. Existing canonical
-stores and cached identities stay unchanged; compatibility copies are never
-promoted or indexed. Missing canonical identities are not computed for a
-cross-format transfer. Returned data with a different canonical format stays full.
-Workflows requiring different formats must run separately.
+Matching-format sources are reused directly. A mismatch skips canonical reuse
+and uses the normal OMERO exporter with `--format 0.4` or `--format 0.5`.
+The stored canonical stays unchanged; the temporary export is not promoted or
+indexed, and this run retains full results without canonical matching.
+Matching shallow inputs reconstruct their managed labels. Mismatched shallow
+inputs export the selected OMERO Image or Plate pixels, without reconstructing
+inherited label layers. Returned data in a different canonical format stays full.
 
 TIFF-consuming workflows keep using the legacy HPC converter. Their transfer
 route requires actual OME-NGFF 0.4 / Zarr v2 material: compatible v2 sources are

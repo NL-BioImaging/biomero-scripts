@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           # Restore plain test-suite after companion PR #58 is merged.
-          ref: ${{ github.head_ref == 'feature/workflow-zarr-version' && '9c9e733b3cddfc586de860de3cf51d107538ed81' || 'test-suite' }}
+          ref: ${{ github.head_ref == 'feature/workflow-zarr-version' && '2a5bffae67db6c1be2c605f23a3f461ccfe0fdf2' || 'test-suite' }}
           path: harness
 
       - name: Set up Python
