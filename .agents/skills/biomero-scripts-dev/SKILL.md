@@ -204,6 +204,12 @@ pull-request revision as `source`, checks out `test-suite` as `harness`, and set
 `BIOMERO_SCRIPTS_ROOT` so the harness tests the exact source revision rather than
 the source snapshot on its own branch.
 
+Keep that CI harness reference on `test-suite`. Do not add feature-specific
+commit pins, alternate harness branches, or branch conditionals to CI. Put
+compatibility/capability guards in the tests until the feature is available.
+A temporarily failing check during coordinated test/production merges is
+acceptable; merge the matching tests and rerun the check instead of pinning CI.
+
 When production behavior changes:
 
 1. Make only the production edit on `master` or its feature branch. A pull
