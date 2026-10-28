@@ -38,7 +38,8 @@ def load_save_as_zarr(
     tree = ast.parse(TRANSFER_PATH.read_text(encoding="utf-8"))
     functions = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in {
-                     "save_as_zarr", "is_legacy_tiff_conversion_source"}]
+                     "save_as_zarr", "is_legacy_tiff_conversion_source",
+                     "is_compatible_zarr_source"}]
     commands = []
     materializations = []
     promotions = []
@@ -63,6 +64,9 @@ def load_save_as_zarr(
 
     def materialize(*_args, **_kwargs):
         materializations.append((_args, _kwargs))
+        destination = Path(_args[1])
+        destination.mkdir(parents=True)
+        (destination / ".zgroup").write_text('{"zarr_format":2}')
         return SimpleNamespace(
             collection=object(),
             labels=("managed-label",),
@@ -376,7 +380,7 @@ def test_zarr_workflow_reuses_existing_format_with_new_default(
                           reusable_path=reusable))
     source, artifact, _labels = save(
         SimpleNamespace(host="omero"), "session", ImageObject(), "batch",
-        "Image", "0.5", canonical_source=canonical,
+        "Image", "0.4" if version == 2 else "0.5", canonical_source=canonical,
         shallow_zarr_storage=True, reconstruct_shallow_zarr=True,
     )
     assert source is canonical
