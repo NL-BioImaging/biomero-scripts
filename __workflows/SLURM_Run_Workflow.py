@@ -102,7 +102,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
-VERSION = "2.9.0b17"
+VERSION = "2.9.0b18"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 
@@ -296,7 +296,7 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     ome_zarr_version = (
         params.get("ome_zarr_version")
         or unwrap(client.getInput(constants.transfer.OME_VERSION))
-        or constants.transfer.OME_ZARR_VERSION_0_5
+        or constants.transfer.OME_ZARR_VERSION_0_4
     ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
     return {
         "workflows": workflows,
@@ -655,7 +655,7 @@ def runScript():
             omscripts.String(
                             constants.transfer.OME_VERSION, grouping="01.4.1",
                             description="Ome-zarr version", values=ome_zarr_versions,
-                            default=constants.transfer.OME_ZARR_VERSION_0_5),
+                            default=constants.transfer.OME_ZARR_VERSION_0_4),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
@@ -937,14 +937,12 @@ def runScript():
             email = getOmeroEmail(client, conn)
             user = conn.getUserId()
             group = conn.getGroupFromContext().id
-            # Get ZARR format preference
+            # The web app passes its format choice through the existing input.
             use_zarr_format = unwrap(client.getInput(constants.workflow.USE_ZARR_FORMAT))
-            if use_zarr_format:
-                ome_zarr_version = (
-                    unwrap(client.getInput(constants.transfer.OME_VERSION))
-                    or constants.transfer.OME_ZARR_VERSION_0_5)
-            else:
-                ome_zarr_version = constants.transfer.OME_ZARR_VERSION_0_4 # backward compatible
+            ome_zarr_version = (
+                unwrap(client.getInput(constants.transfer.OME_VERSION))
+                or constants.transfer.OME_ZARR_VERSION_0_4
+            ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
 
             logger.debug(f"User: {user} - Group: {group} - Email: {email}")
             logger.debug(f"Use ZARR format: {use_zarr_format}")

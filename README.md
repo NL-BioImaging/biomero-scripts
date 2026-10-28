@@ -56,16 +56,27 @@ shallowing preserves reconstruction of existing shallow inputs; their source
 stores and reconstruction dependencies must remain available.
 
 Canonical indexing records the backing store's actual OME-Zarr profile: 0.4/v2
-or 0.5/v3. Existing v2 stores are reused as v2, and importing an existing v3
+or 0.5/v3. Existing v2 stores remain canonical as v2, and importing an existing v3
 Image or Plate does not require conversion to v2. V3 indexing requires the
 generic semantic-guard API from the matching v3-capable shallower/importer;
 older installations retain v2-only indexing. Mixed-format Plate inventories
 are rejected rather than recorded under an incorrect profile.
 
-Fresh exports for Zarr-consuming workflows default to OME-NGFF 0.5 / Zarr v3;
-an explicit 0.4 choice remains available. This is an export preference, not a
-request to rewrite existing managed stores: native Zarr workflows reuse v2 and
-v3 sources in their existing format.
+Workflow inputs default to OME-Zarr 0.4 / Zarr v2. Administrators opt individual
+native Zarr workflows into v3 using the JSON list `[UI] zarr_v3_workflows` or the
+corresponding suboption of **Zarr Format Required** in OMERO.biomero Settings.
+The web form passes this choice through the existing `OME-Zarr_version` input.
+Scripts honour explicit versions, including batched and inline execution;
+detached resume keeps its recorded version. Core does not read the UI list.
+This applies to both Bilayers and BIAFLOWS descriptors. TIFF conversion uses v2.
+
+Matching-format sources are reused directly. A mismatch skips canonical reuse
+and uses the normal OMERO exporter with `--format 0.4` or `--format 0.5`.
+The stored canonical stays unchanged; the temporary export is not promoted or
+indexed, and this run retains full results without canonical matching.
+Matching shallow inputs reconstruct their managed labels. Mismatched shallow
+inputs export the selected OMERO Image or Plate pixels, without reconstructing
+inherited label layers. Returned data in a different canonical format stays full.
 
 TIFF-consuming workflows keep using the legacy HPC converter. Their transfer
 route requires actual OME-NGFF 0.4 / Zarr v2 material: compatible v2 sources are

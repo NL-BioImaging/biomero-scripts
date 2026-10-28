@@ -73,7 +73,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 
 # Version constant for easy version management
-VERSION = "2.9.0b17"
+VERSION = "2.9.0b18"
 
 # Batched runs are queued the same way single runs are: this script resolves
 # the batches and records them in a launcher task, and the supervisor spawns
@@ -178,7 +178,7 @@ def runScript():
             omscripts.String(
                             constants.transfer.OME_VERSION, grouping="01.5.1",
                             description="Ome-zarr version", values=ome_zarr_versions,
-                            default=constants.transfer.OME_ZARR_VERSION_0_5),
+                            default=constants.transfer.OME_ZARR_VERSION_0_4),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
