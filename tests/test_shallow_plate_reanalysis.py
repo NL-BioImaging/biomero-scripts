@@ -2,7 +2,6 @@
 import ast
 import logging
 import os
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -62,11 +61,10 @@ def load_save(reference, materialized):
     names={"save_as_zarr","canonical_plate_source_from_collection"}
     tree=ast.parse(SCRIPT.read_text(encoding="utf-8"))
     body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
-    namespace=dict(os=os,Path=Path,tempfile=tempfile,ShallowPlateReference=ShallowPlateReference,
+    namespace=dict(os=os,Path=Path,ShallowPlateReference=ShallowPlateReference,
         CanonicalPlateImage=CanonicalPlateImage,CanonicalPlateSource=CanonicalPlateSource,
         logger=logging.getLogger(__name__),log=lambda _:None,SHALLOW_ZARR_RESTORE_AVAILABLE=True,
         get_shallow_plate_reference=lambda _:reference,materialize_shallow_zarr=materialize,
-        zarr_ome_version=lambda _: "0.5" if reference.interchange_profile.endswith("v3") else "0.4",
         constants=SimpleNamespace(transfer=SimpleNamespace(DATA_TYPE_IMAGE="Image",DATA_TYPE_PLATE="Plate",
                                                            OME_ZARR_VERSION_0_4="0.4")))
     exec(compile(ast.Module(body=body,type_ignores=[]),str(SCRIPT),"exec"),namespace)

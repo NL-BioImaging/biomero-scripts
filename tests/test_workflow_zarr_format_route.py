@@ -9,7 +9,8 @@ import pytest
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 RUNNER = ROOT / "__workflows" / "SLURM_Run_Workflow.py"
-HAS_ADMIN_POLICY = "def resolve_workflow_input_version(" in RUNNER.read_text(encoding="utf-8")
+HAS_V2_DEFAULT = "def is_compatible_zarr_source(" in (
+    ROOT / "_data" / "_SLURM_Image_Transfer.py").read_text(encoding="utf-8")
 pytestmark = pytest.mark.skipif(
     "def is_legacy_tiff_conversion_source(" not in (
         ROOT / "_data" / "_SLURM_Image_Transfer.py").read_text(encoding="utf-8"),
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 ])
 @pytest.mark.parametrize("recorded", [False, True])
 def test_detached_and_batch_child_input_resolution(use_zarr, requested, expected, recorded):
-    if HAS_ADMIN_POLICY and use_zarr and requested is None:
+    if HAS_V2_DEFAULT and use_zarr and requested is None:
         expected = "0.4"
     tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
     function = next(n for n in tree.body
@@ -63,5 +64,5 @@ def test_script_parameter_default_matches_available_format_policy(script):
                      and isinstance(node.args[0], ast.Attribute)
                      and node.args[0].attr == "OME_VERSION")
     default = next(k.value for k in parameter.keywords if k.arg == "default")
-    expected = "0_4" if HAS_ADMIN_POLICY else "0_5"
+    expected = "0_4" if HAS_V2_DEFAULT else "0_5"
     assert ast.unparse(default) == f"constants.transfer.OME_ZARR_VERSION_{expected}"

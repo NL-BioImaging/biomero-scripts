@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 import shutil
-import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -39,7 +38,8 @@ def load_save_as_zarr(
     tree = ast.parse(TRANSFER_PATH.read_text(encoding="utf-8"))
     functions = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in {
-                     "save_as_zarr", "is_legacy_tiff_conversion_source"}]
+                     "save_as_zarr", "is_legacy_tiff_conversion_source",
+                     "is_compatible_zarr_source"}]
     commands = []
     materializations = []
     promotions = []
@@ -75,8 +75,6 @@ def load_save_as_zarr(
     canonical_plate = SimpleNamespace(images=(object(),))
     namespace = {
         "Path": Path,
-        "tempfile": tempfile,
-        "zarr_ome_version": lambda path: "0.5" if (Path(path) / "zarr.json").exists() else "0.4",
         "ShallowPlateReference": plate_type,
         "build_zarr_export_error": lambda *_args: "export failed",
         "canonical_plate_source_from_collection": (
