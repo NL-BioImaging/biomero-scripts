@@ -2,6 +2,7 @@
 import ast
 import logging
 import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -55,14 +56,19 @@ def fixture(profile, labels):
 
 
 def load_save(reference, materialized):
+    def materialize(*args):
+        Path(args[1]).mkdir(parents=True)
+        return materialized
     names={"save_as_zarr","canonical_plate_source_from_collection"}
     tree=ast.parse(SCRIPT.read_text(encoding="utf-8"))
     body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
-    namespace=dict(os=os,Path=Path,ShallowPlateReference=ShallowPlateReference,
+    namespace=dict(os=os,Path=Path,tempfile=tempfile,ShallowPlateReference=ShallowPlateReference,
         CanonicalPlateImage=CanonicalPlateImage,CanonicalPlateSource=CanonicalPlateSource,
         logger=logging.getLogger(__name__),log=lambda _:None,SHALLOW_ZARR_RESTORE_AVAILABLE=True,
-        get_shallow_plate_reference=lambda _:reference,materialize_shallow_zarr=lambda *args:materialized,
-        constants=SimpleNamespace(transfer=SimpleNamespace(DATA_TYPE_IMAGE="Image",DATA_TYPE_PLATE="Plate")))
+        get_shallow_plate_reference=lambda _:reference,materialize_shallow_zarr=materialize,
+        zarr_ome_version=lambda _: "0.5" if reference.interchange_profile.endswith("v3") else "0.4",
+        constants=SimpleNamespace(transfer=SimpleNamespace(DATA_TYPE_IMAGE="Image",DATA_TYPE_PLATE="Plate",
+                                                           OME_ZARR_VERSION_0_4="0.4")))
     exec(compile(ast.Module(body=body,type_ignores=[]),str(SCRIPT),"exec"),namespace)
     return namespace["save_as_zarr"]
 
@@ -75,6 +81,7 @@ def test_plate_reanalysis_uses_manifest_bindings(tmp_path,profile,labels):
     save=load_save(reference,materialized)
     plate=SimpleNamespace(getName=lambda:"plate",getId=lambda:99)
     source,artifact,restored_labels=save(None,"session",plate,str(tmp_path),"Plate",
+        ome_zarr_version="0.5" if profile.endswith("v3") else "0.4",
         storage_roots={"data":tmp_path},shallow_zarr_storage=False)
     assert source.source_object_id==9
     assert source.interchange_profile==profile
@@ -91,4 +98,4 @@ def test_missing_managed_labels_stop_reanalysis(tmp_path):
     save=load_save(reference,MaterializedShallowResult(tmp_path/"plate.zarr",manifest,managed[:1]))
     with pytest.raises(ValueError,match="lost labels"):
         save(None,"session",SimpleNamespace(getName=lambda:"plate",getId=lambda:99),
-             str(tmp_path),"Plate",storage_roots={"data":tmp_path})
+             str(tmp_path),"Plate",ome_zarr_version="0.5",storage_roots={"data":tmp_path})

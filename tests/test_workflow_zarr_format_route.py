@@ -9,6 +9,7 @@ import pytest
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 RUNNER = ROOT / "__workflows" / "SLURM_Run_Workflow.py"
+HAS_ADMIN_POLICY = "def resolve_workflow_input_version(" in RUNNER.read_text(encoding="utf-8")
 pytestmark = pytest.mark.skipif(
     "def is_legacy_tiff_conversion_source(" not in (
         ROOT / "_data" / "_SLURM_Image_Transfer.py").read_text(encoding="utf-8"),
@@ -26,6 +27,8 @@ pytestmark = pytest.mark.skipif(
 ])
 @pytest.mark.parametrize("recorded", [False, True])
 def test_detached_and_batch_child_input_resolution(use_zarr, requested, expected, recorded):
+    if HAS_ADMIN_POLICY and use_zarr and requested is None:
+        expected = "0.4"
     tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
     function = next(n for n in tree.body
                     if isinstance(n, ast.FunctionDef) and n.name == "resolve_pipeline_inputs")
@@ -53,11 +56,12 @@ def test_detached_and_batch_child_input_resolution(use_zarr, requested, expected
     "__workflows/SLURM_Run_Workflow.py",
     "__workflows/SLURM_Run_Workflow_Batched.py",
 ])
-def test_script_parameter_defaults_to_ngff05(script):
+def test_script_parameter_default_matches_available_format_policy(script):
     tree = ast.parse((ROOT / script).read_text(encoding="utf-8"))
     parameter = next(node for node in ast.walk(tree)
                      if isinstance(node, ast.Call) and node.args
                      and isinstance(node.args[0], ast.Attribute)
                      and node.args[0].attr == "OME_VERSION")
     default = next(k.value for k in parameter.keywords if k.arg == "default")
-    assert ast.unparse(default) == "constants.transfer.OME_ZARR_VERSION_0_5"
+    expected = "0_4" if HAS_ADMIN_POLICY else "0_5"
+    assert ast.unparse(default) == f"constants.transfer.OME_ZARR_VERSION_{expected}"
