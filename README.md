@@ -56,16 +56,24 @@ shallowing preserves reconstruction of existing shallow inputs; their source
 stores and reconstruction dependencies must remain available.
 
 Canonical indexing records the backing store's actual OME-Zarr profile: 0.4/v2
-or 0.5/v3. Existing v2 stores are reused as v2, and importing an existing v3
+or 0.5/v3. Existing v2 stores remain canonical as v2, and importing an existing v3
 Image or Plate does not require conversion to v2. V3 indexing requires the
 generic semantic-guard API from the matching v3-capable shallower/importer;
 older installations retain v2-only indexing. Mixed-format Plate inventories
 are rejected rather than recorded under an incorrect profile.
 
-Fresh exports for Zarr-consuming workflows default to OME-NGFF 0.5 / Zarr v3;
-an explicit 0.4 choice remains available. This is an export preference, not a
-request to rewrite existing managed stores: native Zarr workflows reuse v2 and
-v3 sources in their existing format.
+Workflow inputs default to OME-Zarr 0.4 / Zarr v2. Administrators opt individual
+Bilayers workflows into v3 using the JSON list `[UI] zarr_v3_workflows` or the
+corresponding switch in OMERO.biomero Settings. BIAFLOWS always uses v2. The
+worker enforces this policy for new runs, including batched and inline execution;
+old user forms cannot override it. Detached resume keeps its recorded version.
+
+Matching-format sources are reused directly. Mismatches are converted to temporary
+workflow inputs with pixels, pyramids and labels preserved. Existing canonical
+stores and cached identities stay unchanged; compatibility copies are never
+promoted or indexed. Missing canonical identities are not computed for a
+cross-format transfer. Returned data with a different canonical format stays full.
+Workflows requiring different formats must run separately.
 
 TIFF-consuming workflows keep using the legacy HPC converter. Their transfer
 route requires actual OME-NGFF 0.4 / Zarr v2 material: compatible v2 sources are

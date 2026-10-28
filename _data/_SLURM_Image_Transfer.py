@@ -52,6 +52,7 @@ License: GPL v2+ (see LICENSE.txt)
 """
 
 import shutil
+import tempfile
 import subprocess
 import shlex
 import json
@@ -74,6 +75,7 @@ try:
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
+from biomero.zarr_transfer import convert_zarr_for_transfer, zarr_ome_version
 from biomero.zarr_contracts import (
     CANONICAL_PLATE_IMAGE_NAMESPACE,
     CANONICAL_PLATE_LABEL_NAMESPACE,
@@ -145,7 +147,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b17"
+VERSION = "2.9.0b18"
 BIOMERO_CONFIG_FILE = os.getenv(
     "OMERO_BIOMERO_CONFIG_FILE",
     os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
@@ -2262,6 +2264,7 @@ def save_as_zarr(
         ValueError: If unsupported data_type is provided.
     """
     conversion_material = not reconstruct_shallow_zarr
+    ome_zarr_version = ome_zarr_version or constants.transfer.OME_ZARR_VERSION_0_4
     if conversion_material:
         # This is a required format for the legacy helper, not just an export
         # preference. Reused sources are checked below as well.
@@ -2315,11 +2318,20 @@ def save_as_zarr(
         canonical_source = None
 
     if shallow_reference is not None and reconstruct_shallow_zarr:
-        materialized = materialize_shallow_zarr(
-            shallow_reference,
-            img_name,
-            storage_roots or {},
-        )
+        # Reconstruct every inherited label before optional format conversion.
+        # Both representations are temporary; canonical references stay original.
+        with tempfile.TemporaryDirectory(
+            dir=Path(img_name).parent, prefix=".biomero-reconstruct-"
+        ) as staging:
+            restored_path = Path(staging) / "input.zarr"
+            materialized = materialize_shallow_zarr(
+                shallow_reference, restored_path, storage_roots or {},
+            )
+            if zarr_ome_version(restored_path) != ome_zarr_version:
+                log(" Converting reconstructed input to OME-Zarr %s" % ome_zarr_version)
+                convert_zarr_for_transfer(restored_path, img_name, ome_zarr_version)
+            else:
+                os.rename(restored_path, img_name)
         if isinstance(shallow_reference, ShallowPlateReference):
             manifest = getattr(materialized, "manifest", None)
             canonical_source = canonical_plate_source_from_collection(
@@ -2366,6 +2378,13 @@ def save_as_zarr(
         source_path = None
         canonical_source = None
     if source_path is not None:
+        if (not conversion_material
+                and zarr_ome_version(source_path) != ome_zarr_version):
+            log(" Preparing temporary OME-Zarr %s workflow input" % ome_zarr_version)
+            convert_zarr_for_transfer(source_path, img_name, ome_zarr_version)
+            # No indexing or promotion of a compatibility copy. Existing cached
+            # canonical metadata, when available, still points at the original.
+            return canonical_source, os.path.basename(img_name), ()
         if (shallow_zarr_storage and canonical_source is not None
                 and not conversion_material):
             canonical_source = upgrade_reused_canonical(
@@ -3204,7 +3223,7 @@ def run_script():
             scripts.String(
                 constants.transfer.OME_VERSION, grouping="5.2",
                 description="Ome-zarr version", values=ome_zarr_versions,
-                default=constants.transfer.OME_ZARR_VERSION_0_5),
+                default=constants.transfer.OME_ZARR_VERSION_0_4),
 
             scripts.Bool(
                 constants.transfer.RECONSTRUCT_SHALLOW_ZARR,
