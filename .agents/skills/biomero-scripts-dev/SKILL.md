@@ -45,6 +45,10 @@ to be configured on `biomeroworker`.
 
 ## Pull-request branch workflow
 
+Open pull requests ready for review by default, including test-harness PRs.
+Use draft status only when the user explicitly requests it. Record dependencies
+and merge order in the PR description; do not add a separate pre-review stage.
+
 On an existing non-default branch intended for a pull request, make focused,
 coherent commits and push them as normal completion of authorized development
 work. Do not hold the branch locally merely to run a slow full suite: run cheap,
@@ -248,9 +252,8 @@ python -m pytest tests -q
    `BIOMERO_SCRIPTS_ROOT` pointed at the feature worktree. Do not solve the CI
    limitation by copying tests into the production branch. Keep
    `tests/requirements.txt` on `test-suite` aligned with test dependencies.
-   Open feature-specific test pull requests as drafts, with an explicit
-   dependency/merge-order note, until their production change and any
-   cross-repository dependency are available to the canonical harness.
+   Open feature-specific test pull requests ready for review, with an explicit
+   dependency/merge-order note and capability guards where needed.
 
 The workflow runs for pull requests and pushes to `master`. Coordinate test
 branch updates with production pull requests so the required check exercises
