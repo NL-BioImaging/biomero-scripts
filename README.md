@@ -63,8 +63,9 @@ older installations retain v2-only indexing. Mixed-format Plate inventories
 are rejected rather than recorded under an incorrect profile.
 
 Workflow inputs default to OME-Zarr 0.4 / Zarr v2. Administrators opt individual
-Bilayers workflows into v3 using the JSON list `[UI] zarr_v3_workflows` or the
-corresponding switch in OMERO.biomero Settings. BIAFLOWS always uses v2. The
+native Zarr workflows into v3 using the JSON list `[UI] zarr_v3_workflows` or the
+corresponding suboption of **Zarr Format Required** in OMERO.biomero Settings.
+This applies to both Bilayers and BIAFLOWS descriptors. TIFF conversion uses v2. The
 worker enforces this policy for new runs, including batched and inline execution;
 old user forms cannot override it. Detached resume keeps its recorded version.
 
