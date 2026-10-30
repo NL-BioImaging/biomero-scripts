@@ -1031,6 +1031,29 @@ def runScript():
             client.closeSession()
 
 
+def read_hpc_command(slurm_client, command, **kwargs):
+    """Use core's declared read-only recovery route when it is available."""
+    reader = (slurm_client.run_read_only if callable(getattr(
+        type(slurm_client), "run_read_only", None)) else slurm_client.run)
+    return reader(command, **kwargs)
+
+
+def poll_slurm_jobs(slurm_client, job_ids):
+    """Let core own bounded recovery; retain legacy polling for older clients."""
+    try:
+        states, _ = slurm_client.check_job_status(job_ids)
+        return states
+    except Exception as error:
+        window = getattr(slurm_client, "ssh_recovery_timeout", 0)
+        if isinstance(window, (int, float)) and window > 0:
+            # Core already waited out retryable transport errors. Do not turn
+            # an expired deadline or a permanent failure into an infinite wait.
+            raise
+        logger.warning("Error checking job status; retrying legacy poll: %s",
+                       error)
+        return {}
+
+
 def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
                               selected_output, _workflow_params,
                               _workflow_file_params, email, group,
@@ -1186,12 +1209,7 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
 
         while slurm_job_id_list:
             # Query all jobids we care about
-            job_status_dict = {}
-            try:
-                job_status_dict, _ = slurmClient.check_job_status(
-                    slurm_job_id_list)
-            except Exception as e:
-                logger.warning(f"Transient error checking job status, will retry: {e}")
+            job_status_dict = poll_slurm_jobs(slurmClient, slurm_job_id_list)
 
             for slurm_job_id, job_state in job_status_dict.items():
                 logger.debug(f"Job {slurm_job_id} is {job_state}.")
@@ -1544,7 +1562,8 @@ def run_workflow(slurmClient: SlurmClient,
             if configured_job
             else f"{slurmClient.slurm_script_path}/jobs/{name}.sh"
         )
-        check_result = slurmClient.run(f'test -f "{job_script}"', warn=True)
+        check_result = read_hpc_command(
+            slurmClient, f'test -f "{job_script}"', warn=True)
         if check_result.exited != 0:
             raise FileNotFoundError(
                 f"Job script not found on Slurm: {job_script}. "
