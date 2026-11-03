@@ -2115,6 +2115,10 @@ def extract_slurm_results_zip(
     Raises:
         RuntimeError: If any extraction step fails.
     """
+    # These probes are read-only and can be replayed after a disconnect.
+    read_commands = slurmClient.run_commands
+    if callable(getattr(type(slurmClient), "run_commands_read_only", None)):
+        read_commands = slurmClient.run_commands_read_only
     # Extract data location from SLURM log
     logger.info("Extracting data location from SLURM logfile...")
     slurm_data_path = slurmClient.extract_data_location_from_log(slurm_job_id)
@@ -2129,7 +2133,7 @@ def extract_slurm_results_zip(
     # Normalize to absolute path - log may contain a relative path (e.g. "my-scratch/...")
     # which would break the 7z zip command (cd changes CWD, making relative paths wrong)
     if not slurm_data_path.startswith('/'):
-        abs_result = slurmClient.run_commands([f'realpath "{slurm_data_path}"'])
+        abs_result = read_commands([f'realpath "{slurm_data_path}"'])
         if abs_result.ok and abs_result.stdout.strip():
             slurm_data_path = abs_result.stdout.strip()
             logger.info(f"Resolved to absolute path: {slurm_data_path}")
@@ -2141,7 +2145,7 @@ def extract_slurm_results_zip(
     poll_interval = 15  # seconds
     poll_max_attempts = 20  # 20 * 15s = 5 minutes max
     for attempt in range(1, poll_max_attempts + 1):
-        check_result = slurmClient.run_commands(
+        check_result = read_commands(
             [f"ls \"{out_dir}\" 2>/dev/null | wc -l"])
         file_count = 0
         if check_result.ok:

@@ -260,3 +260,20 @@ t.t.luik@amsterdamumc.nl
 These scripts are to be used with the [BIOMERO library](https://github.com/NL-BioImaging/biomero).
 
 They show how to use the library to run workflows directly from OMERO on a Slurm cluster.
+
+
+### SSH interruption recovery
+
+With a compatible BIOMERO core, `[SLURM] ssh_recovery_timeout` in the shared Slurm
+INI defaults to `900` seconds (15 minutes), including absent or empty settings.
+Inline and detached workflows both recover by default;
+explicit `0` disables recovery. Read-only probes, monitoring, durable submissions and result
+retrieval can reconnect within this window while retaining known job IDs.
+The activity log reports waiting for SSH; authentication/configuration errors
+and recovery deadline expiry remain explicit failures. An exhausted window is
+terminal Failed in both modes, with no automatic Waiting/requeue state. Existing remote jobs and
+recovery records must be retained for reconciliation.
+
+Use the matching core's [SSH recovery setup and limits](https://nl-bioimaging.github.io/biomero/slurm-configuration.html#ssh-recovery).
+This does not introduce a transport replacement or make arbitrary commands safe
+to repeat.

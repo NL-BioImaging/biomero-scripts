@@ -269,6 +269,13 @@ environment until the dependency has been published and merged.
 
 ## Keep cross-repository documentation aligned
 
+Describe normal behavior and configuration in general documentation. Put
+deployment transitions and upgrade steps in dedicated upgrade guides or release
+notes; keep development history and bug-fix narratives in PRs or developer
+records. Preserve legacy execution modes and safe API contracts, but do not
+interpret compatibility as requiring bugs to remain the default or every fix
+to be opt-in.
+
 Update this repository's `README.md` when script roles, inputs, security,
 logging, installation, or result selection changes. Also inspect sibling repos:
 
