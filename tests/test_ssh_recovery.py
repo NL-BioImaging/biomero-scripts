@@ -72,11 +72,16 @@ def test_preflight_supports_older_core_without_recovery():
 
 
 @pytest.mark.parametrize('detached', [False, True])
-def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeypatch, detached):
+@pytest.mark.parametrize('progress_timeout', [False, True])
+def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeypatch, detached, progress_timeout):
     """Both callers execute the same pipeline; detached does not excuse inline gaps."""
     ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
     if not hasattr(ssh_recovery, 'scope'):
         pytest.skip('Requires recovery-capable core')
+    if (not hasattr(ssh_recovery, 'DEFAULT_SSH_RECOVERY_TIMEOUT')
+            and not os.environ.get('BIOMERO_TEST_SSH_RECOVERY')):
+        pytest.skip('Requires core with recovery enabled by default')
+    from biomero.slurm_client import SlurmClient
     tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
     names = {'hpc_recovery_scope', 'poll_slurm_jobs', 'execute_workflow_pipeline'}
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
@@ -89,8 +94,11 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     conn = SimpleNamespace(keepAlive=lambda: pulses.append(clock.now))
     tracker = Mock()
     client = SimpleNamespace(getInput=lambda name: True)
-    slurm = SimpleNamespace(ssh_recovery_timeout=900, close=Mock(), workflowTracker=tracker,
-                             update_slurm_scripts=Mock(return_value=SimpleNamespace()))
+    slurm = SlurmClient(config_only=True)
+    assert slurm.ssh_recovery_timeout == 900
+    slurm.close = Mock()
+    slurm.workflowTracker = tracker
+    slurm.update_slurm_scripts = Mock(return_value=SimpleNamespace())
     status_calls = []
 
     def status(ids):
@@ -102,6 +110,8 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
         return ssh_recovery.retry(slurm, attempt, 'status')
 
     def progress(job):
+        if progress_timeout:
+            raise ssh_recovery.SSHRecoveryTimeout('progress outage exhausted')
         start = clock.now
         def attempt():
             if clock.now - start < 60:
@@ -124,6 +134,16 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
         run_workflow=run, importResultsToOmero=import_results,
         timesleep=SimpleNamespace(sleep=lambda delay: None))
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)
+    args = (client, conn, slurm, 'workflow-id', ['analysis'],
+            {}, {'analysis': {}}, {'analysis': {}}, '', 3, True, '0.4')
+    if progress_timeout:
+        with pytest.raises(ssh_recovery.SSHRecoveryTimeout):
+            namespace['execute_workflow_pipeline'](
+                *args, zipfile='existing-input', resume=detached)
+        import_results.assert_not_called()
+        tracker.complete_workflow.assert_not_called()
+        assert run.call_count == (0 if detached else 1)
+        return
     namespace['execute_workflow_pipeline'](client, conn, slurm, 'workflow-id', ['analysis'],
         {}, {'analysis': {}}, {'analysis': {}}, '', 3, True, '0.4',
         zipfile='existing-input', resume=detached)
