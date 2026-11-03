@@ -1,6 +1,6 @@
 ---
 name: biomero-scripts-dev
-description: Develop, review, test, document, and release the OMERO Python scripts in the biomero-scripts repository. Use for changes to workflow orchestration, OMERO-to-HPC data transfer, Slurm execution and monitoring, result import, importer integration, administrative scripts, script VERSION declarations, or cross-repository compatibility with biomero and NL-BIOMERO.
+description: Develop, review, test, document, and release the OMERO Python scripts in the biomero-scripts repository. Use for changes to workflow orchestration, OMERO-to-HPC data transfer, Slurm execution and monitoring, result import, importer integration, administrative scripts, script VERSION declarations, or cross-repository compatibility with biomero and NL-BIOMERO. Also use when drafting component release notes.
 ---
 
 # BIOMERO Scripts Development
@@ -294,3 +294,9 @@ operational context in logger output, while avoiding secrets.
 Shortening the activity summary means shortening `Message`, not filtering or
 summarizing logger output. Follow the existing scripts' logging infrastructure;
 do not create a separate log attachment to replace the standard activity log.
+
+## Release notes
+
+Before drafting a stable or beta release body, read the current
+[shared component release-note guide](https://github.com/NL-BioImaging/NL-BIOMERO/blob/master/.agents/skills/omero-biomero-expert/references/component-release-notes.md).
+Keep the format in that single source; do not copy it into this repository.
