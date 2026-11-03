@@ -1038,6 +1038,16 @@ def read_hpc_command(slurm_client, command, **kwargs):
     return reader(command, **kwargs)
 
 
+def hpc_recovery_scope(slurm_client, heartbeat):
+    """Keep caller-owned sessions alive during nested core transport retries."""
+    from contextlib import nullcontext
+    try:
+        from biomero import ssh_recovery
+    except ImportError:
+        return nullcontext()
+    return ssh_recovery.scope(slurm_client, heartbeat)
+
+
 def poll_slurm_jobs(slurm_client, job_ids):
     """Let core own bounded recovery; retain legacy polling for older clients."""
     try:
@@ -1138,7 +1148,8 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
     slurm_job_ids = {}
     task_ids = {}
     # Quick git pull on Slurm for latest version of job scripts
-    update_result = slurmClient.update_slurm_scripts()
+    with hpc_recovery_scope(slurmClient, conn.keepAlive):
+        update_result = slurmClient.update_slurm_scripts()
     logger.debug(update_result.__dict__)
 
     # Determine conversion format based on ZARR preference
@@ -1209,12 +1220,14 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
 
         while slurm_job_id_list:
             # Query all jobids we care about
-            job_status_dict = poll_slurm_jobs(slurmClient, slurm_job_id_list)
+            with hpc_recovery_scope(slurmClient, conn.keepAlive):
+                job_status_dict = poll_slurm_jobs(slurmClient, slurm_job_id_list)
 
             for slurm_job_id, job_state in job_status_dict.items():
                 logger.debug(f"Job {slurm_job_id} is {job_state}.")
-                progress = slurmClient.get_active_job_progress(
-                    slurm_job_id)
+                with hpc_recovery_scope(slurmClient, conn.keepAlive):
+                    progress = slurmClient.get_active_job_progress(
+                        slurm_job_id)
                 task_id = task_ids[slurm_job_id]
                 try:
                     slurmClient.workflowTracker.update_task_status(
