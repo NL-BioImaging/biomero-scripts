@@ -78,7 +78,9 @@ def test_plate_joins_graph_to_bindings_and_preserves_remote_receipt(managed_resu
                "tool_version": "0.1.0b4"}
     (root / ".biomero-import-storage.json").write_text(json.dumps(receipt))
     evidence = collect(reference)
-    assert evidence == {**receipt, "source_biocodes": ["ISCC:FIELD0", "ISCC:FIELD1"],
+    decision = ({"decision_basis": ["pixel-comparison"]}
+                if "decision_basis" in SOURCE.read_text(encoding="utf-8") else {})
+    assert evidence == {**receipt, **decision, "source_biocodes": ["ISCC:FIELD0", "ISCC:FIELD1"],
                         "manifest": "import-mount-data/result.zarr/.biomero-shallow.json",
                         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
 

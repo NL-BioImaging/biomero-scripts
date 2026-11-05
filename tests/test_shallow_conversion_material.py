@@ -389,7 +389,7 @@ def test_zarr_workflow_reuses_existing_format_with_new_default(
 
 
 @requires_format_routing
-def test_fresh_tiff_input_ignores_v3_request_and_is_not_promoted(
+def test_fresh_tiff_input_ignores_v3_request_and_preserves_source_when_supported(
     tmp_path, monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
@@ -403,7 +403,8 @@ def test_fresh_tiff_input_ignores_v3_request_and_is_not_promoted(
     )
     assert "--format 0.4" in commands[0]
     assert source is None
-    assert promotions == []
+    lazy_source = "defer_identity" in TRANSFER_PATH.read_text(encoding="utf-8")
+    assert len(promotions) == (1 if lazy_source else 0)
 
 
 def test_workflow_forwards_zarr_preference_as_reconstruction_policy():
