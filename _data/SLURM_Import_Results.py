@@ -321,7 +321,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b23"
+VERSION = "2.9.0b24"
 
 
 def load_canonical_input_snapshot(slurm_client, workflow_id):
@@ -614,7 +614,7 @@ def find_supported_image_paths(base_path: str, recursive: bool = True) -> List[s
 
 
 def find_label_zarr_paths(base_path: str) -> List[str]:
-    """Find label zarr directories within zarr files.
+    """Find label Zarr directories without changing native paths or metadata.
     
     Searches for subdirectories matching the pattern: *.zarr/labels/*/
     where the subdirectory itself is a valid zarr array (contains .zattrs, .zgroup, etc.)
@@ -645,58 +645,11 @@ def find_label_zarr_paths(base_path: str) -> List[str]:
                     has_zarrjson = os.path.exists(os.path.join(potential_label_zarr, "zarr.json"))
                     
                     if has_zattrs or has_zgroup or has_zarrjson:
-                        # Check if it already has .zarr extension
-                        if not item.endswith('.zarr'):
-                            # Rename the directory to have .zarr extension on disk
-                            label_zarr_path = potential_label_zarr + ".zarr"
-                            new_item_name = item + ".zarr"
-                            try:
-                                os.rename(potential_label_zarr, label_zarr_path)
-                                logger.info(f"Renamed label zarr: {potential_label_zarr} -> {label_zarr_path}")
-                                
-                                # Update the .zattrs file in the labels directory to reflect the rename
-                                labels_attrs_path = None
-                                labels_zattrs_path = os.path.join(labels_dir, ".zattrs")
-                                labels_zarrjson_path = os.path.join(labels_dir, "zarr.json")
-                                if os.path.exists(labels_zarrjson_path):
-                                    labels_attrs_path = labels_zarrjson_path
-                                elif os.path.exists(labels_zattrs_path):
-                                    labels_attrs_path = labels_zattrs_path
-
-                                if labels_attrs_path:
-                                    try:
-                                        import json
-                                        with open(labels_attrs_path, 'r') as f:
-                                            zattrs_data = json.load(f)
-                                        
-                                        # Update the labels list if it exists
-                                        if 'labels' in zattrs_data and isinstance(zattrs_data['labels'], list):
-                                            # Replace old name with new name
-                                            if item in zattrs_data['labels']:
-                                                zattrs_data['labels'][zattrs_data['labels'].index(item)] = new_item_name
-                                            elif new_item_name not in zattrs_data['labels']:
-                                                # If old name not found but new name not present, add it
-                                                zattrs_data['labels'].append(new_item_name)
-                                        
-                                        # Write back the updated attrs
-                                        with open(labels_attrs_path, 'w') as f:
-                                            json.dump(zattrs_data, f, indent=2)
-                                        logger.info(f"Updated labels/attrs to reference {new_item_name}")
-                                        
-                                    except (json.JSONDecodeError, IOError) as e:
-                                        logger.warning(f"Failed to update labels/attrs after rename: {e}")
-                                
-                                label_zarrs.append(label_zarr_path)
-                                logger.debug(f"Found label zarr: {label_zarr_path}")
-                            except OSError as e:
-                                logger.error(f"Failed to rename label zarr {potential_label_zarr}: {e}")
-                                # Still add the original path in case of failure
-                                label_zarrs.append(potential_label_zarr)
-                                logger.debug(f"Found label zarr (rename failed): {potential_label_zarr}")
-                        else:
-                            # Already has .zarr extension
-                            label_zarrs.append(potential_label_zarr)
-                            logger.debug(f"Found label zarr: {potential_label_zarr}")
+                        # The importer recognizes Zarr through the containing
+                        # *.zarr path. Renaming internal nodes breaks NGFF and
+                        # RO-Crate references, even when pixel data is unchanged.
+                        label_zarrs.append(potential_label_zarr)
+                        logger.debug(f"Found label zarr: {potential_label_zarr}")
     
     logger.info(f"Found {len(label_zarrs)} label zarr directories in {base_path}")
     return label_zarrs

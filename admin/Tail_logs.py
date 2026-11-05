@@ -26,7 +26,7 @@ _TAIL_LINES = "Tail_Lines"
 _DEFAULT_TAIL_LINES = 5000
 
 # Version constant for easy version management
-VERSION = "2.9.0b23"
+VERSION = "2.9.0b24"
 
 logger = logging.getLogger(__name__)
 
