@@ -324,7 +324,9 @@ def build_output_settings(client, selected_output) -> dict:
                     client.getInput(constants.transfer.DATA_TYPE)),
                 constants.transfer.IDS: unwrap(
                     client.getInput(constants.transfer.IDS)),
-                constants.CLEANUP: unwrap(client.getInput(constants.CLEANUP))}
+                constants.CLEANUP: unwrap(client.getInput(constants.CLEANUP)),
+                "original_pixels_not_required": unwrap(client.getInput(
+                    constants.workflow.SKIP_ORIGINAL_PIXEL_COMPARISON)) is True}
     for option in OUTPUT_OPTIONS:
         settings[option] = unwrap(client.getInput(option))
         settings[f"{option}_selected"] = selected_output.get(option, False)
@@ -656,6 +658,9 @@ def runScript():
                             constants.transfer.OME_VERSION, grouping="01.4.1",
                             description="Ome-zarr version", values=ome_zarr_versions,
                             default=constants.transfer.OME_ZARR_VERSION_0_4),
+            omscripts.Bool(constants.workflow.SKIP_ORIGINAL_PIXEL_COMPARISON,
+                           optional=True, grouping="01.4.2", default=False,
+                           description="Trust that this workflow does not need to return original pixels when shallow storage is enabled."),
             omscripts.Bool(constants.workflow.SELECT_IMPORT,
                            optional=False,
                            grouping="02",
@@ -1588,7 +1593,7 @@ def run_workflow(slurmClient: SlurmClient,
         # workflow parameters, so only pass this where it is understood.
         if output_settings and "output_settings" in inspect.signature(
                 slurmClient.run_workflow).parameters:
-            kwargs["output_settings"] = output_settings
+            kwargs["output_settings"] = dict(output_settings)
         cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,

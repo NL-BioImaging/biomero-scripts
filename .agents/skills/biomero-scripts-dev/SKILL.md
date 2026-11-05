@@ -29,6 +29,14 @@ scripts request those views and own their OMERO-specific persistence.
   Preserve the repositories' separate dependency and licensing boundaries.
 - Keep OMERO adapter tests in the scripts test-suite harness; pure rendering
   and event-store view tests belong in core.
+- Keep `[UI]` configuration in OMERO.biomero. The web layer resolves its UI
+  preferences before launching a script and supplies normal typed OMERO
+  parameters whose keys live in `biomero.constants`. Scripts consume those
+  parameters and preserve the resolved values through batch and detached
+  execution; they must not read web configuration lists themselves.
+- Keep README additions consistent with its brief overview style. Put detailed
+  parameter and deployment guidance in the owning component's canonical guide;
+  do not append implementation details or duplicate UI configuration here.
 
 ## Understand the deployment boundary
 

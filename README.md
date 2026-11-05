@@ -83,8 +83,10 @@ route requires actual OME-NGFF 0.4 / Zarr v2 material: compatible v2 sources are
 reused, while v3 sources are exported temporarily from the selected OMERO
 pixels as v2. Shallow selections also export their selected pixels, including
 label views, instead of reconstructing a different image. These temporary
-exports are not indexed or promoted to canonical storage; the original store
-and its annotations remain unchanged. Deploy the matching OMERO.biomero web
+exports for selected label views or format conversion are not indexed or
+promoted. Ordinary compatible sources retain their canonical snapshot for
+source-linked results, including workflows that convert their inputs to TIFF.
+Deploy the matching OMERO.biomero web
 change after these scripts so the web default and transfer safeguards agree.
 
 Result file attachments use the existing on-disk paths. Workflow-qualified
@@ -96,7 +98,10 @@ attachments skip those directories and report the skipped count.
 ## Storage provenance and repair
 
 Shallow-result provenance uses the shared schema-2 manifest parser from
-`biomero-schema>=0.3.0b1,<0.4` (also required by the matching BIOMERO core).
+`biomero-schema>=0.3.0b3,<0.4`. Lazy comparison metadata and source-linked
+decisions require `biomero-shallower>=0.1.0b9,<0.2` in the worker and matching
+importer environment. Use the matching published helper image for remote
+shallowing; NL-BIOMERO supplies the coordinated package and image versions.
 Plate annotations collect the source identities from the manifest's image
 bindings; Image annotations select their own image node. Both v2 and v3
 interchange profiles are read without converting the store. Unsupported
