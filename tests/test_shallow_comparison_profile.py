@@ -28,18 +28,92 @@ def load_functions(relative, names, **values):
     return namespace
 
 
-@pytest.mark.parametrize("raw, expected", [(None, []), ("", []), ("[]", []),
-                                           ('["segment"]', ["segment"]),
-                                           ('true', []), ('[1]', []), ('invalid', [])])
-def test_workflow_shortcut_config_is_explicit(raw, expected):
-    import configparser
-    config = configparser.ConfigParser(allow_no_value=True)
-    config["UI"] = {}
-    if raw is not None:
-        config["UI"]["original_pixels_not_required_workflows"] = raw
-    ns = load_functions("__workflows/SLURM_Run_Workflow.py",
-                        {"original_pixels_not_required_workflows"})
-    assert ns["original_pixels_not_required_workflows"](config) == expected
+def policy_helpers():
+    constants = SimpleNamespace(
+        CLEANUP="cleanup",
+        workflow=SimpleNamespace(USE_ZARR_FORMAT="use_zarr",
+            SKIP_ORIGINAL_PIXEL_COMPARISON="Skip_Original_Pixel_Comparison"),
+        transfer=SimpleNamespace(DATA_TYPE="type", IDS="ids", OME_VERSION="version",
+                                  OME_ZARR_VERSION_0_4="0.4"),
+        results=SimpleNamespace(OUTPUT_ATTACH_NEW_DATASET_ID="dataset_id",
+                                OUTPUT_ATTACH_NEW_SCREEN_ID="screen_id"))
+    return load_functions("__workflows/SLURM_Run_Workflow.py",
+        {"build_output_settings", "resolve_pipeline_inputs"}, constants=constants,
+        OUTPUT_OPTIONS=(), unwrap=lambda value: value)
+
+
+def test_parameter_key_matches_shared_core_contract_when_paired():
+    if os.environ.get("BIOMERO_CORE_ROOT"):
+        import importlib.util
+        path = Path(os.environ["BIOMERO_CORE_ROOT"]) / "biomero/constants.py"
+        spec = importlib.util.spec_from_file_location("paired_core_constants", path)
+        core_constants = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(core_constants)
+    else:
+        core_constants = pytest.importorskip("biomero.constants")
+    assert core_constants.workflow.SKIP_ORIGINAL_PIXEL_COMPARISON == (
+        "Skip_Original_Pixel_Comparison")
+
+
+@pytest.mark.parametrize("value", [None, False, True])
+def test_direct_script_policy_comes_from_typed_parameter(value):
+    ns = policy_helpers()
+    inputs = {"Skip_Original_Pixel_Comparison": value}
+    client = SimpleNamespace(getInput=inputs.get)
+    settings = ns["build_output_settings"](client, {})
+    assert settings["original_pixels_not_required"] is (value is True)
+
+
+@pytest.mark.parametrize("recorded", [None, False, True])
+@pytest.mark.parametrize("raw", [None, False, True])
+def test_detached_resume_and_batch_child_keep_run_policy(recorded, raw):
+    ns = policy_helpers()
+    inputs = {"Skip_Original_Pixel_Comparison": raw}
+    client = SimpleNamespace(getInput=inputs.get)
+    params = {"selected_output": {}, "roi_label_pattern": "", "email": "test@example.org",
+              "group": 1, "use_zarr_format": False}
+    if recorded is not None:
+        params["output_settings"] = {"original_pixels_not_required": recorded}
+    resolved = ns["resolve_pipeline_inputs"](client, None, None, params)
+    assert resolved["output_settings"]["original_pixels_not_required"] is (
+        raw is True if recorded is None else recorded)
+
+
+@pytest.mark.parametrize("script", ["SLURM_Run_Workflow.py", "SLURM_Run_Workflow_Batched.py"])
+def test_normal_and_batched_script_register_optional_boolean(script):
+    import ast
+    path = Path(os.environ["BIOMERO_SCRIPTS_ROOT"]) / "__workflows" / script
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and node.args and isinstance(node.args[0], ast.Attribute)
+             and node.args[0].attr == "SKIP_ORIGINAL_PIXEL_COMPARISON"
+             and ast.unparse(node.func) == "omscripts.Bool"]
+    assert len(calls) == 1
+    assert ast.unparse(calls[0].func) == "omscripts.Bool"
+    assert {k.arg: ast.literal_eval(k.value) for k in calls[0].keywords}["default"] is False
+
+
+def test_batched_launcher_preserves_parameter_for_child_resolution():
+    import ast
+    path = (Path(os.environ["BIOMERO_SCRIPTS_ROOT"]) /
+            "__workflows/SLURM_Run_Workflow_Batched.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    base_inputs = next(value for node in ast.walk(tree) if isinstance(node, ast.Dict)
+                       for key, value in zip(node.keys, node.values)
+                       if isinstance(key, ast.Constant) and key.value == "base_inputs")
+    raw = {"Skip_Original_Pixel_Comparison": SimpleNamespace(val=True)}
+    recorded = eval(compile(ast.Expression(base_inputs), str(path), "eval"), {
+        "inputs": raw, "unwrap": lambda value: value.val})
+    assert recorded == {"Skip_Original_Pixel_Comparison": True}
+    ns = policy_helpers()
+    settings = ns["build_output_settings"](SimpleNamespace(getInput=recorded.get), {})
+    assert settings["original_pixels_not_required"] is True
+
+
+def test_scripts_do_not_read_web_ui_policy():
+    source = (Path(os.environ["BIOMERO_SCRIPTS_ROOT"]) /
+              "__workflows/SLURM_Run_Workflow.py").read_text(encoding="utf-8")
+    assert "original_pixels_not_required_workflows" not in source
 
 
 def test_policy_is_read_from_executed_task_not_current_admin_config():
