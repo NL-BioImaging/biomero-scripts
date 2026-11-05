@@ -439,7 +439,7 @@ def get_canonical_source(obj, object_type):
         source.storage_root,
         source.relative_path,
         source.node_path,
-        source.pixel_identity.iscc_code,
+        source.pixel_identity.iscc_code if source.pixel_identity else "not measured",
     )
     return source
 
@@ -775,6 +775,8 @@ def build_canonical_plate_source(
     keepalive=None,
     keepalive_interval=60,
     identity_workers=None,
+    defer_identity=False,
+    full_resolution=False,
 ):
     """Hash every declared Plate image and label node into one cache record."""
     root = Path(zarr_path)
@@ -795,6 +797,11 @@ def build_canonical_plate_source(
     def generate_identity(node):
         guard = read_zarr_semantic_guard(root, node.node_path)
         profile = canonical_interchange_profile(guard)
+        metadata = {"shape": list(guard.shape), "dtype": guard.dtype,
+                    "axes": list(guard.axes), "coordinateTransformations":
+                    list(guard.coordinate_transformations)}
+        if defer_identity and node.role == "image":
+            return node.node_path, None, profile, metadata
         logger.info(
             "Calculating ISCC-BIO pixel identity for Plate %s %s node %s",
             plate.getId(),
@@ -809,6 +816,7 @@ def build_canonical_plate_source(
             dtype=guard.dtype,
             axes=guard.axes,
             coordinate_transformations=guard.coordinate_transformations,
+            **({"full_resolution": True} if full_resolution else {}),
         )
         logger.info(
             "Calculated Plate %s %s identity: node=%s, ISCC=%s, "
@@ -820,9 +828,10 @@ def build_canonical_plate_source(
             identity.data_code,
             identity.instance_code,
         )
-        return node.node_path, identity, profile
+        return node.node_path, identity, profile, metadata
 
     identities = {}
+    image_metadata = {}
     profiles = set()
     last_keepalive = monotonic()
     with ThreadPoolExecutor(
@@ -831,8 +840,9 @@ def build_canonical_plate_source(
     ) as executor:
         # map preserves discovery order in the canonical manifest even though
         # the identity work and its diagnostic logging happen concurrently.
-        for node_path, identity, profile in executor.map(generate_identity, nodes):
+        for node_path, identity, profile, metadata in executor.map(generate_identity, nodes):
             identities[node_path] = identity
+            image_metadata[node_path] = metadata
             profiles.add(profile)
             if (
                 keepalive is not None
@@ -867,6 +877,7 @@ def build_canonical_plate_source(
             source_generation=source_generation,
             interchange_profile=profile,
             pixel_identity=identities[image_node.node_path],
+            image_metadata=image_metadata[image_node.node_path],
             pixel_identity_origin="canonical-bootstrap",
             canonical_pixel_verified=False,
         )
@@ -1390,6 +1401,7 @@ def promote_exported_image_zarr(
     )
     exported_identity = identity_provider.generate(
         Path(export_path),
+        full_resolution=True,
         **guard_values,
     )
     logger.info(
@@ -1419,6 +1431,7 @@ def promote_exported_image_zarr(
         exported_identity=exported_identity,
         pixel_identity_origin="omero-pixels",
         interchange_profile=canonical_interchange_profile(guard),
+        cache_identity=False,
     )
     logger.info(
         "ISCC-BIO verification matched OMERO Pixels and exported Zarr for "
@@ -1460,6 +1473,7 @@ def index_existing_image_zarr(
     semantic_guard_reader=None,
     promotion_service_factory=None,
     annotation_writer=None,
+    defer_identity=False,
 ):
     """Index the authoritative managed backing Zarr without rereading OMERO."""
     storage_id, storage_root, relative_path = locate_managed_zarr(
@@ -1486,7 +1500,7 @@ def index_existing_image_zarr(
         image.getId(),
         existing_path,
     )
-    existing_identity = identity_provider.generate(
+    existing_identity = None if defer_identity else identity_provider.generate(
         Path(existing_path),
         **guard_values,
     )
@@ -1494,9 +1508,9 @@ def index_existing_image_zarr(
         "Calculated existing Zarr pixel identity for Image %s: ISCC=%s, "
         "Data-Code=%s, Instance-Code=%s",
         image.getId(),
-        existing_identity.iscc_code,
-        existing_identity.data_code,
-        existing_identity.instance_code,
+        existing_identity.iscc_code if existing_identity else "not measured",
+        existing_identity.data_code if existing_identity else "not measured",
+        existing_identity.instance_code if existing_identity else "not measured",
     )
     source = CanonicalZarrSource(
         storage_root=storage_id,
@@ -1507,8 +1521,11 @@ def index_existing_image_zarr(
         node_path=".",
         interchange_profile=canonical_interchange_profile(guard),
         pixel_identity=existing_identity,
+        image_metadata={"shape": list(guard.shape), "dtype": guard.dtype,
+                        "axes": list(guard.axes), "coordinateTransformations":
+                        list(guard.coordinate_transformations)},
         pixel_identity_origin="canonical-bootstrap",
-        canonical_pixel_verified=True,
+        canonical_pixel_verified=existing_identity is not None,
     )
     write_indexed_canonical_marker(existing_path, source)
     attach_canonical_source(
@@ -1547,6 +1564,24 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
     Update trust metadata in place without copying or rehashing pixel data.
     """
     is_plate = isinstance(source, CanonicalPlateSource)
+    cached = load_canonical_marker(source_path)
+    if cached is not None and type(cached) is type(source):
+        old_sources = ([i.source for i in source.images] if is_plate else [source])
+        new_sources = ([i.source for i in cached.images] if is_plate else [cached])
+        fields = ("storage_root", "relative_path", "node_path", "source_object_type",
+                  "source_object_id", "source_generation", "interchange_profile")
+        same_binding = len(old_sources) == len(new_sources) and all(
+            all(getattr(old, field) == getattr(new, field) for field in fields)
+            for old, new in zip(old_sources, new_sources))
+        current = all(s.pixel_identity is not None and s.pixel_identity.is_current_profile
+                      for s in new_sources)
+        if same_binding and current:
+            if cached != source and not is_plate:
+                annotations = _canonical_registration_annotations(obj, CANONICAL_SOURCE_NAMESPACE)
+                if len(annotations) != 1:
+                    raise ValueError("Cannot refresh ambiguous canonical registration")
+                _update_canonical_annotation(annotations[0], cached.to_annotation_values())
+            return cached
     verified = (all(i.source.canonical_pixel_verified for i in source.images)
                 if is_plate else source.canonical_pixel_verified)
     if verified:
@@ -1613,6 +1648,7 @@ def index_existing_plate_zarr(
     source_generation=1,
     identity_provider=None,
     annotation_writer=None,
+    defer_identity=False,
 ):
     """Index a managed Plate Zarr in place using per-image identities."""
     storage_id, _storage_root, relative_path = locate_managed_zarr(
@@ -1627,8 +1663,10 @@ def index_existing_plate_zarr(
         source_generation=source_generation,
         identity_provider=identity_provider,
         keepalive=conn.keepAlive,
+        defer_identity=defer_identity,
     )
-    source = verified_plate_source(source)
+    if not defer_identity:
+        source = verified_plate_source(source)
     write_indexed_canonical_marker(existing_path, source)
     attach_canonical_plate_source(
         conn,
@@ -1682,9 +1720,15 @@ def promote_exported_plate_zarr(
         source_generation=source_generation,
         identity_provider=identity_provider,
         keepalive=conn.keepAlive,
+        full_resolution=True,
     )
     source = verify_exported_plate_source(
         conn, plate, export_path, source, identity_provider)
+    # The export check proves correctness, but it is not the selected-level
+    # comparison cache. Populate that cache only if result handling needs it.
+    source = source.model_copy(update={"images": tuple(
+        item.model_copy(update={"source": item.source.model_copy(update={
+            "pixel_identity": None})}) for item in source.images)})
     committed = store.commit(export_path, source)
     attach_canonical_plate_source(
         conn,
@@ -1802,7 +1846,8 @@ def select_zarr_source_path(obj, canonical_source, storage_roots):
                 canonical_source.source_object_id,
                 canonical_source.source_generation,
                 source_path,
-                canonical_source.pixel_identity.iscc_code,
+                (canonical_source.pixel_identity.iscc_code
+                 if canonical_source.pixel_identity else "not measured"),
             )
         return source_path
     legacy_path = get_legacy_zarr_path(obj)
@@ -2396,14 +2441,13 @@ def save_as_zarr(
         source_path = None
         canonical_source = None
     if source_path is not None:
-        if (shallow_zarr_storage and canonical_source is not None
-                and not conversion_material):
+        if shallow_zarr_storage and canonical_source is not None:
             canonical_source = upgrade_reused_canonical(
                 conn, object, canonical_source, source_path)
         if (
             shallow_zarr_storage
             and canonical_source is None
-            and not conversion_material
+            and not selected_pixel_export
         ):
             try:
                 if data_type == constants.transfer.DATA_TYPE_PLATE:
@@ -2412,6 +2456,7 @@ def save_as_zarr(
                         object,
                         source_path,
                         storage_roots or {},
+                        defer_identity=True,
                     )
                 elif data_type == constants.transfer.DATA_TYPE_IMAGE:
                     canonical_source = index_existing_image_zarr(
@@ -2419,6 +2464,7 @@ def save_as_zarr(
                         object,
                         source_path,
                         storage_roots or {},
+                        defer_identity=True,
                     )
             except Exception as exc:
                 logger.warning(
@@ -2535,7 +2581,7 @@ def save_as_zarr(
         if (
             shallow_zarr_storage
             and canonical_source is None
-            and not conversion_material
+            and not selected_pixel_export
             and not format_mismatch
         ):
             try:
@@ -2966,7 +3012,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
         # write log for exported images (not needed for ome-tiff)
         write_logfile(exp_dir)
 
-    if shallow_zarr_storage and reconstruct_shallow_zarr:
+    if shallow_zarr_storage:
         canonical_inputs = canonical_inputs_from_sources(
             export_objects,
             canonical_object_type,
@@ -2975,21 +3021,12 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             storage_roots,
             label_components_by_object,
         )
-        marked_inputs = write_transfer_input_markers(
-            exp_dir,
-            canonical_inputs,
-        )
+        marked_inputs = (write_transfer_input_markers(exp_dir, canonical_inputs)
+                         if reconstruct_shallow_zarr else 0)
         logger.info(
             "Wrote %s/%s temporary Zarr input marker(s)",
             marked_inputs,
             len(canonical_inputs),
-        )
-    elif shallow_zarr_storage:
-        canonical_inputs = ()
-        logger.info(
-            "Skipped canonical input snapshot and Zarr input markers because "
-            "these exports are selected-pixel conversion material for a "
-            "TIFF-consuming workflow"
         )
 
     if len(os.listdir(exp_dir)) == 0:

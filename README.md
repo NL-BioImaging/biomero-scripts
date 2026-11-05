@@ -55,6 +55,19 @@ Slurm Init acquires the remote shallower image only when `IMPORTER_ENABLED`,
 shallowing preserves reconstruction of existing shallow inputs; their source
 stores and reconstruction dependencies must remain available.
 
+For enabled shallow storage, usable RO-Crate output declarations automatically
+select source-linked results. Independently, administrators can opt workflows
+into `[UI] original_pixels_not_required_workflows` (a JSON list of workflow
+names). Scripts save this choice with the executed task, so detached resume
+uses that run's setting. Neither option enables shallow storage itself.
+Without either shortcut, the shared shallower compares pixels at the coarsest
+compatible pyramid level. Existing canonical sources are indexed without an
+optional original-pixel sweep; stale comparison metadata is refreshed lazily
+from managed storage by the importer. Remote comparisons without a current
+cache stay full until that local step: a workflow's mutable HPC input copy is
+not an authoritative canonical source. Fresh exports still verify full pixels
+against OMERO before canonical promotion.
+
 Canonical indexing records the backing store's actual OME-Zarr profile: 0.4/v2
 or 0.5/v3. Existing v2 stores remain canonical as v2, and importing an existing v3
 Image or Plate does not require conversion to v2. V3 indexing requires the
@@ -83,8 +96,10 @@ route requires actual OME-NGFF 0.4 / Zarr v2 material: compatible v2 sources are
 reused, while v3 sources are exported temporarily from the selected OMERO
 pixels as v2. Shallow selections also export their selected pixels, including
 label views, instead of reconstructing a different image. These temporary
-exports are not indexed or promoted to canonical storage; the original store
-and its annotations remain unchanged. Deploy the matching OMERO.biomero web
+exports for selected label views or format conversion are not indexed or
+promoted. Ordinary compatible sources retain their canonical snapshot for
+source-linked results, including workflows that convert their inputs to TIFF.
+Deploy the matching OMERO.biomero web
 change after these scripts so the web default and transfer safeguards agree.
 
 Result file attachments use the existing on-disk paths. Workflow-qualified

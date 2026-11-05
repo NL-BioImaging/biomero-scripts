@@ -314,6 +314,22 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     }
 
 
+def original_pixels_not_required_workflows(config):
+    """Read the explicit admin choice; output declarations remain independent."""
+    raw = config.get("UI", "original_pixels_not_required_workflows", fallback="")
+    if not raw or not raw.strip():
+        return []
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid original-pixels workflow setting")
+        return []
+    if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+        logger.warning("Original-pixels workflow setting must be a JSON string list")
+        return []
+    return values
+
+
 def build_output_settings(client, selected_output) -> dict:
     """Collect the resolved output choices, for provenance on the Slurm task.
 
@@ -974,6 +990,8 @@ def runScript():
             validate_importer_write_access(slurmClient, conn, client)
 
             output_settings = build_output_settings(client, selected_output)
+            output_settings["original_pixels_not_required_workflows"] = (
+                original_pixels_not_required_workflows(SlurmClient.load_config()))
             selected_workflow_names = [name for name, selected
                                        in selected_workflows.items()
                                        if selected]
@@ -1588,7 +1606,11 @@ def run_workflow(slurmClient: SlurmClient,
         # workflow parameters, so only pass this where it is understood.
         if output_settings and "output_settings" in inspect.signature(
                 slurmClient.run_workflow).parameters:
-            kwargs["output_settings"] = output_settings
+            recorded_settings = dict(output_settings)
+            configured = recorded_settings.pop(
+                "original_pixels_not_required_workflows", ())
+            recorded_settings["original_pixels_not_required"] = name in configured
+            kwargs["output_settings"] = recorded_settings
         cp_result, slurm_job_id, wf_id, task_id = slurmClient.run_workflow(
             workflow_name=name,
             workflow_version=workflow_version,

@@ -335,7 +335,8 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         )
         return None
     try:
-        return slurm_client.workflowTracker.get_canonical_input_manifest(
+        tracker = slurm_client.workflowTracker
+        manifest = tracker.get_canonical_input_manifest(
             workflow_id
         )
     except Exception as exc:
@@ -346,6 +347,24 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
             exc,
         )
         return None
+    try:
+        workflow = tracker.repository.get(workflow_id)
+        tasks = [tracker.repository.get(task_id) for task_id in workflow.tasks]
+        analyses = [task for task in tasks
+                    if task.job_ids and isinstance(
+                        task.params.get("output_settings"), dict)]
+        if len(analyses) == 1:
+            task = analyses[0]
+            settings = task.params["output_settings"]
+            return manifest.model_copy(update={
+                "original_pixels_not_required": (
+                    settings.get("original_pixels_not_required") is True),
+                "workflow_name": task.task_name,
+                "workflow_version": task.task_version,
+            })
+    except (AttributeError, KeyError, ValueError) as exc:
+        logger.info("No unambiguous executed workflow output policy: %s", exc)
+    return manifest
 
 
 def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None):
@@ -3678,7 +3697,11 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
             manifest_sha256=hashlib.sha256(raw).hexdigest(),
             source_biocodes=sorted({collection.image_binding(image.node_id)
                                    .source.pixel_identity.iscc_code
-                                   for image in images}))
+                                   for image in images
+                                   if collection.image_binding(image.node_id)
+                                   .source.pixel_identity is not None}),
+            decision_basis=sorted({collection.image_binding(image.node_id)
+                                   .decision_basis for image in images}))
     return evidence
 
 
