@@ -115,6 +115,7 @@ except ImportError as exc:
 SHALLOW_ZARR_SUPPORT_AVAILABLE = False
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     try:
+        from biomero_shallower.ngff import read_attrs as read_ngff_attrs
         from biomero_importer.utils.canonical_promotion import (
             CanonicalPromotionService,
         )
@@ -1606,8 +1607,7 @@ def verify_exported_plate_source(conn, plate, export_path, source,
     provider = identity_provider or IsccBioIdentityProvider()
 
     def verify():
-        with (Path(export_path) / ".zattrs").open(encoding="utf-8") as handle:
-            metadata = json.load(handle)["plate"]
+        metadata = read_ngff_attrs(export_path)["plate"]
         wells = {(well.getRow(), well.getColumn()): well
                  for well in plate.listChildren()}
         paths = {well["path"]: wells[(well["rowIndex"], well["columnIndex"])]
