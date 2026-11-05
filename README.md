@@ -111,7 +111,10 @@ attachments skip those directories and report the skipped count.
 ## Storage provenance and repair
 
 Shallow-result provenance uses the shared schema-2 manifest parser from
-`biomero-schema>=0.3.0b1,<0.4` (also required by the matching BIOMERO core).
+`biomero-schema>=0.3.0b3,<0.4`. Lazy comparison metadata and source-linked
+decisions require `biomero-shallower>=0.1.0b9,<0.2` in the worker and matching
+importer environment. Use the matching published helper image for remote
+shallowing; NL-BIOMERO supplies the coordinated package and image versions.
 Plate annotations collect the source identities from the manifest's image
 bindings; Image annotations select their own image node. Both v2 and v3
 interchange profiles are read without converting the store. Unsupported
