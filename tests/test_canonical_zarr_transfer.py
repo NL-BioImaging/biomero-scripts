@@ -9,6 +9,7 @@ from time import monotonic
 from types import SimpleNamespace
 
 import pytest
+from biomero_shallower.ngff import read_attrs as read_ngff_attrs
 
 from biomero_schema.zarr import (
     CANONICAL_PLATE_IMAGE_NAMESPACE,
@@ -96,6 +97,7 @@ def _load_canonical_functions():
         "ZarrLabelComponent": ZarrLabelComponent,
         "Path": Path,
         "json": json,
+        "read_ngff_attrs": read_ngff_attrs,
         "logging": logging,
         "logger": logging.getLogger(__name__),
         "log": lambda text: None,

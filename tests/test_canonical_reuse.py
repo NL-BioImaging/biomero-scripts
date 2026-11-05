@@ -80,12 +80,21 @@ def test_cached_image_upgrade_persists_unambiguous_generation(tmp_path, pixel_id
 
 
 @pytest.mark.parametrize("match", [True, False])
-def test_new_plate_export_checks_omero_before_verifying(tmp_path, pixel_identity, match):
+@pytest.mark.parametrize("zarr_version", [2, pytest.param(3, marks=pytest.mark.skipif(
+    'read_ngff_attrs' not in SCRIPT_PATH.read_text(encoding="utf-8"),
+    reason="This source revision does not yet support fresh v3 Plate verification",
+))])
+def test_new_plate_export_checks_omero_before_verifying(tmp_path, pixel_identity, match, zarr_version):
     ns = helpers()
     source = plate_source(pixel_identity)
     # The fixture has one image at A/1/0.
-    (tmp_path / ".zattrs").write_text(json.dumps({"plate": {"wells": [
-        {"path": "A/1", "rowIndex": 0, "columnIndex": 0}]}}))
+    attrs = {"plate": {"wells": [
+        {"path": "A/1", "rowIndex": 0, "columnIndex": 0}]}}
+    metadata = tmp_path / (".zattrs" if zarr_version == 2 else "zarr.json")
+    metadata.write_text(json.dumps(attrs if zarr_version == 2 else {
+        "zarr_format": 3, "node_type": "group",
+        "attributes": {"ome": {"version": "0.5", **attrs}}}))
+    original_metadata = metadata.read_bytes()
     image = Object(42, [], shape=pixel_identity.shape, pixel_type=pixel_identity.dtype)
     well = SimpleNamespace(getRow=lambda: 0, getColumn=lambda: 0,
                            getImage=lambda index: image)
@@ -103,3 +112,6 @@ def test_new_plate_export_checks_omero_before_verifying(tmp_path, pixel_identity
         with pytest.raises(ValueError, match="do not match"):
             ns["verify_exported_plate_source"](SimpleNamespace(keepAlive=lambda: True), plate, tmp_path, source, Provider())
     assert calls[0]["image_id"] == 42
+    assert metadata.read_bytes() == original_metadata
+    if zarr_version == 3:
+        assert not (tmp_path / ".zattrs").exists()
