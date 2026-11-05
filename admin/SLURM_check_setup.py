@@ -60,7 +60,7 @@ import sys
 import pkg_resources
 
 # Version constant for easy version management
-VERSION = "2.9.0b23"
+VERSION = "2.9.0b24"
 
 logger = logging.getLogger(__name__)
 
