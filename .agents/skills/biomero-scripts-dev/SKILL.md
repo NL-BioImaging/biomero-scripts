@@ -220,7 +220,7 @@ When production behavior changes:
 4. Run the harness against the production worktree, for example:
 
 ```powershell
-$env:BIOMERO_SCRIPTS_ROOT = "D:\path\to\biomero-scripts"
+$env:BIOMERO_SCRIPTS_ROOT = "<path to the production worktree>"
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
 python -m pytest tests -q
 ```
