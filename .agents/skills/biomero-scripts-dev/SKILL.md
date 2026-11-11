@@ -5,6 +5,10 @@ description: Develop, review, test, document, and release the OMERO Python scrip
 
 # BIOMERO Scripts Development
 
+Read the [shared NL-BIOMERO engineering rules](https://github.com/NL-BioImaging/NL-BIOMERO/blob/master/.agents/skills/nl-biomero-engineering/SKILL.md)
+first; they govern agent guidance, branches, pull requests, merging and
+checkout cleanup. This skill adds only the scripts-specific rules.
+
 Treat this repository as the OMERO-script layer of BIOMERO. The scripts let
 OMERO users run containerized, FAIR bioimage-analysis workflows on a remote HPC
 cluster. They rely on the `biomero` Python library for SSH/Slurm orchestration
@@ -50,25 +54,6 @@ scripts request those views and own their OMERO-specific persistence.
 Do not assume that the environment visible to OMERO.web is the environment of
 the worker. Runtime environment variables that affect analysis normally need
 to be configured on `biomeroworker`.
-
-## Pull-request branch workflow
-
-Open pull requests ready for review by default, including test-harness PRs.
-Use draft status only when the user explicitly requests it. Record dependencies
-and merge order in the PR description; do not add a separate pre-review stage.
-
-On an existing non-default branch intended for a pull request, make focused,
-coherent commits and push them as normal completion of authorized development
-work. Do not hold the branch locally merely to run a slow full suite: run cheap,
-relevant checks that catch immediate mistakes, inspect the diff, then let the
-required GitHub Actions checks be the full-suite gate. If CI fails, inspect it
-and push a follow-up fix. Incremental branch commits may stay small because the
-pull request will normally be squash-merged.
-
-Use proportionate local verification before a direct default-branch push,
-release, change without suitable CI coverage, or higher-risk operation. This
-workflow does not authorize unrelated publication, merging, deployment, or
-destructive actions.
 
 ## Follow the script hierarchy
 
