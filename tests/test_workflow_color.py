@@ -62,3 +62,46 @@ def test_only_the_runner_resolves_the_color():
             encoding="utf-8"), path.name
     assert "constants.resolve_workflow_color" not in RUNNER.read_text(
         encoding="utf-8")
+
+
+def test_palette_wraps_around_for_large_workflow_ids():
+    from uuid import UUID
+    resolve, namespace = load_resolve_workflow_color()
+    palette = namespace["QUALITATIVE_COLOR_SCHEME"]
+    size = len(palette)
+    assert resolve("", UUID(int=size)) == palette[0]
+    assert resolve("", UUID(int=size + 3)) == palette[3]
+    assert resolve("", UUID(int=size - 1)) == palette[-1]
+    largest = UUID(int=2 ** 128 - 1)
+    assert resolve("", largest) == palette[(2 ** 128 - 1) % size]
+    assert resolve("", str(largest)) == resolve("", largest)
+
+
+def _calls(path, function_name):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and ast.unparse(node.func).endswith(function_name)]
+
+
+def test_runner_forwards_the_resolved_color_to_the_result_scripts():
+    tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+    assignments = {
+        ast.unparse(node.targets[0]): ast.unparse(node.value)
+        for node in ast.walk(tree) if isinstance(node, ast.Assign)}
+    resolved = assignments["roi_color"]
+    assert resolved.startswith("resolve_workflow_color(")
+    assert "constants.workflow.ROI_COLOR" in resolved
+    assert "wf_id" in resolved
+    assert assignments[
+        "inputs[constants.results.ROI_COLOR]"] == "rstring(roi_color)"
+
+
+def test_result_scripts_use_the_forwarded_color_as_given():
+    for path in RESULT_SCRIPTS:
+        calls = _calls(path, "execute_roi_postprocessing")
+        assert len(calls) == 1, path.name
+        keywords = {kw.arg: ast.unparse(kw.value) for kw in calls[0].keywords}
+        assert "constants.results.ROI_COLOR" in keywords["roi_color"], path.name
+        assert "resolve_workflow_color" not in keywords["roi_color"]
+        assert keywords["roi_color"].endswith("or ''")

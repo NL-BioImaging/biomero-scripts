@@ -68,9 +68,12 @@ def load(route):
 @pytest.mark.parametrize("route", ["Get", "Import"])
 def test_annotations_delegate_to_core_renderer(route):
     source = (ROOT / '_data' / f'SLURM_{route}_Results.py').read_text(encoding='utf-8')
-    if 'import render_workflow_metadata' not in source and (
-            'render_workflow_metadata)' not in source):
-        pytest.skip('versioned renderer is not available in this source revision')
+    # Remove the old forms once biomero-scripts#88 is merged. Any unknown
+    # import form fails instead of being skipped.
+    known_forms = ('from biomero.provenance import render_workflow_metadata',
+                   'from biomero.metadata_views import (')
+    assert any(form in source for form in known_forms), (
+        'unknown import form of render_workflow_metadata')
     ns = load(route)
     client = tracker()
     ns["add_image_annotations"](object(), client, 401, 23, "wf")
@@ -352,3 +355,31 @@ def test_csv_upload_failure_returns_visible_warning(route):
     assert message.startswith("Imported results")
     assert "Provenance warning" in message
     assert "disk unavailable" in message
+
+
+@pytest.mark.parametrize("route", ["Get", "Import"])
+def test_reduced_value_text_is_the_one_core_recognises(route):
+    """Pin the literal text; check it against core when core is installed."""
+    source = (ROOT / '_data' / f'SLURM_{route}_Results.py').read_text(encoding='utf-8')
+    if 'format_large_field_reference' not in source:
+        pytest.skip('core formatter is not used in this source revision')
+    ns = load(route)
+    calls = []
+
+    def post(**kwargs):
+        calls.append(dict(kwargs["kv_dict"]))
+        if any(len(str(v).encode("utf-8")) > 2704 for v in kwargs["kv_dict"].values()):
+            raise RuntimeError("index row size 2800 exceeds btree version 4 maximum 2704")
+        return len(calls)
+
+    ns["ezomero"].post_map_annotation = post
+    ns["add_image_annotations"](object(), tracker(), 401, 23, "wf")
+    written = calls[2]["Param_schema"]
+    assert re.fullmatch(
+        r"Large field; full value in metadata_wf\.csv "
+        r"\(utf8_bytes=10000; sha256=[0-9a-f]{64}\)", written), written
+    try:
+        from biomero.metadata_views import is_large_field_reference
+    except ImportError:
+        return  # Shared CI without core: the literal above is the contract.
+    assert is_large_field_reference(written)

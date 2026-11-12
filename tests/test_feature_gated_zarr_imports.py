@@ -14,11 +14,17 @@ def _zarr_module(path):
     """The module the script imports the Zarr contracts from.
 
     Older source revisions used the biomero.zarr_contracts re-export of the
-    schema; current ones import biomero_schema.zarr directly.
+    schema; current ones import biomero_schema.zarr directly. Any other form
+    fails, so a new import path is not silently skipped.
+
+    Remove the old form once biomero-scripts#88 is merged and the harness no
+    longer has to test older source revisions.
     """
     source = path.read_text(encoding="utf-8")
-    return ("biomero_schema.zarr" if "from biomero_schema.zarr import" in source
-            else "biomero.zarr_contracts")
+    new_form = "from biomero_schema.zarr import" in source
+    old_form = "from biomero.zarr_contracts import" in source
+    assert new_form != old_form, f"unknown Zarr import form in {path.name}"
+    return "biomero_schema.zarr" if new_form else "biomero.zarr_contracts"
 
 
 def _guarded_imports(path, module):
