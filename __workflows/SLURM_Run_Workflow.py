@@ -1158,11 +1158,10 @@ def slurm_job_failed(task) -> bool:
     """Whether the Slurm job of a workflow task ended without success.
 
     The task records the last Slurm state it saw, and is failed when the run
-    saw the job FAILED, CANCELLED or TIMEOUT.
+    saw the job FAILED, CANCELLED or TIMEOUT. Core says which states ended
+    without success (``SlurmJob.ended_without_success``).
     """
-    job_state = task.status or ""
-    return task.failed or (SlurmJob.is_terminal(job_state)
-                           and not job_state.startswith("COMPLETED"))
+    return task.failed or SlurmJob.ended_without_success(task.status)
 
 
 def results_imported(history, slurm_job_id, import_task_names) -> bool:
