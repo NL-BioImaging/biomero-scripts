@@ -112,7 +112,8 @@ def test_missing_snapshot_preserves_legacy_import():
     )
 
     assert build_options(None) is None
-    assert "no canonical" in logger.info_calls[-1][0][0]
+    assert "no canonical" in (
+        logger.warning_calls or logger.info_calls)[-1][0][0]
 
 
 @pytest.mark.parametrize("disabled_gate", [
@@ -125,6 +126,7 @@ def test_disabled_shallow_path_does_not_request_importer_operation(disabled_gate
         "SHALLOW_ZARR_ENABLED": True,
         "IMPORTER_ORDER_API_AVAILABLE": True,
         "SHALLOW_ZARR_OPERATION_AVAILABLE": True,
+        "logger": RecordingLogger(),
         disabled_gate: False,
     }
     (build_options,) = _load_functions(

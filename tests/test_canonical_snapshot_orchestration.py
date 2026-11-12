@@ -1,5 +1,6 @@
 import ast
 import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,7 +38,7 @@ def _load_snapshot_functions():
         "CanonicalInput": CanonicalInput,
         "UUID": UUID,
         "json": json,
-        "logger": SimpleNamespace(info=lambda *args, **kwargs: None),
+        "logger": logging.getLogger(__name__),
         "unwrap": lambda value: getattr(value, "val", value),
         "uuid4": uuid4,
     }

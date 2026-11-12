@@ -1,4 +1,5 @@
 import ast
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,8 @@ def load():
     namespace = dict(IMPORTER_ENABLED=True, SHALLOW_ZARR_ENABLED=True,
                      SHALLOW_ZARR_OPERATION_AVAILABLE=True,
                      IMPORTER_ORDER_API_AVAILABLE=True,
-                     load_canonical_input_snapshot=lambda *args: 'canonical')
+                     load_canonical_input_snapshot=lambda *args: 'canonical',
+                     logger=logging.getLogger(__name__))
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), namespace)
     return namespace['shallow_remote_results']
 

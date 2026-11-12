@@ -1,4 +1,5 @@
 import ast
+import logging
 import os
 import sys
 from types import ModuleType, SimpleNamespace
@@ -23,7 +24,7 @@ def load_function(path, name):
     ), None)
     if function is None:
         raise AssertionError(f"{name} is not available on this source revision")
-    namespace = {"SlurmClient": object}
+    namespace = {"SlurmClient": object, "logger": logging.getLogger(__name__)}
     exec(compile(ast.Module(body=[function], type_ignores=[]),
                  str(path), "exec"), namespace)
     return namespace[name]
@@ -175,7 +176,8 @@ def test_initializer_only_acquires_enabled_remote_shallower(
     helper.image_spec = Mock(return_value=spec)
     converter_spec = {"kind": "converter", "destination": "converter.sif"}
     specs = [converter_spec]
-    namespace = {"os": os, "slurmClient": client, "converter_specs": specs}
+    namespace = {"os": os, "slurmClient": client, "converter_specs": specs,
+                 "logger": logging.getLogger(__name__)}
 
     with patch.dict(sys.modules, {"biomero.remote_shallower": helper}):
         exec(compile(ast.Module(body=[branch], type_ignores=[]),
