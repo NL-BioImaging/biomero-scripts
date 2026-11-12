@@ -89,6 +89,7 @@ from contextlib import contextmanager, ExitStack
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple, Union
+from pydantic import ValidationError
 from uuid import UUID
 
 import omero
@@ -297,10 +298,6 @@ if not IMPORTER_ENABLED:
 
 IMPORTER_ORDER_API_AVAILABLE = False
 SHALLOW_ZARR_OPERATION_AVAILABLE = False
-logger.info(
-    "Shallow Zarr results: BIOMERO_SHALLOW_ZARR=%s, IMPORTER_ENABLED=%s",
-    SHALLOW_ZARR_ENABLED, IMPORTER_ENABLED,
-)
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     try:
         from biomero_importer import (
@@ -348,6 +345,14 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         manifest = tracker.get_canonical_input_manifest(
             workflow_id
         )
+    except ValidationError as exc:
+        logger.warning(
+            "Canonical input snapshot for workflow %s is corrupt; falling "
+            "back to the returned pixel identity and full results: %s",
+            workflow_id,
+            exc,
+        )
+        return None
     except ValueError as exc:
         # The tracker raises ValueError when no snapshot was recorded.
         logger.info(
@@ -391,16 +396,20 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
 def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None):
     """Administrator-only filesystem stage before result archiving."""
     if not (getattr(slurm_client, "remote_shallow_zarr", False)
-            and IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
-            and IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
-        logger.info(
+            and IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED):
+        logger.debug(
             "Remote shallowing not used for workflow %s: remote_shallow_zarr=%s, "
-            "importer=%s, BIOMERO_SHALLOW_ZARR=%s, importer order API=%s, "
-            "shallow operation available=%s; any shallowing happens locally "
-            "during import",
+            "importer=%s, BIOMERO_SHALLOW_ZARR=%s",
             workflow_id, getattr(slurm_client, "remote_shallow_zarr", False),
-            IMPORTER_ENABLED, SHALLOW_ZARR_ENABLED,
-            IMPORTER_ORDER_API_AVAILABLE, SHALLOW_ZARR_OPERATION_AVAILABLE)
+            IMPORTER_ENABLED, SHALLOW_ZARR_ENABLED)
+        return None
+    if not (IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
+        logger.warning(
+            "Remote shallowing is enabled but not run for workflow %s: "
+            "importer order API=%s, shallow operation available=%s; "
+            "results stay full",
+            workflow_id, IMPORTER_ORDER_API_AVAILABLE,
+            SHALLOW_ZARR_OPERATION_AVAILABLE)
         return None
     logger.info("Remote shallowing on Slurm requested for workflow %s in %s",
                 workflow_id, data_path)
@@ -417,17 +426,16 @@ def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None
 
 def build_shallow_import_options(canonical_inputs, client=None, remote_receipts=()):
     """Build an importer-owned shallow operation or preserve legacy import."""
-    if not (
-        IMPORTER_ENABLED
-        and SHALLOW_ZARR_ENABLED
-        and IMPORTER_ORDER_API_AVAILABLE
-        and SHALLOW_ZARR_OPERATION_AVAILABLE
-    ):
-        logger.info(
+    if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED):
+        logger.debug(
             "Shallow Zarr importer operation not requested: importer=%s, "
-            "BIOMERO_SHALLOW_ZARR=%s, importer order API=%s, shallow "
-            "operation available=%s; importing full results",
-            IMPORTER_ENABLED, SHALLOW_ZARR_ENABLED,
+            "BIOMERO_SHALLOW_ZARR=%s", IMPORTER_ENABLED, SHALLOW_ZARR_ENABLED)
+        return None
+    if not (IMPORTER_ORDER_API_AVAILABLE and SHALLOW_ZARR_OPERATION_AVAILABLE):
+        logger.warning(
+            "Shallow Zarr is enabled but the importer operation is not "
+            "requested: importer order API=%s, shallow operation "
+            "available=%s; importing full results",
             IMPORTER_ORDER_API_AVAILABLE, SHALLOW_ZARR_OPERATION_AVAILABLE)
         return None
     if canonical_inputs is None or not canonical_inputs.inputs:
@@ -4983,6 +4991,10 @@ def runScript() -> None:
     The workflow handles both standard OMERO import workflows and importer-enabled
     dataset imports based on configuration.
     """
+    logger.info(
+        "Shallow Zarr results: BIOMERO_SHALLOW_ZARR=%s, IMPORTER_ENABLED=%s",
+        SHALLOW_ZARR_ENABLED, IMPORTER_ENABLED,
+    )
     with SlurmClient.from_config() as slurmClient:
 
         _oldjobs = slurmClient.list_completed_jobs()

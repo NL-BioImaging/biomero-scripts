@@ -681,7 +681,7 @@ def runScript():
                         converter_specs.append(image_spec(slurmClient))
                         logger.info("Staging the remote shallower image")
                     else:
-                        logger.info(
+                        logger.debug(
                             "Remote shallower image not staged: "
                             "IMPORTER_ENABLED=%s, BIOMERO_SHALLOW_ZARR=%s, "
                             "remote_shallow_zarr=%s, remote_shallower_image=%s",

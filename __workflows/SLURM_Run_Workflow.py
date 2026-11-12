@@ -78,13 +78,6 @@ IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
-logger.info(
-    "Shallow Zarr results: BIOMERO_SHALLOW_ZARR=%s, IMPORTER_ENABLED=%s; "
-    "shallowing is %s",
-    SHALLOW_ZARR_ENABLED, IMPORTER_ENABLED,
-    "active" if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
-    else "off, results stay full",
-)
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     from biomero.zarr_contracts import CanonicalInput
 
@@ -567,7 +560,7 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
     """Fail before workflow submission when remote shallowing cannot run."""
     if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and use_zarr_format
             and slurmClient.remote_shallow_zarr):
-        logger.info(
+        logger.debug(
             "Remote shallower readiness check skipped: importer=%s, "
             "BIOMERO_SHALLOW_ZARR=%s, use_zarr_format=%s, "
             "remote_shallow_zarr=%s",
@@ -584,9 +577,6 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
     spec = image_spec(slurmClient)
     ready, pending = slurmClient._partition_existing_images([spec])
     if pending or not ready:
-        logger.error(
-            "Remote shallower image %s is missing or invalid; "
-            "refusing to start the workflow", spec["destination"])
         raise RuntimeError(
             f"Remote shallower image missing or invalid: {spec['destination']}. "
             "Ask an administrator to run SLURM Init Environment and verify "
@@ -619,6 +609,13 @@ def runScript():
         Exception: Various exceptions during workflow execution, all logged
             and handled gracefully.
     """
+    logger.info(
+        "Shallow Zarr results: BIOMERO_SHALLOW_ZARR=%s, IMPORTER_ENABLED=%s; "
+        "shallowing is %s",
+        SHALLOW_ZARR_ENABLED, IMPORTER_ENABLED,
+        "active" if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+        else "off, results stay full",
+    )
     # --------------------------------------------
     # :: Slurm Client ::
     # --------------------------------------------
@@ -2010,7 +2007,7 @@ def exportImageToSLURM(client: omscripts.client,
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and reconstruct_shallow_zarr:
             logger.info(
                 "Shallow Zarr enabled: reading canonical inputs returned by "
                 "Image Transfer for workflow %s", wf_id)
@@ -2021,6 +2018,10 @@ def exportImageToSLURM(client: omscripts.client,
                 task_id,
                 canonical_inputs,
             )
+        elif IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+            logger.debug(
+                "Not a Zarr workflow: no canonical input snapshot is expected "
+                "for workflow %s", wf_id)
 
         try:
             slurmClient.workflowTracker.complete_task(task_id, msg)
