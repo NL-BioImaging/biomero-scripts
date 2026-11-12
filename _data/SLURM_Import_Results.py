@@ -439,7 +439,7 @@ def build_shallow_import_options(canonical_inputs, client=None, remote_receipts=
             IMPORTER_ORDER_API_AVAILABLE, SHALLOW_ZARR_OPERATION_AVAILABLE)
         return None
     if canonical_inputs is None or not canonical_inputs.inputs:
-        logger.warning(
+        logger.info(
             "Shallow Zarr importer operation not requested: no canonical "
             "workflow input snapshot is available; importing full results"
         )
