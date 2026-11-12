@@ -679,6 +679,16 @@ def runScript():
                             and slurmClient.remote_shallower_image):
                         from biomero.remote_shallower import image_spec
                         converter_specs.append(image_spec(slurmClient))
+                        logger.info("Staging the remote shallower image")
+                    else:
+                        logger.info(
+                            "Remote shallower image not staged: "
+                            "IMPORTER_ENABLED=%s, BIOMERO_SHALLOW_ZARR=%s, "
+                            "remote_shallow_zarr=%s, remote_shallower_image=%s",
+                            os.getenv("IMPORTER_ENABLED", "false"),
+                            os.getenv("BIOMERO_SHALLOW_ZARR", "false"),
+                            slurmClient.remote_shallow_zarr,
+                            slurmClient.remote_shallower_image)
                     conn.keepAlive()
 
                     # 4. Submit one bounded workflow + converter image array.
