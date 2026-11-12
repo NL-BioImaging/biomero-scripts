@@ -16,6 +16,13 @@ import pytest
 
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
+try:
+    from biomero.metadata_views import format_large_field_reference
+except ImportError:  # Shared CI does not install an unpublished core branch.
+    def format_large_field_reference(csv_name, size, digest):
+        return (f"Large field; full value in {csv_name} "
+                f"(utf8_bytes={size}; sha256={digest})")
+
 pytestmark = pytest.mark.skipif(
     "def post_provenance_map_annotation" not in (
         ROOT / "_data" / "SLURM_Import_Results.py").read_text(encoding="utf-8"),
@@ -52,6 +59,7 @@ def load(route):
                                         values={"Task_ID": key, "Job_ID": key}))
         return rows
     ns["render_workflow_metadata"] = Mock(side_effect=render)
+    ns["format_large_field_reference"] = format_large_field_reference
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), ns)
     ns['record_import_storage_provenance'] = Mock()
     return ns
@@ -60,7 +68,8 @@ def load(route):
 @pytest.mark.parametrize("route", ["Get", "Import"])
 def test_annotations_delegate_to_core_renderer(route):
     source = (ROOT / '_data' / f'SLURM_{route}_Results.py').read_text(encoding='utf-8')
-    if 'from biomero.provenance import render_workflow_metadata' not in source:
+    if 'import render_workflow_metadata' not in source and (
+            'render_workflow_metadata)' not in source):
         pytest.skip('versioned renderer is not available in this source revision')
     ns = load(route)
     client = tracker()
@@ -106,6 +115,34 @@ def test_full_annotation_is_attempted_before_size_fallback(route):
     assert "metadata_wf.csv" in calls[2]["Param_schema"]
     assert "sha256" in calls[2]["Param_schema"]
     assert calls[-1]["Task_ID"] == "b"
+
+
+@pytest.mark.parametrize("route", ["Get", "Import"])
+def test_reduced_values_are_written_by_the_core_formatter(route):
+    """Core recognises the reduced text when refreshing; the scripts must not
+    format it themselves."""
+    source = (ROOT / '_data' / f'SLURM_{route}_Results.py').read_text(
+        encoding='utf-8')
+    if 'format_large_field_reference' not in source:
+        pytest.skip('core formatter is not used in this source revision')
+    ns = load(route)
+    ns["format_large_field_reference"] = Mock(return_value="REFERENCE")
+    calls = []
+
+    def post(**kwargs):
+        calls.append(dict(kwargs["kv_dict"]))
+        if any(len(str(v).encode("utf-8")) > 2704 for v in kwargs["kv_dict"].values()):
+            raise RuntimeError("index row size 2800 exceeds btree version 4 maximum 2704")
+        return len(calls)
+
+    ns["ezomero"].post_map_annotation = post
+    ns["add_image_annotations"](object(), tracker(), 401, 23, "wf")
+    reduced = [call for call in calls if "REFERENCE" in call.values()]
+    assert reduced and reduced[0]["Param_schema"] == "REFERENCE"
+    csv_name, size, digest = ns["format_large_field_reference"].call_args[0]
+    assert csv_name == "metadata_wf.csv"
+    assert size == len("λ" * 5000) * 2
+    assert len(digest) == 64
 
 
 @pytest.mark.parametrize("route", ["Get", "Import"])
