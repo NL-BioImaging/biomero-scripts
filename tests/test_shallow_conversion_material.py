@@ -417,10 +417,12 @@ def test_workflow_forwards_zarr_preference_as_reconstruction_policy():
 def test_shared_pipeline_owns_the_only_image_export():
     """Detached launch must queue before shallow-Zarr reconstruction starts."""
     tree = ast.parse(RUNNER_PATH.read_text(encoding="utf-8"))
+    # The stages moved out of the cancel-handling wrapper; older sources have
+    # everything in execute_workflow_pipeline.
+    pipeline_names = ("run_pipeline_stages", "execute_workflow_pipeline")
     pipeline = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "execute_workflow_pipeline"
+        node for name in pipeline_names for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
     )
     pipeline_nodes = set(ast.walk(pipeline))
     export_calls = [
@@ -447,15 +449,20 @@ def test_detached_launcher_records_zarr_execution_policy():
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "runScript"
     )
+    # Now a script function, taking (client, slurmClient, wf_id, task_name,
+    # selected_workflow_names, derived_params); it was a core function taking
+    # the tracker, task name, version and the names before the derived params.
     launcher = next(
         node for node in ast.walk(run_script)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "detached"
-        and node.func.attr == "register_detached_launcher"
+        and ((isinstance(node.func, ast.Name)
+              and node.func.id == "register_detached_launcher")
+             or (isinstance(node.func, ast.Attribute)
+                 and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == "detached"
+                 and node.func.attr == "register_detached_launcher"))
     )
-    extra_params = launcher.args[6]
+    extra_params = launcher.args[-1]
     assert isinstance(extra_params, ast.Dict)
     recorded = {
         key.value: value
