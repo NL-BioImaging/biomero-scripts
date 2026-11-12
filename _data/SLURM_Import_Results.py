@@ -5481,7 +5481,7 @@ def runScript() -> None:
                 # Every later reference uses this variable — no guessing from job ID.
                 _bulk_zip_perm = os.path.join(permanent_storage_path, f"{filename}.zip")
             except Exception as e:
-                logger.error(f"Failed to extract SLURM results: {e}")
+                logger.exception("Failed to extract SLURM results: %s", e)
                 message += f"\nFailed to extract SLURM results: {e}"
                 extraction_error = e  # defer raise so log is still uploaded below
 
