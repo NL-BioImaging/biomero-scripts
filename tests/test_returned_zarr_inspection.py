@@ -20,6 +20,9 @@ class RecordingLogger:
         self.info_calls = []
         self.warning_calls = []
 
+    def debug(self, *args, **kwargs):
+        pass
+
     def info(self, *args, **kwargs):
         self.info_calls.append((args, kwargs))
 
