@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 from biomero_schema.zarr import (
     CanonicalInput,
     CanonicalInputManifest,
@@ -31,6 +32,7 @@ def load_functions():
     ]
     namespace = {
         "UUID": UUID,
+        "ValidationError": ValidationError,
         "logger": logging.getLogger(__name__),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH), "exec"), namespace)
@@ -102,7 +104,7 @@ def test_tracking_disabled_returns_no_lineage_candidate(manifest):
     ) is None
 
 
-def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest):
+def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest, caplog):
     ns = load_functions()
     tracker = SimpleNamespace(
         get_canonical_input_manifest=lambda workflow_id: (_ for _ in ()).throw(
@@ -114,6 +116,39 @@ def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest):
         workflowTracker=tracker,
     )
 
-    assert ns["load_canonical_input_snapshot"](
-        client, str(manifest.workflow_id)
-    ) is None
+    with caplog.at_level(logging.DEBUG):
+        assert ns["load_canonical_input_snapshot"](
+            client, str(manifest.workflow_id)
+        ) is None
+    # "Not recorded" is an expected state, not a failure.
+    assert [record.levelno for record in caplog.records] == [logging.INFO]
+
+
+def test_lookup_failure_and_corrupt_snapshot_fall_back_with_warning(
+    manifest, caplog,
+):
+    if "except ValidationError" not in SCRIPT_PATH.read_text(encoding="utf-8"):
+        pytest.skip("Lookup-failure warning is not present in source revision")
+    ns = load_functions()
+    corrupt = None
+    try:
+        CanonicalInputManifest(workflow_id="not-a-uuid")
+    except ValidationError as exc:
+        corrupt = exc
+    assert corrupt is not None
+
+    for error in (RuntimeError("database unavailable"), corrupt):
+        def fail(workflow_id, error=error):
+            raise error
+
+        client = SimpleNamespace(
+            track_workflows=True,
+            workflowTracker=SimpleNamespace(get_canonical_input_manifest=fail),
+        )
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            assert ns["load_canonical_input_snapshot"](
+                client, str(manifest.workflow_id)
+            ) is None
+        # Anything but "not recorded" must be visible as a WARNING.
+        assert caplog.records[-1].levelno == logging.WARNING
