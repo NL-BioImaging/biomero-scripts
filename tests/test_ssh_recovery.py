@@ -87,7 +87,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     WorkflowCancelled = getattr(eventsourcing, 'WorkflowCancelled', RuntimeError)
     from dataclasses import dataclass
     from enum import Enum
-    from typing import Optional
+    from typing import Callable, Optional
     from uuid import UUID
     tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
     names = {'hpc_recovery_scope', 'poll_slurm_jobs', 'execute_workflow_pipeline',
@@ -96,7 +96,8 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
              'task_completed', 'slurm_job_failed', 'results_imported',
              'decide_workflow_resume', 'WorkflowResume', 'ResumeDecision',
              'export_data_stage', 'convert_data_stage', 'submit_workflow_jobs',
-             'monitor_slurm_jobs'}
+             'monitor_slurm_jobs', 'PipelineRun', 'JobUpdate', 'process_job_state',
+             'end_failed_job', 'import_completed_job'}
     functions = [n for n in tree.body
                  if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
     owns_resume = any(n.name == 'decide_workflow_resume' for n in functions)
@@ -148,19 +149,23 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     run = Mock(return_value=('', 42, 'workflow-id', 'task-id'))
     import_results = Mock(return_value={'Message': SimpleNamespace(getValue=lambda: 'Imported')})
     namespace = dict(logger=logging.getLogger(__name__), unwrap=lambda value: value,
-        detached=SimpleNamespace(load_task_history=lambda *a: history,
-                                 task_completed=lambda *a: True,
-                                 submitted_job=lambda *a: (42, 'task-id')),
         EXPORT_SCRIPTS=('export',) if owns_resume else (),
         CONVERSION_SCRIPTS=('convert',) if owns_resume else (),
         IMPORT_SCRIPTS=(),
         SlurmClient=SlurmClient, SlurmJob=SlurmJob, UUID=UUID, Optional=Optional,
         Enum=Enum, dataclass=dataclass, WorkflowCancelled=WorkflowCancelled,
+        Callable=Callable, WorkflowInterrupted=getattr(
+            eventsourcing, 'WorkflowInterrupted', RuntimeError),
         constants=constants,
         exportImageToSLURM=Mock(return_value=({}, 'export-task')),
         convertDataOnSLURM=Mock(return_value=({}, 'convert-task')),
         run_workflow=run, importResultsToOmero=import_results,
         timesleep=SimpleNamespace(sleep=lambda delay: None))
+    if not owns_resume:
+        # Sources before resume moved into the script use core's helpers.
+        namespace['detached'] = SimpleNamespace(
+            load_task_history=lambda *a: history, task_completed=lambda *a: True,
+            submitted_job=lambda *a: (42, 'task-id'))
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)
     args = (client, conn, slurm, 'workflow-id', ['analysis'],
             {}, {'analysis': {}}, {'analysis': {}}, '', 3, True, '0.4')

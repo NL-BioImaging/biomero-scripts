@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Callable, Optional
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -27,13 +27,21 @@ NODE_NAMES = {
     'cancel_workflow_run', 'register_detached_launcher',
     'execute_workflow_pipeline', 'run_pipeline_stages', 'export_data_stage',
     'convert_data_stage', 'submit_workflow_jobs', 'monitor_slurm_jobs',
-    'exportImageToSLURM', 'ensure_tracking_uuid'}
+    'exportImageToSLURM', 'convertDataOnSLURM', 'ensure_tracking_uuid',
+    'PipelineRun', 'JobUpdate', 'process_job_state', 'end_failed_job',
+    'import_completed_job'}
 NODES = [node for node in TREE.body
          if isinstance(node, (ast.FunctionDef, ast.ClassDef))
          and node.name in NODE_NAMES]
-if not any(node.name == 'decide_workflow_resume' for node in NODES):
-    pytest.skip('Source does not own resume decisions yet',
-                allow_module_level=True)
+FOUND = {node.name for node in NODES}
+if 'run_pipeline_stages' not in FOUND:
+    pytest.skip('Source has no detached pipeline yet', allow_module_level=True)
+# From here the source claims the feature: a renamed or missing piece must
+# fail these tests, not skip them.
+MISSING = {'decide_workflow_resume', 'cancel_workflow_run', 'PipelineRun',
+           'load_task_history', 'register_detached_launcher'} - FOUND
+if MISSING:
+    pytest.fail(f'Source lacks {sorted(MISSING)}', pytrace=False)
 
 
 
@@ -97,6 +105,9 @@ def runner_namespace(**overrides):
         is_launcher_task=eventsourcing.is_launcher_task,
         rbool=lambda value: value, rstring=lambda value: value,
         omscripts=SimpleNamespace(client=object), BlitzGateway=object,
+        Callable=Callable, WorkflowInterrupted=eventsourcing.WorkflowInterrupted,
+        Parameters=object, rlong=lambda value: value,
+        IMPORTER_ENABLED=False, SHALLOW_ZARR_ENABLED=False,
         ensure_tracking_uuid=eventsourcing_uuid,
         constants=biomero_constants, VERSION='2.9.0-test',
         EXPORT_SCRIPTS=(EXPORT,), CONVERSION_SCRIPTS=(CONVERT,),
@@ -440,39 +451,221 @@ def test_launcher_records_every_input_and_the_derived_values(tracker,
 
 # ------------------- cancel passes through every stage ------------------- #
 
-def cancelling_runner(tracker, workflow_id):
+class ClaimLost(eventsourcing.WorkflowInterrupted):
+    """What a detached worker raises when it lost its claim."""
+
+
+JOB = SimpleNamespace(getStatus=lambda: SimpleNamespace(getId=lambda: 8))
+
+
+def stage_setup(tracker, workflow_id):
+    """Client, connection and Slurm client for the real export/convert stages."""
+    scripts = [SimpleNamespace(id=5, getVersion=lambda: 'v', getName=lambda: EXPORT),
+               SimpleNamespace(id=6, getVersion=lambda: 'v', getName=lambda: CONVERT)]
+    conn = SimpleNamespace(
+        getScriptService=lambda: SimpleNamespace(getScripts=lambda: scripts),
+        keepAlive=lambda: None)
+    inputs = {'IDs': [1], 'Data_Type': 'Dataset'}
+    client = SimpleNamespace(getInput=lambda name: inputs.get(name),
+                             setOutput=lambda *args: None)
+    slurm = SimpleNamespace(
+        workflowTracker=tracker, cancel_slurm_jobs=Mock(),
+        update_slurm_scripts=lambda: SimpleNamespace(),
+        get_active_job_progress=lambda job: '0%',
+        get_workflow_tasks=lambda wf: history_of(tracker, wf))
+    tracker.add_launcher_task(workflow_id, biomero_constants.RUN_WF_SCRIPT,
+                              'v1', [], {})
+    return client, conn, slurm
+
+
+def last_event(tracker, workflow_id):
+    return [e.topic.rsplit('.', 1)[-1]
+            for e in tracker.recorder.select_events(workflow_id)][-1]
+
+
+def open_stage_tasks(tracker, workflow_id):
+    return [t.task_name for t in history_of(tracker, workflow_id)
+            if not (t.completed or t.failed)
+            and not eventsourcing.is_launcher_task(t)]
+
+
+def sub_script_that(stage, action):
+    """run_omero_script stand-in: `action` happens in the named stage only."""
     def run_omero_script(client, svc, script_id, inputs, **kwargs):
-        tracker.request_workflow_cancel(workflow_id, 'user asked')
-        tracker.raise_if_cancel_requested(workflow_id)
+        if script_id == {'export': 5, 'convert': 6}[stage]:
+            action()
+        return {'Message': SimpleNamespace(getValue=lambda: 'ok')}, JOB
     return run_omero_script
 
 
-def test_cancel_raised_inside_the_export_script_is_not_turned_into_an_error(
-        tracker, workflow_id):
-    """The export stage catches Exception; a cancel must pass through it."""
-    scripts = [SimpleNamespace(id=5, getVersion=lambda: 'v',
-                               getName=lambda: EXPORT)]
-    conn = SimpleNamespace(getScriptService=lambda: SimpleNamespace(
-        getScripts=lambda: scripts), keepAlive=lambda: None)
-    client = SimpleNamespace(getInput=lambda name: None)
-    slurm = SimpleNamespace(
-        workflowTracker=tracker, cancel_slurm_jobs=Mock(),
-        get_workflow_tasks=lambda wf: history_of(tracker, wf))
-    names = runner_namespace(
-        run_omero_script=cancelling_runner(tracker, workflow_id))
-    names['createFileName'] = lambda *args: 'input-folder'
-    names['convertDataOnSLURM'] = Mock()
+def run_real_stages(names, tracker, workflow_id, client, conn, slurm):
+    return names['execute_workflow_pipeline'](
+        client, conn, slurm, workflow_id, ['analysis'], {}, {}, {}, '', 3, True,
+        '0.4', zipfile='input-folder')
 
-    message = names['execute_workflow_pipeline'](
-        client, conn, slurm, workflow_id, [WORKFLOW], {}, {}, {}, '', 3,
-        True, '0.4', zipfile='input-folder')
+
+@pytest.mark.parametrize('stage', ['export', 'convert'])
+def test_cancel_inside_a_stage_script_ends_in_a_consistent_failed_state(
+        tracker, workflow_id, stage):
+    client, conn, slurm = stage_setup(tracker, workflow_id)
+
+    def cancel():
+        tracker.request_workflow_cancel(workflow_id, 'user asked')
+        tracker.raise_if_cancel_requested(workflow_id)
+    names = runner_namespace(run_omero_script=sub_script_that(stage, cancel))
+    slurm.get_all_image_versions_and_data_files = lambda: (None, ['input-folder'])
+
+    message = run_real_stages(names, tracker, workflow_id, client, conn, slurm)
 
     assert 'user asked' in message
-    export_task = [t for t in history_of(tracker, workflow_id)
-                   if t.task_name == EXPORT][0]
-    assert export_task.failed and 'user asked' in export_task.result_message
-    assert not export_task.completed
-    names['convertDataOnSLURM'].assert_not_called()
+    assert open_stage_tasks(tracker, workflow_id) == []
+    assert last_event(tracker, workflow_id) == 'WorkflowFailed'
+
+
+def test_cancel_inside_the_import_ends_in_a_consistent_failed_state(
+        tracker, workflow_id):
+    client, conn, slurm = stage_setup(tracker, workflow_id)
+    client.getInput = lambda name: True
+
+    def submit(slurm_client, params, file_params, client_, conn_, ui, zipfile,
+               email, wf_name, wf_id, output_settings=None):
+        return ui, 42, wf_id, add_task(tracker, wf_id, wf_name, [42], 'PENDING')
+
+    def import_results(*args, **kwargs):
+        add_task(tracker, workflow_id, IMPORT)
+        tracker.request_workflow_cancel(workflow_id, 'user asked')
+        tracker.raise_if_cancel_requested(workflow_id)
+    names = runner_namespace(
+        exportImageToSLURM=Mock(return_value=({}, 'x')),
+        convertDataOnSLURM=Mock(return_value=({}, 'x')),
+        run_workflow=submit, importResultsToOmero=import_results,
+        poll_slurm_jobs=lambda s, ids: {42: 'COMPLETED'},
+        upload_job_log_to_omero=lambda *args: '')
+
+    message = names['execute_workflow_pipeline'](
+        client, conn, slurm, workflow_id, ['analysis'], {}, {'analysis': {}},
+        {'analysis': {}}, '', 3, True, '0.4', zipfile='input-folder')
+
+    assert 'user asked' in message
+    assert open_stage_tasks(tracker, workflow_id) == []
+    assert last_event(tracker, workflow_id) == 'WorkflowFailed'
+    slurm.cancel_slurm_jobs.assert_called_once_with([])  # already completed
+
+
+@pytest.mark.parametrize('stage', ['export', 'convert'])
+def test_claim_lost_inside_a_stage_leaves_the_workflow_and_tasks_alone(
+        tracker, workflow_id, stage):
+    client, conn, slurm = stage_setup(tracker, workflow_id)
+
+    def lose_claim():
+        raise ClaimLost('lost')
+    names = runner_namespace(
+        run_omero_script=sub_script_that(stage, lose_claim))
+    slurm.get_all_image_versions_and_data_files = lambda: (None, ['input-folder'])
+
+    with pytest.raises(ClaimLost):
+        run_real_stages(names, tracker, workflow_id, client, conn, slurm)
+
+    assert not any(t.failed for t in history_of(tracker, workflow_id))
+    assert last_event(tracker, workflow_id) not in ('WorkflowFailed',
+                                                    'WorkflowCompleted')
+    slurm.cancel_slurm_jobs.assert_not_called()
+
+
+def test_stop_check_stops_the_run_between_steps_without_failing_it(
+        tracker, workflow_id):
+    names, slurm, export, convert, _ = pipeline_namespace(tracker)
+    checks = []
+
+    def stop_check():
+        checks.append(1)
+        if len(checks) == 2:  # after the export, before the conversion
+            raise ClaimLost('lost')
+    client = SimpleNamespace(getInput=lambda name: True)
+    conn = SimpleNamespace(keepAlive=lambda: None)
+
+    with pytest.raises(ClaimLost):
+        names['execute_workflow_pipeline'](
+            client, conn, slurm, workflow_id, [WORKFLOW], {}, {WORKFLOW: {}},
+            {WORKFLOW: {}}, '', 3, True, '0.4', zipfile='input-folder',
+            stop_check=stop_check)
+
+    export.assert_called_once()
+    convert.assert_not_called()
+    assert last_event(tracker, workflow_id) not in ('WorkflowFailed',
+                                                    'WorkflowCompleted')
+
+
+def test_stop_check_also_stops_the_poll_loop(tracker, workflow_id):
+    names, slurm, *_ = pipeline_namespace(tracker)
+    polls = []
+    names['poll_slurm_jobs'] = lambda s, ids: polls.append(1) or {42: 'RUNNING'}
+
+    def stop_check():
+        if polls:
+            raise ClaimLost('lost')
+    client = SimpleNamespace(getInput=lambda name: True)
+    conn = SimpleNamespace(keepAlive=lambda: None)
+
+    with pytest.raises(ClaimLost):
+        names['execute_workflow_pipeline'](
+            client, conn, slurm, workflow_id, [WORKFLOW], {}, {WORKFLOW: {}},
+            {WORKFLOW: {}}, '', 3, True, '0.4', zipfile='input-folder',
+            stop_check=stop_check)
+
+    assert polls == [1]
+    slurm.cancel_slurm_jobs.assert_not_called()
+
+
+def test_failing_scancel_still_fails_the_tasks_and_the_workflow(
+        tracker, workflow_id, caplog):
+    running = add_task(tracker, workflow_id, WORKFLOW, [42], 'RUNNING')
+    slurm = SimpleNamespace(
+        workflowTracker=tracker,
+        cancel_slurm_jobs=Mock(side_effect=RuntimeError('ssh down')),
+        get_workflow_tasks=lambda wf: history_of(tracker, wf))
+
+    with caplog.at_level(logging.ERROR, logger='runner'):
+        runner_namespace()['cancel_workflow_run'](
+            slurm, workflow_id, 'Cancelled: asked', '')
+
+    assert tracker.repository.get(running).failed
+    assert last_event(tracker, workflow_id) == 'WorkflowFailed'
+    assert any(r.levelno == logging.ERROR and 'ssh down' in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize('job_state', ['FAILED', 'CANCELLED by 1', 'TIMEOUT',
+                                       'MYSTERY'])
+def test_a_job_that_did_not_succeed_fails_its_task_keeps_its_log_and_fails_the_run(
+        tracker, workflow_id, job_state):
+    add_task(tracker, workflow_id, EXPORT, outcome='completed')
+    add_task(tracker, workflow_id, CONVERT, outcome='completed')
+    names, slurm, _, _, import_results = pipeline_namespace(tracker)
+    names['poll_slurm_jobs'] = lambda s, ids: {42: job_state}
+    names['upload_job_log_to_omero'] = Mock(return_value=' [log]')
+
+    message = run_pipeline(names, slurm, workflow_id, resume=False)
+
+    names['upload_job_log_to_omero'].assert_called_once()
+    import_results.assert_not_called()
+    assert ' [log]' in message
+    job_task = [t for t in history_of(tracker, workflow_id)
+                if t.task_name == WORKFLOW][0]
+    assert job_task.failed
+    assert last_event(tracker, workflow_id) == 'WorkflowFailed'
+
+
+def test_an_import_that_reports_failure_fails_the_run(tracker, workflow_id):
+    names, slurm, _, _, import_results = pipeline_namespace(tracker)
+    names['poll_slurm_jobs'] = lambda s, ids: {42: 'COMPLETED'}
+    import_results.return_value = {
+        'Message': SimpleNamespace(getValue=lambda: 'FAILED: no write access')}
+
+    message = run_pipeline(names, slurm, workflow_id)
+
+    assert 'FAILED: no write access' in message
+    assert last_event(tracker, workflow_id) == 'WorkflowFailed'
 
 
 def test_every_stage_that_catches_exceptions_lets_a_cancel_pass():
@@ -496,8 +689,8 @@ def test_every_stage_that_catches_exceptions_lets_a_cancel_pass():
                 continue
             handler_types = [h.type.id for h in node.handlers
                              if isinstance(h.type, ast.Name)]
-            if 'WorkflowCancelled' not in handler_types or (
-                    handler_types.index('WorkflowCancelled')
+            if 'WorkflowInterrupted' not in handler_types or (
+                    handler_types.index('WorkflowInterrupted')
                     > handler_types.index('Exception')):
                 problems.append(func.name)
     assert not problems, f'{problems} swallow a cancel as a generic error'
