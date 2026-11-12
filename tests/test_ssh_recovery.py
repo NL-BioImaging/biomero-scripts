@@ -87,7 +87,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     WorkflowCancelled = getattr(eventsourcing, 'WorkflowCancelled', RuntimeError)
     from dataclasses import dataclass
     from enum import Enum
-    from typing import Callable, Optional
+    from typing import Any, Callable, Optional
     from uuid import UUID
     tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
     names = {'hpc_recovery_scope', 'poll_slurm_jobs', 'execute_workflow_pipeline',
@@ -154,7 +154,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
         IMPORT_SCRIPTS=(),
         SlurmClient=SlurmClient, SlurmJob=SlurmJob, UUID=UUID, Optional=Optional,
         Enum=Enum, dataclass=dataclass, WorkflowCancelled=WorkflowCancelled,
-        Callable=Callable, WorkflowInterrupted=getattr(
+        Any=Any, BlitzGateway=object, Callable=Callable, WorkflowInterrupted=getattr(
             eventsourcing, 'WorkflowInterrupted', RuntimeError),
         constants=constants,
         exportImageToSLURM=Mock(return_value=({}, 'export-task')),

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -105,7 +105,7 @@ def runner_namespace(**overrides):
         is_launcher_task=eventsourcing.is_launcher_task,
         rbool=lambda value: value, rstring=lambda value: value,
         omscripts=SimpleNamespace(client=object), BlitzGateway=object,
-        Callable=Callable, WorkflowInterrupted=eventsourcing.WorkflowInterrupted,
+        Any=Any, Callable=Callable, WorkflowInterrupted=eventsourcing.WorkflowInterrupted,
         Parameters=object, rlong=lambda value: value,
         IMPORTER_ENABLED=False, SHALLOW_ZARR_ENABLED=False,
         ensure_tracking_uuid=eventsourcing_uuid,
@@ -731,3 +731,116 @@ def test_cancel_check_between_export_and_conversion(tracker, workflow_id):
     run_pipeline(names, slurm, workflow_id)
 
     convert.assert_not_called()
+
+
+# ------------- the claim is checked before the owner-only writes ------------- #
+
+class Claim:
+    """A stop check that can be flipped from inside a stub."""
+
+    def __init__(self):
+        self.lost = False
+
+    def __call__(self):
+        if self.lost:
+            raise ClaimLost('lost')
+
+
+def run_with_claim(names, slurm, workflow_id, claim):
+    client = SimpleNamespace(getInput=lambda name: True)
+    conn = SimpleNamespace(keepAlive=lambda: None)
+    return names['execute_workflow_pipeline'](
+        client, conn, slurm, workflow_id, [WORKFLOW], {}, {WORKFLOW: {}},
+        {WORKFLOW: {}}, '', 3, True, '0.4', zipfile='input-folder',
+        stop_check=claim)
+
+
+def test_claim_lost_during_a_poll_writes_nothing_after_the_poll(
+        tracker, workflow_id):
+    claim = Claim()
+    names, slurm, _, _, import_results = pipeline_namespace(tracker)
+
+    def poll(slurm_client, job_ids):
+        claim.lost = True
+        return {42: 'COMPLETED'}
+    names['poll_slurm_jobs'] = poll
+
+    with pytest.raises(ClaimLost):
+        run_with_claim(names, slurm, workflow_id, claim)
+
+    job_task = [t for t in history_of(tracker, workflow_id)
+                if t.task_name == WORKFLOW][0]
+    assert job_task.status == 'PENDING'  # the COMPLETED state was not written
+    assert not job_task.completed
+    import_results.assert_not_called()
+    assert last_event(tracker, workflow_id) not in ('WorkflowFailed',
+                                                    'WorkflowCompleted')
+
+
+def test_claim_lost_during_the_import_leaves_the_outcome_to_the_new_owner(
+        tracker, workflow_id):
+    claim = Claim()
+    names, slurm, _, _, import_results = pipeline_namespace(tracker)
+    names['poll_slurm_jobs'] = lambda s, ids: {42: 'COMPLETED'}
+
+    def import_then_lose_claim(*args, **kwargs):
+        claim.lost = True
+        return {}
+    import_results.side_effect = import_then_lose_claim
+
+    with pytest.raises(ClaimLost):
+        run_with_claim(names, slurm, workflow_id, claim)
+
+    assert last_event(tracker, workflow_id) not in ('WorkflowFailed',
+                                                    'WorkflowCompleted')
+
+
+def test_cancel_arriving_during_the_import_does_not_stop_the_final_write(
+        tracker, workflow_id):
+    """Only the claim is checked before the outcome: a late cancel completes."""
+    names, slurm, _, _, import_results = pipeline_namespace(tracker)
+    names['poll_slurm_jobs'] = lambda s, ids: {42: 'COMPLETED'}
+    import_results.side_effect = lambda *a, **k: tracker.request_workflow_cancel(
+        workflow_id, 'too late') or {}
+
+    run_with_claim(names, slurm, workflow_id, Claim())
+
+    assert last_event(tracker, workflow_id) == 'WorkflowCompleted'
+
+
+def test_claim_lost_during_the_conversion_stops_before_any_submission(
+        tracker, workflow_id):
+    claim = Claim()
+    names, slurm, _, convert, _ = pipeline_namespace(tracker)
+    convert.side_effect = lambda *a: setattr(claim, 'lost', True) or ({}, 'x')
+
+    with pytest.raises(ClaimLost):
+        run_with_claim(names, slurm, workflow_id, claim)
+
+    names['run_workflow'].assert_not_called()
+
+
+def test_failing_scancel_names_the_jobs_to_cancel_by_hand(tracker, workflow_id):
+    add_task(tracker, workflow_id, WORKFLOW, [42], 'RUNNING')
+    slurm = SimpleNamespace(
+        workflowTracker=tracker,
+        cancel_slurm_jobs=Mock(side_effect=RuntimeError('ssh down')),
+        get_workflow_tasks=lambda wf: history_of(tracker, wf))
+
+    message = runner_namespace()['cancel_workflow_run'](
+        slurm, workflow_id, 'Cancelled: asked', '')
+
+    assert 'Slurm jobs [42] could not be cancelled; cancel them manually' in message
+    failed = tracker.repository.get(workflow_id)
+    assert failed.finished
+
+
+def test_unreadable_tasks_still_fail_the_workflow(tracker, workflow_id):
+    slurm = SimpleNamespace(
+        workflowTracker=tracker, cancel_slurm_jobs=Mock(),
+        get_workflow_tasks=Mock(side_effect=RuntimeError('database down')))
+
+    runner_namespace()['cancel_workflow_run'](
+        slurm, workflow_id, 'Cancelled: asked', '')
+
+    assert last_event(tracker, workflow_id) == 'WorkflowFailed'
