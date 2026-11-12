@@ -73,7 +73,8 @@ def request_cancel(tracker, workflow_id, requester_id, is_admin, reason):
     logger.info(f"User {requester_id} requested cancel of workflow "
                 f"{workflow_id}: {reason}")
     return (f"Cancel requested for workflow {workflow_id}. It stops at its "
-            f"next step and shows as FAILED with this reason.")
+            f"next step and shows as FAILED with this reason. (Batched "
+            f"workflows that run inline, not detached, do not honour cancel.)")
 
 
 def runScript():
