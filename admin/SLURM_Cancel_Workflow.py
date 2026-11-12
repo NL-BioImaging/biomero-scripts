@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# Modified work Copyright 2022 Torec Luik, Amsterdam UMC
+# Copyright 2026 Torec Luik, Amsterdam UMC
 # Use is subject to license terms supplied in LICENSE.txt
 #
 """Ask a running BIOMERO workflow to cancel.
@@ -28,6 +28,7 @@ from biomero import WorkflowTracker
 _WORKFLOW_ID = "Workflow_ID"
 _REASON = "Reason"
 _DEFAULT_REASON = "Cancelled by user"
+_MAX_REASON_LENGTH = 200
 
 # Version constant for easy version management
 VERSION = "2.9.0b24"
@@ -43,10 +44,12 @@ def request_cancel(tracker, workflow_id, requester_id, is_admin, reason):
         workflow_id (UUID): The workflow to cancel.
         requester_id (int): OMERO user ID of whoever asks.
         is_admin (bool): Whether that user is an OMERO administrator.
-        reason (str): Why, recorded with the request.
+        reason (str): Why, recorded with the request (cut to
+            ``_MAX_REASON_LENGTH`` characters).
 
     Returns:
-        str: The message for the user.
+        str: The message for the user. A workflow that already finished, or
+            that already has a cancel request, records nothing new.
 
     Raises:
         PermissionError: If the requester is neither admin nor the workflow's
@@ -54,11 +57,15 @@ def request_cancel(tracker, workflow_id, requester_id, is_admin, reason):
     """
     workflow = tracker.repository.get(workflow_id)
     if not (is_admin or workflow.user == requester_id):
-        logger.warning(f"User {requester_id} may not cancel workflow "
-                       f"{workflow_id} of user {workflow.user}")
+        # Raised, and logged once by the caller with its traceback.
         raise PermissionError(
             f"Workflow {workflow_id} belongs to another user; only its owner "
             f"or an administrator can cancel it.")
+    if tracker.is_workflow_finished(workflow_id):
+        logger.info(f"Workflow {workflow_id} already finished; no cancel "
+                    f"recorded")
+        return f"Workflow {workflow_id} already finished; nothing to cancel."
+    reason = reason[:_MAX_REASON_LENGTH]
     if tracker.is_workflow_cancel_requested(workflow_id):
         logger.info(f"Cancel of workflow {workflow_id} was already requested")
         return f"Cancel of workflow {workflow_id} was already requested."
