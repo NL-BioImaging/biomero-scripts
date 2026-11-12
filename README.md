@@ -42,7 +42,7 @@ custom deployment, follow the [scripts installation guide](https://nl-bioimaging
 and install the scripts on the OMERO server and detached worker.
 
 Deploy matching core and scripts releases together. This release requires core's
-`biomero.provenance` and `biomero.maintenance` APIs even when optional features
+`biomero.metadata_views` and `biomero.maintenance` APIs even when optional features
 are disabled. Prerelease tag counters can differ between repositories; use the
 component references supplied by the NL-BIOMERO release.
 

@@ -41,7 +41,7 @@ from omero.sys import ParametersI
 from biomero import WorkflowTracker
 from biomero.detached import detached_mode_enabled
 from biomero.maintenance import queue_metadata_refresh
-from biomero.provenance import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
+from biomero.metadata_views import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor

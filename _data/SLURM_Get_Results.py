@@ -69,7 +69,8 @@ import re
 import zipfile
 import glob
 from biomero import SlurmClient, constants
-from biomero.provenance import render_workflow_metadata
+from biomero.metadata_views import (
+    format_large_field_reference, render_workflow_metadata)
 import logging
 import ezomero
 # from aicsimageio import AICSImage
@@ -758,9 +759,8 @@ def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
             safe_key = "Long_key_sha256_" + hashlib.sha256(raw_key).hexdigest()
             while safe_key in kv_dict or safe_key in reduced:
                 safe_key += "_"
-        reduced[safe_key] = (
-            "Large field; full value in {} (utf8_bytes={}; sha256={})".format(
-                reference, len(raw_value), hashlib.sha256(raw_value).hexdigest()))
+        reduced[safe_key] = format_large_field_reference(
+            reference, len(raw_value), hashlib.sha256(raw_value).hexdigest())
     if reduced == kv_dict:
         logger.warning("Index-size rejection for %s %s (%s); no large fields "
                        "could be reduced", object_type, object_id, ns)
@@ -2489,10 +2489,9 @@ def runScript():
                                         roi_name_prefix=(unwrap(
                                             client.getInput(constants.results.ROI_NAME_PREFIX))
                                             or ""),
-                                        roi_color=constants.resolve_workflow_color(
-                                            unwrap(client.getInput(
-                                                constants.results.ROI_COLOR)),
-                                            wf_id),
+                                        roi_color=(unwrap(client.getInput(
+                                            constants.results.ROI_COLOR))
+                                            or ""),
                                         clear_existing_rois=(unwrap(
                                             client.getInput(constants.results.ROI_CLEAR_EXISTING))
                                             or False),

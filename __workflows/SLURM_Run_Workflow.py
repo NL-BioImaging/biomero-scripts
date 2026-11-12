@@ -56,6 +56,7 @@ from __future__ import print_function
 import sys
 import os
 import json
+import re
 from uuid import UUID, uuid4
 import omero
 from omero.grid import JobParams
@@ -79,7 +80,7 @@ SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
-    from biomero.zarr_contracts import CanonicalInput
+    from biomero_schema.zarr import CanonicalInput
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -342,6 +343,53 @@ def build_output_settings(client, selected_output) -> dict:
                      constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID):
         settings[override] = unwrap(client.getInput(override))
     return settings
+
+
+# Blueprint qualitative color scheme, used for the ROIs of a workflow. Keep
+# these values in Python because OMERO scripts do not load the Blueprint
+# JavaScript package.
+# https://blueprintjs.com/docs/#core/colors.qualitative-color-schemes
+QUALITATIVE_COLOR_SCHEME = (
+    "#147EB3",  # cerulean3
+    "#29A634",  # forest3
+    "#D1980B",  # gold3
+    "#D33D17",  # vermilion3
+    "#9D3F9D",  # violet3
+    "#00A396",  # turquoise3
+    "#DB2C6F",  # rose3
+    "#8EB125",  # lime3
+    "#946638",  # sepia3
+    "#7961DB",  # indigo3
+)
+ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
+
+
+def resolve_workflow_color(color_override, workflow_id) -> str:
+    """Return the ROI color of a workflow.
+
+    The result import scripts and Labels2Rois receive this resolved value, so
+    the color is decided once, here.
+
+    Args:
+        color_override: Optional ``#RRGGBB`` color chosen by the user.
+        workflow_id: UUID of the workflow, used to pick a palette color
+            deterministically when there is no override.
+
+    Returns:
+        The override in upper case, or the palette color of the workflow.
+
+    Raises:
+        ValueError: If the override is not in ``#RRGGBB`` format.
+    """
+    color = str(color_override or "").strip().upper()
+    if color:
+        if not ROI_COLOR_PATTERN.fullmatch(color):
+            raise ValueError(
+                "Workflow color must be empty or use #RRGGBB format")
+        return color
+    return QUALITATIVE_COLOR_SCHEME[
+        UUID(str(workflow_id)).int % len(QUALITATIVE_COLOR_SCHEME)
+    ]
 
 
 def get_roi_script_capability(conn: BlitzGateway) -> dict:
@@ -2436,7 +2484,7 @@ def importResultsToOmero(client: omscripts.client,
             or rstring("Polygon"))
         inputs[constants.results.ROI_NAME_PREFIX] = rstring(
             f"{workflow_name}__{wf_id}")
-        roi_color = constants.resolve_workflow_color(
+        roi_color = resolve_workflow_color(
             unwrap(client.getInput(constants.workflow.ROI_COLOR)), wf_id)
         inputs[constants.results.ROI_COLOR] = rstring(roi_color)
         logger.info(f"Using ROI color {roi_color} for workflow {wf_id}")
