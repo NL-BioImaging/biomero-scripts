@@ -159,9 +159,24 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     tracker.fail_workflow.assert_not_called()
 
 
+def test_recovery_scope_preserves_disabled_legacy_behavior():
+    """Cores before the one-path change: a window of 0 bypasses the scope."""
+    ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    if not hasattr(ssh_recovery, 'enabled'):
+        pytest.skip('Core runs one code path; see the window-zero test below')
+    heartbeat = Mock()
+    client = SimpleNamespace(ssh_recovery_timeout=0, close=Mock())
+    with load('hpc_recovery_scope')(client, heartbeat):
+        assert ssh_recovery.retry(client, lambda: 'legacy', 'read') == 'legacy'
+    heartbeat.assert_not_called()
+    client.close.assert_not_called()
+
+
 def test_recovery_scope_with_window_zero_is_the_same_path_without_retries():
     """Core runs one code path: 0 only turns retrying off."""
     ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    if hasattr(ssh_recovery, 'enabled'):
+        pytest.skip('This core still bypasses the scope when the window is 0')
     heartbeat = Mock()
     client = SimpleNamespace(ssh_recovery_timeout=0, close=Mock())
     with load('hpc_recovery_scope')(client, heartbeat):
