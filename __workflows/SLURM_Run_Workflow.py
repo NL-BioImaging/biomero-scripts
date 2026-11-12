@@ -118,16 +118,14 @@ def ensure_tracking_uuid(value):
 def parse_canonical_inputs_output(results):
     """Validate canonical input records returned by Image Transfer."""
     if not results or CANONICAL_INPUTS_OUTPUT not in results:
-        logger.warning(
-            "Image Transfer returned no %s output; results will stay full "
-            "(no shallowing) for lack of a canonical input snapshot",
-            CANONICAL_INPUTS_OUTPUT)
+        logger.debug(
+            "Image Transfer returned no %s output", CANONICAL_INPUTS_OUTPUT)
         return ()
     raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
     if not raw_value:
-        logger.warning(
-            "Image Transfer returned an empty %s output; results will stay "
-            "full (no shallowing)", CANONICAL_INPUTS_OUTPUT)
+        logger.debug(
+            "Image Transfer returned an empty %s output",
+            CANONICAL_INPUTS_OUTPUT)
         return ()
     payload = json.loads(raw_value)
     if not isinstance(payload, list):
@@ -140,14 +138,19 @@ def record_canonical_input_snapshot(
     workflow_id,
     export_task_id,
     canonical_inputs,
+    zarr_workflow=True,
 ):
     """Record the immutable canonical input snapshot in workflow tracking."""
     if not canonical_inputs:
-        logger.warning(
+        # Only Zarr workflows are expected to have a snapshot; without one
+        # the result import skips shallowing and keeps full results.
+        logger.log(
+            logging.WARNING if zarr_workflow else logging.DEBUG,
             "Image Transfer returned no complete canonical input snapshot "
-            "for workflow %s; result processing will use returned pixel "
-            "identity matching instead of task-lineage candidates",
+            "for workflow %s (Zarr workflow: %s); result import will not "
+            "shallow and results stay full",
             workflow_id,
+            zarr_workflow,
         )
         return False
     if not slurm_client.track_workflows:
@@ -613,8 +616,8 @@ def runScript():
         "Shallow Zarr results: BIOMERO_SHALLOW_ZARR=%s, IMPORTER_ENABLED=%s; "
         "shallowing is %s",
         SHALLOW_ZARR_ENABLED, IMPORTER_ENABLED,
-        "active" if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
-        else "off, results stay full",
+        "enabled by flags" if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+        else "disabled, results stay full",
     )
     # --------------------------------------------
     # :: Slurm Client ::
@@ -2007,7 +2010,7 @@ def exportImageToSLURM(client: omscripts.client,
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and reconstruct_shallow_zarr:
+        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
             logger.info(
                 "Shallow Zarr enabled: reading canonical inputs returned by "
                 "Image Transfer for workflow %s", wf_id)
@@ -2017,11 +2020,8 @@ def exportImageToSLURM(client: omscripts.client,
                 wf_id,
                 task_id,
                 canonical_inputs,
+                zarr_workflow=reconstruct_shallow_zarr,
             )
-        elif IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
-            logger.debug(
-                "Not a Zarr workflow: no canonical input snapshot is expected "
-                "for workflow %s", wf_id)
 
         try:
             slurmClient.workflowTracker.complete_task(task_id, msg)

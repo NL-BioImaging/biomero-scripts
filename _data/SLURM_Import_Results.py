@@ -345,6 +345,7 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         manifest = tracker.get_canonical_input_manifest(
             workflow_id
         )
+    # ValidationError subclasses ValueError, so it must be caught first.
     except ValidationError as exc:
         logger.warning(
             "Canonical input snapshot for workflow %s is corrupt; falling "
@@ -411,9 +412,14 @@ def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None
             workflow_id, IMPORTER_ORDER_API_AVAILABLE,
             SHALLOW_ZARR_OPERATION_AVAILABLE)
         return None
+    canonical = load_canonical_input_snapshot(slurm_client, workflow_id)
+    if canonical is None or not canonical.inputs:
+        logger.info(
+            "No canonical snapshot for workflow %s; remote shallowing "
+            "skipped, results stay full", workflow_id)
+        return None
     logger.info("Remote shallowing on Slurm requested for workflow %s in %s",
                 workflow_id, data_path)
-    canonical = load_canonical_input_snapshot(slurm_client, workflow_id)
     kwargs = {}
     if omero_conn is not None:
         def heartbeat():
@@ -5493,7 +5499,7 @@ def runScript() -> None:
                 # Every later reference uses this variable — no guessing from job ID.
                 _bulk_zip_perm = os.path.join(permanent_storage_path, f"{filename}.zip")
             except Exception as e:
-                logger.exception("Failed to extract SLURM results: %s", e)
+                logger.error("Failed to extract SLURM results: %s", e)
                 message += f"\nFailed to extract SLURM results: {e}"
                 extraction_error = e  # defer raise so log is still uploaded below
 
