@@ -419,7 +419,8 @@ def test_shared_pipeline_owns_the_only_image_export():
     tree = ast.parse(RUNNER_PATH.read_text(encoding="utf-8"))
     # The stages moved out of the cancel-handling wrapper; older sources have
     # everything in execute_workflow_pipeline.
-    pipeline_names = ("run_pipeline_stages", "execute_workflow_pipeline")
+    pipeline_names = ("export_data_stage", "run_pipeline_stages",
+                      "execute_workflow_pipeline")
     pipeline = next(
         node for name in pipeline_names for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == name

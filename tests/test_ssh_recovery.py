@@ -94,7 +94,9 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
              # Resume and cancel handling, once the source owns them.
              'run_pipeline_stages', 'cancel_workflow_run', 'load_task_history',
              'task_completed', 'slurm_job_failed', 'results_imported',
-             'decide_workflow_resume', 'WorkflowResume', 'ResumeDecision'}
+             'decide_workflow_resume', 'WorkflowResume', 'ResumeDecision',
+             'export_data_stage', 'convert_data_stage', 'submit_workflow_jobs',
+             'monitor_slurm_jobs'}
     functions = [n for n in tree.body
                  if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
     owns_resume = any(n.name == 'decide_workflow_resume' for n in functions)
