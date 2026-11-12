@@ -180,7 +180,8 @@ def test_initializer_only_acquires_enabled_remote_shallower(
                  "logger": logging.getLogger(__name__)}
 
     with patch.dict(sys.modules, {"biomero.remote_shallower": helper}):
-        exec(compile(ast.Module(body=[branch], type_ignores=[]),
+        exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],
+                                type_ignores=[]),
                      str(INIT_SCRIPT), "exec"), namespace)
 
     assert specs == [converter_spec] + ([spec] if expected else [])
@@ -188,6 +189,52 @@ def test_initializer_only_acquires_enabled_remote_shallower(
         helper.image_spec.assert_called_once_with(client)
     else:
         helper.image_spec.assert_not_called()
+
+
+def _flag_assignments(tree):
+    # The flag locals are computed once before the branch in newer sources.
+    return [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name)
+                and target.id in ("importer_enabled", "shallow_zarr_enabled")
+                for target in node.targets)
+    ]
+
+
+@pytest.mark.parametrize("importer,shallow,image,level", [
+    ("false", "true", "shallower.sif", logging.DEBUG),
+    ("true", "false", "shallower.sif", logging.DEBUG),
+    ("true", "true", "", logging.WARNING),
+])
+def test_initializer_logs_unstaged_shallower_by_reason(
+    monkeypatch, caplog, importer, shallow, image, level,
+):
+    source = INIT_SCRIPT.read_text(encoding="utf-8")
+    if "remote_shallower_image is empty" not in source:
+        pytest.skip("Staging decision logging is not in source revision")
+    tree = ast.parse(source)
+    branch = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(isinstance(statement, ast.ImportFrom)
+                and statement.module == "biomero.remote_shallower"
+                for statement in node.body)
+    )
+    monkeypatch.setenv("IMPORTER_ENABLED", importer)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", shallow)
+    client = SimpleNamespace(
+        remote_shallow_zarr=True, remote_shallower_image=image)
+    specs = []
+    namespace = {"os": os, "slurmClient": client, "converter_specs": specs,
+                 "logger": logging.getLogger(__name__)}
+    with patch.dict(sys.modules, {"biomero.remote_shallower": ModuleType(
+            "biomero.remote_shallower")}), caplog.at_level(logging.DEBUG):
+        exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],
+                                type_ignores=[]),
+                     str(INIT_SCRIPT), "exec"), namespace)
+    assert specs == []
+    assert [record.levelno for record in caplog.records] == [level]
 
 
 def test_workflow_preflight_accepts_ready_remote_shallower():

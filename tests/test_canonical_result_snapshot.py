@@ -104,7 +104,7 @@ def test_tracking_disabled_returns_no_lineage_candidate(manifest):
     ) is None
 
 
-def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest):
+def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest, caplog):
     ns = load_functions()
     tracker = SimpleNamespace(
         get_canonical_input_manifest=lambda workflow_id: (_ for _ in ()).throw(
@@ -116,9 +116,12 @@ def test_missing_legacy_snapshot_returns_no_lineage_candidate(manifest):
         workflowTracker=tracker,
     )
 
-    assert ns["load_canonical_input_snapshot"](
-        client, str(manifest.workflow_id)
-    ) is None
+    with caplog.at_level(logging.DEBUG):
+        assert ns["load_canonical_input_snapshot"](
+            client, str(manifest.workflow_id)
+        ) is None
+    # "Not recorded" is an expected state, not a failure.
+    assert [record.levelno for record in caplog.records] == [logging.INFO]
 
 
 def test_lookup_failure_and_corrupt_snapshot_fall_back_with_warning(

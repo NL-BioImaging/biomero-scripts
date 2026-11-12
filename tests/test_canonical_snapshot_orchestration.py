@@ -39,6 +39,7 @@ def _load_snapshot_functions():
         "UUID": UUID,
         "json": json,
         "logger": logging.getLogger(__name__),
+        "logging": logging,
         "unwrap": lambda value: getattr(value, "val", value),
         "uuid4": uuid4,
     }
@@ -172,3 +173,22 @@ def test_tracking_uuid_preserves_value_or_generates_fallback():
 
     assert ns["ensure_tracking_uuid"](existing) == existing
     assert isinstance(ns["ensure_tracking_uuid"](None), UUID)
+
+
+@pytest.mark.parametrize("zarr_workflow,level", [
+    (True, logging.WARNING), (False, logging.DEBUG)])
+def test_missing_snapshot_level_depends_on_zarr_workflow(
+    caplog, zarr_workflow, level,
+):
+    if "zarr_workflow" not in SCRIPT_PATH.read_text(encoding="utf-8"):
+        pytest.skip("Format-aware snapshot logging is not in source revision")
+    ns = _load_snapshot_functions()
+    slurm = Slurm()
+
+    with caplog.at_level(logging.DEBUG):
+        result = ns["record_canonical_input_snapshot"](
+            slurm, uuid4(), uuid4(), (), zarr_workflow=zarr_workflow)
+
+    assert result is False
+    assert slurm.workflowTracker.calls == []
+    assert [record.levelno for record in caplog.records] == [level]

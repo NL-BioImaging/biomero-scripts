@@ -17,11 +17,12 @@ SCRIPT_PATH = (
 
 class RecordingLogger:
     def __init__(self):
+        self.debug_calls = []
         self.info_calls = []
         self.warning_calls = []
 
     def debug(self, *args, **kwargs):
-        pass
+        self.debug_calls.append((args, kwargs))
 
     def info(self, *args, **kwargs):
         self.info_calls.append((args, kwargs))
@@ -115,8 +116,8 @@ def test_missing_snapshot_preserves_legacy_import():
     )
 
     assert build_options(None) is None
-    assert "no canonical" in (
-        logger.warning_calls or logger.info_calls)[-1][0][0]
+    assert "no canonical" in logger.info_calls[-1][0][0]
+    assert not logger.warning_calls
 
 
 @pytest.mark.parametrize("disabled_gate", [
@@ -204,3 +205,42 @@ def test_legacy_label_options_remain_in_fallback_path():
     assert "find_label_zarr_paths(results_path) if import_label_zarrs else []" in source
     assert "Import_Only_Labels=true but no label zarr directories found" in source
     assert '"source": "SLURM_Results_Labels"' in source
+
+
+def _gate_namespace(**gates):
+    logger = RecordingLogger()
+    namespace = {
+        "IMPORTER_ENABLED": True,
+        "SHALLOW_ZARR_ENABLED": True,
+        "IMPORTER_ORDER_API_AVAILABLE": True,
+        "SHALLOW_ZARR_OPERATION_AVAILABLE": True,
+        "logger": logger,
+        **gates,
+    }
+    (build_options,) = _load_functions(
+        ("build_shallow_import_options",), namespace
+    )
+    return build_options, logger
+
+
+def _require_gate_logging():
+    if "importer operation is not" not in SCRIPT_PATH.read_text(encoding="utf-8"):
+        pytest.skip("Gate-level logging is not present in source revision")
+
+
+@pytest.mark.parametrize("off", ["IMPORTER_ENABLED", "SHALLOW_ZARR_ENABLED"])
+def test_feature_off_gate_logs_at_debug(off):
+    _require_gate_logging()
+    build_options, logger = _gate_namespace(**{off: False})
+    assert build_options(SimpleNamespace(inputs=(object(),))) is None
+    assert logger.debug_calls
+    assert not logger.info_calls and not logger.warning_calls
+
+
+@pytest.mark.parametrize("missing", [
+    "IMPORTER_ORDER_API_AVAILABLE", "SHALLOW_ZARR_OPERATION_AVAILABLE"])
+def test_enabled_but_importer_capability_missing_warns(missing):
+    _require_gate_logging()
+    build_options, logger = _gate_namespace(**{missing: False})
+    assert build_options(SimpleNamespace(inputs=(object(),))) is None
+    assert len(logger.warning_calls) == 1

@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
+CANONICAL = SimpleNamespace(inputs=(object(),))
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 SOURCE = ROOT / '_data/SLURM_Import_Results.py'
 
@@ -25,7 +26,7 @@ def load():
     namespace = dict(IMPORTER_ENABLED=True, SHALLOW_ZARR_ENABLED=True,
                      SHALLOW_ZARR_OPERATION_AVAILABLE=True,
                      IMPORTER_ORDER_API_AVAILABLE=True,
-                     load_canonical_input_snapshot=lambda *args: 'canonical',
+                     load_canonical_input_snapshot=lambda *args: CANONICAL,
                      logger=logging.getLogger(__name__))
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), namespace)
     return namespace['shallow_remote_results']
@@ -34,7 +35,7 @@ def load():
 def test_enabled_runs_remote_shallowing():
     client = SimpleNamespace(remote_shallow_zarr=True, shallow_results_on_slurm=Mock())
     load()(client, '/data', 'workflow')
-    client.shallow_results_on_slurm.assert_called_once_with('/data', 'workflow', 'canonical')
+    client.shallow_results_on_slurm.assert_called_once_with('/data', 'workflow', CANONICAL)
 
 
 def test_absent_flag_is_a_noop():
@@ -75,7 +76,7 @@ def test_shallower_receives_workflow_connection():
         assert 'omero_conn' not in client.shallow_results_on_slurm.call_args.kwargs
     else:
         client.shallow_results_on_slurm.assert_called_once_with(
-            '/data', 'workflow', 'canonical', omero_conn=conn)
+            '/data', 'workflow', CANONICAL, omero_conn=conn)
 
 
 def test_heartbeat_owns_connection_and_detects_expiry():
@@ -108,3 +109,48 @@ def test_shallower_runs_before_zip_creation():
     archive = [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
                and isinstance(node.func, ast.Attribute) and node.func.attr == 'zip_data_on_slurm_server']
     assert stage and stage[0] < archive[0]
+
+
+def _levels(caplog):
+    return [record.levelno for record in caplog.records]
+
+
+def _require_decision_logging():
+    if 'results stay full' not in source_text():
+        pytest.skip('Decision logging is not present in source revision')
+
+
+@pytest.mark.parametrize('disabled_gate', ['IMPORTER_ENABLED', 'SHALLOW_ZARR_ENABLED'])
+def test_feature_off_logs_skip_at_debug(caplog, disabled_gate):
+    _require_decision_logging()
+    function = load()
+    function.__globals__[disabled_gate] = False
+    client = SimpleNamespace(remote_shallow_zarr=True, shallow_results_on_slurm=Mock())
+    with caplog.at_level(logging.DEBUG):
+        assert function(client, '/data', 'workflow') is None
+    assert _levels(caplog) == [logging.DEBUG]
+
+
+@pytest.mark.parametrize('missing', [
+    'IMPORTER_ORDER_API_AVAILABLE', 'SHALLOW_ZARR_OPERATION_AVAILABLE'])
+def test_enabled_but_importer_capability_missing_warns(caplog, missing):
+    _require_decision_logging()
+    function = load()
+    function.__globals__[missing] = False
+    client = SimpleNamespace(remote_shallow_zarr=True, shallow_results_on_slurm=Mock())
+    with caplog.at_level(logging.DEBUG):
+        assert function(client, '/data', 'workflow') is None
+    assert _levels(caplog) == [logging.WARNING]
+    client.shallow_results_on_slurm.assert_not_called()
+
+
+@pytest.mark.parametrize('snapshot', [None, SimpleNamespace(inputs=())])
+def test_no_snapshot_skips_remote_shallowing_at_info(caplog, snapshot):
+    _require_decision_logging()
+    function = load()
+    function.__globals__['load_canonical_input_snapshot'] = lambda *args: snapshot
+    client = SimpleNamespace(remote_shallow_zarr=True, shallow_results_on_slurm=Mock())
+    with caplog.at_level(logging.DEBUG):
+        assert function(client, '/data', 'workflow') is None
+    assert _levels(caplog) == [logging.INFO]
+    client.shallow_results_on_slurm.assert_not_called()
