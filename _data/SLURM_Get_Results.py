@@ -69,8 +69,15 @@ import re
 import zipfile
 import glob
 from biomero import SlurmClient, constants
-from biomero.metadata_views import (
-    format_large_field_reference, render_workflow_metadata)
+try:
+    from biomero.metadata_views import (
+        format_large_field_reference, render_workflow_metadata)
+except ImportError as error:
+    raise ImportError(
+        "These scripts need a biomero release that provides "
+        "biomero.metadata_views (the module formerly named "
+        "biomero.provenance). Update biomero to the release matching these "
+        "scripts.") from error
 import logging
 import ezomero
 # from aicsimageio import AICSImage

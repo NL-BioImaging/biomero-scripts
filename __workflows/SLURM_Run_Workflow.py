@@ -103,6 +103,23 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CSV_TABLE,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
+# Blueprint qualitative color scheme, used for the ROIs of a workflow. Keep
+# these values in Python because OMERO scripts do not load the Blueprint
+# JavaScript package.
+# https://blueprintjs.com/docs/#core/colors.qualitative-color-schemes
+QUALITATIVE_COLOR_SCHEME = (
+    "#147EB3",  # cerulean3
+    "#29A634",  # forest3
+    "#D1980B",  # gold3
+    "#D33D17",  # vermilion3
+    "#9D3F9D",  # violet3
+    "#00A396",  # turquoise3
+    "#DB2C6F",  # rose3
+    "#8EB125",  # lime3
+    "#946638",  # sepia3
+    "#7961DB",  # indigo3
+)
+ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
 VERSION = "2.9.0b24"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
@@ -343,25 +360,6 @@ def build_output_settings(client, selected_output) -> dict:
                      constants.results.OUTPUT_ATTACH_NEW_SCREEN_ID):
         settings[override] = unwrap(client.getInput(override))
     return settings
-
-
-# Blueprint qualitative color scheme, used for the ROIs of a workflow. Keep
-# these values in Python because OMERO scripts do not load the Blueprint
-# JavaScript package.
-# https://blueprintjs.com/docs/#core/colors.qualitative-color-schemes
-QUALITATIVE_COLOR_SCHEME = (
-    "#147EB3",  # cerulean3
-    "#29A634",  # forest3
-    "#D1980B",  # gold3
-    "#D33D17",  # vermilion3
-    "#9D3F9D",  # violet3
-    "#00A396",  # turquoise3
-    "#DB2C6F",  # rose3
-    "#8EB125",  # lime3
-    "#946638",  # sepia3
-    "#7961DB",  # indigo3
-)
-ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
 
 
 def resolve_workflow_color(color_override, workflow_id) -> str:

@@ -41,7 +41,15 @@ from omero.sys import ParametersI
 from biomero import WorkflowTracker
 from biomero.detached import detached_mode_enabled
 from biomero.maintenance import queue_metadata_refresh
-from biomero.metadata_views import MetadataAnnotation, NAMESPACE, plan_metadata_refresh
+try:
+    from biomero.metadata_views import (
+        MetadataAnnotation, NAMESPACE, plan_metadata_refresh)
+except ImportError as error:
+    raise ImportError(
+        "These scripts need a biomero release that provides "
+        "biomero.metadata_views (the module formerly named "
+        "biomero.provenance). Update biomero to the release matching these "
+        "scripts.") from error
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
