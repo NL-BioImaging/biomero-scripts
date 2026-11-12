@@ -693,10 +693,10 @@ def runScript():
                     else:
                         logger.debug(
                             "Remote shallower image not staged: "
-                            "IMPORTER_ENABLED=%s, BIOMERO_SHALLOW_ZARR=%s, "
-                            "remote_shallow_zarr=%s",
-                            importer_enabled, shallow_zarr_enabled,
-                            slurmClient.remote_shallow_zarr)
+                            f"IMPORTER_ENABLED={importer_enabled}, "
+                            f"BIOMERO_SHALLOW_ZARR={shallow_zarr_enabled}, "
+                            "remote_shallow_zarr="
+                            f"{slurmClient.remote_shallow_zarr}")
                     conn.keepAlive()
 
                     # 4. Submit one bounded workflow + converter image array.
