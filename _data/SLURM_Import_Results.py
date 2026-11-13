@@ -56,6 +56,12 @@ When cleanup is enabled, this script removes:
   directory once import completes **unless** it was attached to OMERO (in which case
   OMERO may reference the file directly via an in-place symlink and it must remain).
 
+OUTPUTS:
+- Message: concise summary of the import.
+- Workflow_UUID: the workflow the results belong to.
+- Results_Path: the ``.analyzed/uuid/timestamp`` folder that was imported from;
+  SLURM_Run_Workflow.py uses it to remove the transfer input markers afterwards.
+
 PERMANENT STORAGE (otherwise preserved):
 - Permanent storage: .analyzed/uuid/timestamp/ directories and extracted contents
 - Complete workflow preservation: images, CSVs, metadata, logs, analysis results

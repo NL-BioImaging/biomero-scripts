@@ -82,6 +82,8 @@ SHALLOW_ZARR_ENABLED = (
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     from biomero.zarr_contracts import CanonicalInput
     from biomero_schema.zarr import TRANSFER_INPUT_MARKER
+# The transfer writes input markers only when both are on.
+SHALLOW_ZARR_STORAGE_ENABLED = IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -108,7 +110,7 @@ VERSION = "2.9.0b24"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 # Output of SLURM_Import_Results.py: the BIOMERO result folder it imported from.
 RESULTS_PATH_OUTPUT = "Results_Path"
-# Folder name that marks BIOMERO's own result storage; cleanup never leaves it.
+# BIOMERO's own result storage: <group folder>/.analyzed/<workflow>/<timestamp>.
 RESULTS_FOLDER_NAME = ".analyzed"
 # Files that mark a directory as the root of a Zarr store.
 ZARR_ROOT_FILES = (".zgroup", "zarr.json")
@@ -123,34 +125,50 @@ def ensure_tracking_uuid(value):
     return UUID(str(value))
 
 
-def remove_input_markers(results_path: str,
-                         marker_name: str,
-                         results_folder_name: str = RESULTS_FOLDER_NAME,
-                         zarr_root_files: tuple = ZARR_ROOT_FILES) -> int:
+def is_biomero_result_folder(results_root: str) -> bool:
+    """Tell whether a path is one import's result folder in BIOMERO storage.
+
+    Args:
+        results_root (str): Resolved path to check.
+
+    Returns:
+        bool: True for ``<...>/.analyzed/<workflow>/<timestamp>``, as made by
+        ``get_workflow_results_path`` in SLURM_Import_Results.py. The
+        ``.analyzed`` folder itself and a workflow folder are not accepted,
+        because they hold the results of other imports.
+    """
+    return Path(results_root).parent.parent.name == RESULTS_FOLDER_NAME
+
+
+def log_walk_error(walk_error: OSError) -> None:
+    """Warn about a folder the marker search could not read."""
+    logger.warning(f"Input marker search skipped a folder: {walk_error}")
+
+
+def remove_input_markers(results_path: str, marker_name: str) -> int:
     """Remove the transfer input markers from one BIOMERO result folder.
 
     The workflow runner owns this cleanup: the marker is only a working file
     of the transfer, and the importer needs it until the result is imported.
-    Only files named exactly like the marker are removed, and only below a
-    folder inside BIOMERO's own result storage. Zarr stores are not searched
-    below their root, because a marker only sits at the root of a store.
+    Only files named exactly like the marker are removed, and only below one
+    import's result folder in BIOMERO's own result storage. Links are not
+    followed, and Zarr stores are not searched below their root, because a
+    marker only sits at the root of a store.
 
     Args:
-        results_path (str): Result folder of one import, below ``.analyzed``.
+        results_path (str): Result folder of one import,
+            ``.analyzed/<workflow>/<timestamp>``.
         marker_name (str): File name of the input marker; the caller passes
             ``TRANSFER_INPUT_MARKER``, which only loads with shallow Zarr.
-        results_folder_name (str): Name of the BIOMERO result storage folder
-            that ``results_path`` must be inside.
-        zarr_root_files (tuple): File names that mark a Zarr store root.
 
     Returns:
         int: Number of markers removed.
     """
     results_root = os.path.realpath(results_path)
-    if results_folder_name not in Path(results_root).parts:
+    if not is_biomero_result_folder(results_root):
         logger.warning(
-            f"Not removing input markers: {results_root} is not inside a "
-            f"'{results_folder_name}' result folder")
+            f"Not removing input markers: {results_root} is not a result "
+            f"folder of the form {RESULTS_FOLDER_NAME}/<workflow>/<timestamp>")
         return 0
     if not os.path.isdir(results_root):
         logger.warning(
@@ -158,7 +176,8 @@ def remove_input_markers(results_path: str,
             "does not exist")
         return 0
     removed = 0
-    for directory, subdirectories, file_names in os.walk(results_root):
+    for directory, subdirectories, file_names in os.walk(
+            results_root, onerror=log_walk_error, followlinks=False):
         if marker_name in file_names:
             marker_path = os.path.join(directory, marker_name)
             try:
@@ -169,7 +188,7 @@ def remove_input_markers(results_path: str,
                 logger.warning(
                     f"Could not remove input marker {marker_path}: "
                     f"{remove_error}")
-        if any(name in file_names for name in zarr_root_files):
+        if any(name in file_names for name in ZARR_ROOT_FILES):
             subdirectories.clear()  # nothing below a store root is a marker
     logger.info(
         f"Removed {removed} input marker(s) below {results_root}")
@@ -183,7 +202,8 @@ def remove_input_markers_after_import(import_outputs: dict) -> int:
     marker during import, and removes it itself only after a local evaluation
     or when the helper kept the full result. It stays in a result that was
     shallowed on the HPC, and in a result the importer did not evaluate.
-    This one step covers all of those paths.
+    This one step covers all of those paths: the importer's removal is
+    consume-on-use, this one is the final sweep.
 
     Args:
         import_outputs (dict): Outputs of the result import script.
@@ -191,7 +211,7 @@ def remove_input_markers_after_import(import_outputs: dict) -> int:
     Returns:
         int: Number of markers removed.
     """
-    if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED):
+    if not SHALLOW_ZARR_STORAGE_ENABLED:
         logger.debug(
             "Not removing input markers: shallow Zarr storage is off, so "
             "the transfer wrote none")
@@ -2623,7 +2643,13 @@ def importResultsToOmero(client: omscripts.client,
         wf_failed = True
         raise RuntimeError(error_msg)
     # Reached only after a successful import: the importer needed the markers.
-    remove_input_markers_after_import(rv)
+    try:
+        remove_input_markers_after_import(rv)
+    except Exception as cleanup_error:
+        # The result is imported; a cleanup problem must not fail the run.
+        logger.warning(
+            f"Input marker cleanup failed, leaving the markers: "
+            f"{cleanup_error}", exc_info=True)
     return rv
 
 
