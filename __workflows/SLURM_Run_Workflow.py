@@ -125,9 +125,14 @@ def ensure_tracking_uuid(value):
 def parse_canonical_inputs_output(results):
     """Validate canonical input records returned by Image Transfer."""
     if not results or CANONICAL_INPUTS_OUTPUT not in results:
+        logger.debug(
+            f"Image Transfer returned no {CANONICAL_INPUTS_OUTPUT} output")
         return ()
     raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
     if not raw_value:
+        logger.debug(
+            f"Image Transfer returned an empty {CANONICAL_INPUTS_OUTPUT} "
+            "output")
         return ()
     payload = json.loads(raw_value)
     if not isinstance(payload, list):
@@ -140,14 +145,17 @@ def record_canonical_input_snapshot(
     workflow_id,
     export_task_id,
     canonical_inputs,
+    zarr_workflow=True,
 ):
     """Record the immutable canonical input snapshot in workflow tracking."""
     if not canonical_inputs:
-        logger.info(
+        # Only Zarr workflows are expected to have a snapshot; without one
+        # the result import skips shallowing and keeps full results.
+        logger.log(
+            logging.WARNING if zarr_workflow else logging.DEBUG,
             "Image Transfer returned no complete canonical input snapshot "
-            "for workflow %s; result processing will use returned pixel "
-            "identity matching instead of task-lineage candidates",
-            workflow_id,
+            f"for workflow {workflow_id} (Zarr workflow: {zarr_workflow}); "
+            "result import will not shallow and results stay full",
         )
         return False
     if not slurm_client.track_workflows:
@@ -582,6 +590,13 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
     """Fail before workflow submission when remote shallowing cannot run."""
     if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and use_zarr_format
             and slurmClient.remote_shallow_zarr):
+        logger.debug(
+            "Remote shallower readiness check skipped: "
+            f"importer={IMPORTER_ENABLED}, "
+            f"BIOMERO_SHALLOW_ZARR={SHALLOW_ZARR_ENABLED}, "
+            f"use_zarr_format={use_zarr_format}, "
+            f"remote_shallow_zarr={slurmClient.remote_shallow_zarr}"
+        )
         return
 
     from biomero.remote_shallower import (
@@ -598,6 +613,9 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
             "the image with SLURM Check Setup before starting this workflow."
         )
     validate_installed_tool(slurmClient, spec["destination"])
+    destination = spec["destination"]
+    logger.info(f"Remote shallower image {destination} is ready; results "
+                "will be shallowed remotely on Slurm")
 
 
 def runScript():
@@ -622,6 +640,13 @@ def runScript():
         Exception: Various exceptions during workflow execution, all logged
             and handled gracefully.
     """
+    shallow_state = ("enabled by flags"
+                     if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+                     else "disabled, results stay full")
+    logger.info(
+        f"Shallow Zarr results: BIOMERO_SHALLOW_ZARR={SHALLOW_ZARR_ENABLED}, "
+        f"IMPORTER_ENABLED={IMPORTER_ENABLED}; shallowing is {shallow_state}"
+    )
     # --------------------------------------------
     # :: Slurm Client ::
     # --------------------------------------------
@@ -2298,12 +2323,16 @@ def exportImageToSLURM(client: omscripts.client,
             raise RuntimeError(error_msg)
 
         if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+            logger.info(
+                "Shallow Zarr enabled: reading canonical inputs returned by "
+                f"Image Transfer for workflow {wf_id}")
             canonical_inputs = parse_canonical_inputs_output(rv)
             record_canonical_input_snapshot(
                 slurmClient,
                 wf_id,
                 task_id,
                 canonical_inputs,
+                zarr_workflow=reconstruct_shallow_zarr,
             )
 
         try:

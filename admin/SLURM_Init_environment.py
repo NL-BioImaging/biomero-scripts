@@ -673,12 +673,30 @@ def runScript():
                     # with workflow images so one concurrency limit covers all
                     # container builds.
                     converter_specs = slurmClient.prepare_converters()
-                    if (os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
-                            and os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+                    importer_enabled = (
+                        os.getenv("IMPORTER_ENABLED", "false").lower() == "true")
+                    shallow_zarr_enabled = (
+                        os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true")
+                    if (importer_enabled
+                            and shallow_zarr_enabled
                             and slurmClient.remote_shallow_zarr
                             and slurmClient.remote_shallower_image):
                         from biomero.remote_shallower import image_spec
                         converter_specs.append(image_spec(slurmClient))
+                        logger.info("Staging the remote shallower image")
+                    elif (importer_enabled and shallow_zarr_enabled
+                            and slurmClient.remote_shallow_zarr):
+                        logger.warning(
+                            "Remote shallowing is enabled but "
+                            "remote_shallower_image is empty; the image is "
+                            "not staged and remote shallowing cannot run")
+                    else:
+                        logger.debug(
+                            "Remote shallower image not staged: "
+                            f"IMPORTER_ENABLED={importer_enabled}, "
+                            f"BIOMERO_SHALLOW_ZARR={shallow_zarr_enabled}, "
+                            "remote_shallow_zarr="
+                            f"{slurmClient.remote_shallow_zarr}")
                     conn.keepAlive()
 
                     # 4. Submit one bounded workflow + converter image array.
