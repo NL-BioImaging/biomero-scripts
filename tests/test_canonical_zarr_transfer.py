@@ -936,6 +936,40 @@ def test_trust_upgrade_updates_one_store_without_new_generation(
     assert canonical_annotation.values == upgraded.to_annotation_values()
 
 
+@pytest.mark.skipif(
+    "Could not write the canonical sidecar" not in SCRIPT_PATH.read_text(
+        encoding="utf-8"),
+    reason="unwritable sidecar folder handled in a later source",
+)
+def test_trust_upgrade_survives_unwritable_sidecar_folder(
+    tmp_path, pixel_identity, caplog,
+):
+    """A read-only BIOMERO folder must not fail the workflow."""
+    ns = _load_canonical_functions()
+    path = tmp_path / ".processed/Image-7.ome.zarr"
+    path.mkdir(parents=True)
+    unverified = source(pixel_identity).model_copy(update={
+        "canonical_pixel_verified": False,
+        "pixel_identity_origin": "raw",
+    })
+    obj = Object(7, [
+        annotation_for(unverified),
+        Annotation("legacy", {"Filepath": str(path)}),
+    ])
+
+    def read_only(*_args):
+        raise PermissionError(13, "Read-only file system", str(path))
+
+    ns["write_indexed_canonical_marker"] = read_only
+
+    with caplog.at_level("WARNING"):
+        result = ns["upgrade_reused_canonical"]("connection", obj, unverified, path)
+
+    assert result == unverified
+    assert result.canonical_pixel_verified is False
+    assert "Could not write the canonical sidecar" in caplog.text
+
+
 def test_managed_zarr_location_uses_most_specific_root(tmp_path):
     ns = _load_canonical_functions()
     import_root = tmp_path / "import"
