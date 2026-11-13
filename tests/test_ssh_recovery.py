@@ -106,6 +106,10 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     clock = SimpleNamespace(now=0)
     monkeypatch.setattr(ssh_recovery.time, 'monotonic', lambda: clock.now)
     monkeypatch.setattr(ssh_recovery.time, 'sleep', lambda delay: setattr(clock, 'now', clock.now + delay))
+    # Core adds jitter to retry waits; remove it so the fake clock is exact
+    # (older core has no jitter seam).
+    if hasattr(ssh_recovery, 'random'):
+        monkeypatch.setattr(ssh_recovery.random, 'uniform', lambda low, high: 0)
     pulses = []
     conn = SimpleNamespace(keepAlive=lambda: pulses.append(clock.now))
     tracker = Mock()
@@ -180,7 +184,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     namespace['execute_workflow_pipeline'](client, conn, slurm, 'workflow-id', ['analysis'],
         {}, {'analysis': {}}, {'analysis': {}}, '', 3, True, '0.4',
         zipfile='existing-input', resume=detached)
-    assert pulses and max(b - a for a, b in zip([0] + pulses, pulses + [clock.now])) <= 10
+    assert pulses and max(b - a for a, b in zip([0] + pulses, pulses + [clock.now])) <= 10 + 1e-6
     assert status_calls == [[42]]
     assert run.call_count == (0 if detached else 1)
     import_results.assert_called_once()
@@ -189,12 +193,34 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
 
 
 def test_recovery_scope_preserves_disabled_legacy_behavior():
+    """Cores before the one-path change: a window of 0 bypasses the scope."""
     ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    if not hasattr(ssh_recovery, 'enabled'):
+        pytest.skip('Core runs one code path; see the window-zero test below')
     heartbeat = Mock()
     client = SimpleNamespace(ssh_recovery_timeout=0, close=Mock())
     with load('hpc_recovery_scope')(client, heartbeat):
         assert ssh_recovery.retry(client, lambda: 'legacy', 'read') == 'legacy'
     heartbeat.assert_not_called()
+    client.close.assert_not_called()
+
+
+def test_recovery_scope_with_window_zero_is_the_same_path_without_retries():
+    """Core runs one code path: 0 only turns retrying off."""
+    ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    if hasattr(ssh_recovery, 'enabled'):
+        pytest.skip('This core still bypasses the scope when the window is 0')
+    heartbeat = Mock()
+    client = SimpleNamespace(ssh_recovery_timeout=0, close=Mock())
+    with load('hpc_recovery_scope')(client, heartbeat):
+        assert ssh_recovery.retry(client, lambda: 'once', 'read') == 'once'
+        operation = Mock(side_effect=EOFError('lost'))
+        with pytest.raises(EOFError):
+            ssh_recovery.retry(client, operation, 'read')
+    # The same scope and heartbeat path run (one pulse per attempt), but a
+    # failed attempt is not retried and the connection is left alone.
+    assert heartbeat.call_count == 2
+    operation.assert_called_once()
     client.close.assert_not_called()
 
 
