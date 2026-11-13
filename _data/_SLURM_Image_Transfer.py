@@ -121,6 +121,8 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
         from biomero_importer.utils.canonical_store import (
             CanonicalStore,
+            InvalidCanonicalStore,
+            PROCESSED_DATA_FOLDER,
             load_canonical_marker,
             write_indexed_canonical_marker,
         )
@@ -530,7 +532,8 @@ def get_canonical_plate_source(plate):
                 load_group_storage_roots(),
             )
             if managed_path is not None:
-                managed_source = load_canonical_marker(managed_path)
+                managed_source = load_canonical_marker(
+                    managed_path, processed_folder=PROCESSED_DATA_FOLDER)
                 if (
                     isinstance(managed_source, CanonicalPlateSource)
                     and managed_source.storage_root == index.storage_root
@@ -1528,7 +1531,8 @@ def index_existing_image_zarr(
         pixel_identity_origin="canonical-bootstrap",
         canonical_pixel_verified=existing_identity is not None,
     )
-    write_indexed_canonical_marker(existing_path, source)
+    write_indexed_canonical_marker(
+        existing_path, source, processed_folder=PROCESSED_DATA_FOLDER)
     attach_canonical_source(
         conn,
         image,
@@ -1565,7 +1569,16 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
     Update trust metadata in place without copying or rehashing pixel data.
     """
     is_plate = isinstance(source, CanonicalPlateSource)
-    cached = load_canonical_marker(source_path)
+    try:
+        cached = load_canonical_marker(
+            source_path, processed_folder=PROCESSED_DATA_FOLDER)
+    except (OSError, InvalidCanonicalStore, ValueError) as exc:
+        # A corrupt, uncommitted or unreachable sidecar only costs the cache:
+        # the workflow continues as if there were none.
+        logger.warning(
+            "Ignoring the canonical sidecar of %s (%s); treating it as "
+            "absent and continuing", source_path, exc)
+        cached = None
     if cached is not None and type(cached) is type(source):
         old_sources = ([i.source for i in source.images] if is_plate else [source])
         new_sources = ([i.source for i in cached.images] if is_plate else [cached])
@@ -1594,7 +1607,8 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
                 source.model_copy(update={"canonical_pixel_verified": True,
                                           "pixel_identity_origin": "canonical-bootstrap"}))
     try:
-        write_indexed_canonical_marker(source_path, upgraded)
+        write_indexed_canonical_marker(
+            source_path, upgraded, processed_folder=PROCESSED_DATA_FOLDER)
     except OSError as exc:
         # The sidecar is only an optimisation. Without it the registration
         # stays as it was and the input is reused unverified, as when the
@@ -1677,7 +1691,8 @@ def index_existing_plate_zarr(
     )
     if not defer_identity:
         source = verified_plate_source(source)
-    write_indexed_canonical_marker(existing_path, source)
+    write_indexed_canonical_marker(
+        existing_path, source, processed_folder=PROCESSED_DATA_FOLDER)
     attach_canonical_plate_source(
         conn,
         plate,

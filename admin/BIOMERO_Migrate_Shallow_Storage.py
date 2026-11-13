@@ -537,8 +537,22 @@ def _move_canonical_store(source, destination):
     source.rename(destination)
     # The sidecar is keyed by the store's location in a BIOMERO folder (or, for
     # an older beta, sits next to the store); the importer moves either one.
-    move_canonical_marker(
-        source, destination, processed_folder=PROCESSED_DATA_FOLDER)
+    try:
+        move_canonical_marker(
+            source, destination, processed_folder=PROCESSED_DATA_FOLDER)
+    except OSError as exc:
+        try:
+            destination.rename(source)
+        except OSError as rollback_exc:
+            raise RuntimeError(
+                f"Moved {source} to {destination} but could not move its "
+                f"canonical sidecar ({exc}) or move the store back "
+                f"({rollback_exc}); fix the sidecar manually"
+            ) from exc
+        logger.error(
+            "Could not move the canonical sidecar of %s (%s); renamed the "
+            "store back", source, exc)
+        raise
 
 
 def _canonical_registration_values(source):
