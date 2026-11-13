@@ -56,6 +56,12 @@ When cleanup is enabled, this script removes:
   directory once import completes **unless** it was attached to OMERO (in which case
   OMERO may reference the file directly via an in-place symlink and it must remain).
 
+OUTPUTS:
+- Message: concise summary of the import.
+- Workflow_UUID: the workflow the results belong to.
+- Results_Path: the ``.analyzed/uuid/timestamp`` folder that was imported from;
+  SLURM_Run_Workflow.py uses it to remove the transfer input markers afterwards.
+
 PERMANENT STORAGE (otherwise preserved):
 - Permanent storage: .analyzed/uuid/timestamp/ directories and extracted contents
 - Complete workflow preservation: images, CSVs, metadata, logs, analysis results
@@ -107,7 +113,7 @@ try:
         format_large_field_reference, render_workflow_metadata)
 except ImportError as error:
     raise ImportError(
-        "These scripts need a biomero release that provides "
+        "These scripts need biomero>=2.9.0b26, which provides "
         "biomero.metadata_views (the module formerly named "
         "biomero.provenance). Update biomero to the release matching these "
         "scripts.") from error
@@ -5265,6 +5271,7 @@ def runScript() -> None:
             slurm_job_id = None
             wf_id = None
             slurm_data_path = None
+            permanent_storage_path = None
             folder = None
             log_file = None
             script_failed = False
@@ -5913,6 +5920,10 @@ def runScript() -> None:
             try:
                 if wf_id is not None:
                     client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
+                # Tell the workflow runner which result folder was imported,
+                # so it can clean up the transfer's working files there.
+                if permanent_storage_path:
+                    client.setOutput(constants.results.RESULTS_PATH_OUTPUT, rstring(str(permanent_storage_path)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
                     client.setOutput("Message", rstring(str(message)))

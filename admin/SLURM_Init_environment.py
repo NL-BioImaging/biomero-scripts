@@ -46,7 +46,7 @@ try:
         MetadataAnnotation, NAMESPACE, plan_metadata_refresh)
 except ImportError as error:
     raise ImportError(
-        "These scripts need a biomero release that provides "
+        "These scripts need biomero>=2.9.0b26, which provides "
         "biomero.metadata_views (the module formerly named "
         "biomero.provenance). Update biomero to the release matching these "
         "scripts.") from error
