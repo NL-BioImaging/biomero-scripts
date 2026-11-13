@@ -69,7 +69,15 @@ import re
 import zipfile
 import glob
 from biomero import SlurmClient, constants
-from biomero.provenance import render_workflow_metadata
+try:
+    from biomero.metadata_views import (
+        format_large_field_reference, render_workflow_metadata)
+except ImportError as error:
+    raise ImportError(
+        "These scripts need biomero>=2.9.0b26, which provides "
+        "biomero.metadata_views (the module formerly named "
+        "biomero.provenance). Update biomero to the release matching these "
+        "scripts.") from error
 import logging
 import ezomero
 # from aicsimageio import AICSImage
@@ -224,7 +232,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         job = process.getJob()
         status_id = (int(unwrap(job.getStatus().getId()))
                      if job is not None else None)
-        returned_message = unwrap(results.get("Message"))
+        returned_message = unwrap(results.get(constants.results.MESSAGE_OUTPUT))
         message = str(returned_message or "ROI postprocessing completed")
         if status_id in (6, 9) or message.startswith("FAILED:"):
             raise RuntimeError(
@@ -634,7 +642,7 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=N
                 logger.debug(
                     f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
-                client.setOutput("File_Annotation", robject(file_ann._obj))
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
                 logger.warning(msg)
@@ -758,9 +766,8 @@ def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
             safe_key = "Long_key_sha256_" + hashlib.sha256(raw_key).hexdigest()
             while safe_key in kv_dict or safe_key in reduced:
                 safe_key += "_"
-        reduced[safe_key] = (
-            "Large field; full value in {} (utf8_bytes={}; sha256={})".format(
-                reference, len(raw_value), hashlib.sha256(raw_value).hexdigest()))
+        reduced[safe_key] = format_large_field_reference(
+            reference, len(raw_value), hashlib.sha256(raw_value).hexdigest())
     if reduced == kv_dict:
         logger.warning("Index-size rejection for %s %s (%s); no large fields "
                        "could be reduced", object_type, object_id, ns)
@@ -1633,7 +1640,6 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
             ns=namespace, desc=description)
         # Already have other output in this script
         # But you could add this as output if you wanted log instead
-        # client.setOutput("File_Annotation", robject(annotation._obj))
 
         # Build a fully-qualified URL so it works from any browser location.
         # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
@@ -1649,7 +1655,7 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
 
 
         for project in projects:
@@ -1686,7 +1692,7 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, w
             f"{folder}.zip", mimetype=mimetype,
             ns=namespace, desc=description)
 
-        client.setOutput("File_Annotation", robject(zip_annotation._obj))
+        client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(zip_annotation._obj))
 
         for project in projects:
             project.linkAnnotation(zip_annotation)  # link it to project.
@@ -2489,10 +2495,9 @@ def runScript():
                                         roi_name_prefix=(unwrap(
                                             client.getInput(constants.results.ROI_NAME_PREFIX))
                                             or ""),
-                                        roi_color=constants.resolve_workflow_color(
-                                            unwrap(client.getInput(
-                                                constants.results.ROI_COLOR)),
-                                            wf_id),
+                                        roi_color=(unwrap(client.getInput(
+                                            constants.results.ROI_COLOR))
+                                            or ""),
                                         clear_existing_rois=(unwrap(
                                             client.getInput(constants.results.ROI_CLEAR_EXISTING))
                                             or False),
@@ -2564,14 +2569,14 @@ def runScript():
                             message += f"\nCleanup disabled: Local files preserved at {folder}"
                             logger.info(f"Cleanup disabled: Preserved local files at {folder}")
 
-            client.setOutput("Message", rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
         except Exception as e:
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
 
             # Set failure output and re-raise to show red X in OMERO
             try:
-                client.setOutput("Message", rstring(f"FAILED: {message}"))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"FAILED: {message}"))
             except Exception:
                 pass
 

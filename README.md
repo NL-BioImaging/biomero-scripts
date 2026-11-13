@@ -30,7 +30,7 @@ scripts follow. Deployment and administration are documented in NL-BIOMERO.
 | `__workflows/` | `SLURM_Run_Workflow.py`, `SLURM_Run_Workflow_Batched.py` | Run an analysis and retrieve results; optionally split inputs into batches. |
 | `_data/` | Image/File Transfer, Remote Conversion, Get Update | Export inputs, convert formats and monitor jobs. |
 | `_data/` | `SLURM_Get_Results.py`, `SLURM_Import_Results.py` | Upload results through OMERO or import in place with BIOMERO.importer. |
-| `admin/` | Slurm Init, Check Setup, Shallow Storage Migration, Cownary, Tail Logs | Initialize and inspect the cluster, migrate managed storage metadata, maintain workflow metadata and diagnose execution. |
+| `admin/` | Slurm Init, Check Setup, Shallow Storage Migration, Cownary, Cancel Workflow, Tail Logs | Initialize and inspect the cluster, migrate managed storage metadata, maintain workflow metadata and diagnose execution. |
 
 CellPose Segmentation and Example Minimal Slurm Script are examples, not the
 standard workflow entry points; NL-BIOMERO does not install them by default.
@@ -41,8 +41,9 @@ Use the released NL-BIOMERO containers for a coordinated installation. For a
 custom deployment, follow the [scripts installation guide](https://nl-bioimaging.github.io/biomero/scripts.html#installation-and-upgrades)
 and install the scripts on the OMERO server and detached worker.
 
-Deploy matching core and scripts releases together. This release requires core's
-`biomero.provenance` and `biomero.maintenance` APIs even when optional features
+Deploy matching core and scripts releases together. This release requires
+`biomero>=2.9.0b26`, which includes `biomero.metadata_views` (renamed from
+`biomero.provenance`) and `biomero.maintenance` APIs even when optional features
 are disabled. Prerelease tag counters can differ between repositories; use the
 component references supplied by the NL-BIOMERO release.
 
@@ -219,8 +220,11 @@ Historical imports are inspected only when explicitly retried.
 This protects image registration; it does not make optional ROI creation and
 attachment postprocessing exactly-once operations.
 
-Use an importer release that checks database write acknowledgement and recovers
-interrupted shallow transactions before reading a store. These recovery changes
+Use `biomero-importer>=1.5.0b14`: it keeps the canonical-source sidecars under
+BIOMERO's own `.processed` folders, which the image transfer and the shallow
+storage migration read through the importer's helpers. It also checks database
+write acknowledgement and recovers interrupted shallow transactions before
+reading a store. These recovery changes
 support v2 and v3 and do not change canonical-store format or identity policy.
 
 ## Development

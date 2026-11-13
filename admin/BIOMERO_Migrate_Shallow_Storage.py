@@ -32,8 +32,11 @@ from biomero_schema.zarr import (
 )
 from biomero_importer.utils.canonical_store import (
     CANONICAL_MARKER_NAME,
+    PROCESSED_DATA_FOLDER,
     external_canonical_marker_path,
     load_canonical_marker,
+    move_canonical_marker,
+    remove_external_canonical_markers,
     write_indexed_canonical_marker,
 )
 from biomero_shallower.migration import (
@@ -331,7 +334,8 @@ def discover_canonical_registrations(
                     index = CanonicalPlateIndex.from_annotation_values(values)
                     path = _resolve_store_path(index.to_annotation_values(),
                                                storage_roots)
-                    marker_source = load_canonical_marker(path)
+                    marker_source = load_canonical_marker(
+                        path, processed_folder=PROCESSED_DATA_FOLDER)
                     if not isinstance(marker_source, CanonicalPlateSource):
                         raise ValueError(
                             f"Plate {ident} canonical marker is missing or invalid"
@@ -352,7 +356,8 @@ def discover_canonical_registrations(
                         f"Canonical store does not exist for annotation "
                         f"{annotation.getId()}: {path}"
                     )
-                marker = load_canonical_marker(path)
+                marker = load_canonical_marker(
+                    path, processed_folder=PROCESSED_DATA_FOLDER)
                 # Early prerelease registrations did not consistently write
                 # a sidecar for reused managed Zarrs. Apply mode repairs that
                 # omission, but a different pixel identity remains fatal.
@@ -490,7 +495,8 @@ def _tree_metrics(path):
 
 def _canonical_marker_path(path):
     internal = path / CANONICAL_MARKER_NAME
-    external = external_canonical_marker_path(path)
+    external = external_canonical_marker_path(
+        path, processed_folder=PROCESSED_DATA_FOLDER)
     markers = [candidate for candidate in (internal, external)
                if candidate.is_file()]
     if len(markers) != 1:
@@ -505,32 +511,48 @@ def _write_canonical_marker(path, source):
         marker_path = _canonical_marker_path(path)
     except ValueError:
         internal = path / CANONICAL_MARKER_NAME
-        external = external_canonical_marker_path(path)
+        external = external_canonical_marker_path(
+            path, processed_folder=PROCESSED_DATA_FOLDER)
         if internal.exists() or external.exists():
             raise
-        return write_indexed_canonical_marker(path, source)
+        return write_indexed_canonical_marker(
+            path, source, processed_folder=PROCESSED_DATA_FOLDER)
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     if marker.get("state") != "committed" or "markerSchema" not in marker:
         raise ValueError(f"Canonical marker is not committed: {marker_path}")
     marker["source"] = source.to_dict()
     _write_json(marker_path, marker)
-    if load_canonical_marker(path) != source:
+    if load_canonical_marker(
+            path, processed_folder=PROCESSED_DATA_FOLDER) != source:
         raise ValueError(f"Canonical marker update did not validate: {path}")
     return marker_path
 
 
 def _move_canonical_store(source, destination):
-    """Rename one generated store and any external marker without copying."""
+    """Rename one generated store and any external sidecar without copying."""
     if source == destination:
         return
     if destination.exists():
         raise FileExistsError(f"Stable canonical destination exists: {destination}")
-    old_external = external_canonical_marker_path(source)
-    new_external = external_canonical_marker_path(destination)
     source.rename(destination)
-    if old_external.is_file():
-        new_external.parent.mkdir(parents=True, exist_ok=True)
-        old_external.rename(new_external)
+    # The sidecar is keyed by the store's location in a BIOMERO folder (or, for
+    # an older beta, sits next to the store); the importer moves either one.
+    try:
+        move_canonical_marker(
+            source, destination, processed_folder=PROCESSED_DATA_FOLDER)
+    except OSError as exc:
+        try:
+            destination.rename(source)
+        except OSError as rollback_exc:
+            raise RuntimeError(
+                f"Moved {source} to {destination} but could not move its "
+                f"canonical sidecar ({exc}) or move the store back "
+                f"({rollback_exc}); fix the sidecar manually"
+            ) from exc
+        logger.error(
+            "Could not move the canonical sidecar of %s (%s); renamed the "
+            "store back", source, exc)
+        raise
 
 
 def _canonical_registration_values(source):
@@ -722,7 +744,8 @@ def _apply_canonical_consolidation(
                 continue
             if path.exists():
                 shutil.rmtree(path)
-            external_canonical_marker_path(path).unlink(missing_ok=True)
+            remove_external_canonical_markers(
+                path, processed_folder=PROCESSED_DATA_FOLDER)
     return results
 
 

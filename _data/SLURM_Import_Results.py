@@ -56,6 +56,12 @@ When cleanup is enabled, this script removes:
   directory once import completes **unless** it was attached to OMERO (in which case
   OMERO may reference the file directly via an in-place symlink and it must remain).
 
+OUTPUTS:
+- Message: concise summary of the import.
+- Workflow_UUID: the workflow the results belong to.
+- Results_Path: the ``.analyzed/uuid/timestamp`` folder that was imported from;
+  SLURM_Run_Workflow.py uses it to remove the transfer input markers afterwards.
+
 PERMANENT STORAGE (otherwise preserved):
 - Permanent storage: .analyzed/uuid/timestamp/ directories and extracted contents
 - Complete workflow preservation: images, CSVs, metadata, logs, analysis results
@@ -102,7 +108,15 @@ from omero_metadata.populate import ParsingContext
 import ezomero
 
 from biomero import SlurmClient, constants
-from biomero.provenance import render_workflow_metadata
+try:
+    from biomero.metadata_views import (
+        format_large_field_reference, render_workflow_metadata)
+except ImportError as error:
+    raise ImportError(
+        "These scripts need biomero>=2.9.0b26, which provides "
+        "biomero.metadata_views (the module formerly named "
+        "biomero.provenance). Update biomero to the release matching these "
+        "scripts.") from error
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True
@@ -247,7 +261,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         job = process.getJob()
         status_id = (int(unwrap(job.getStatus().getId()))
                      if job is not None else None)
-        returned_message = unwrap(results.get("Message"))
+        returned_message = unwrap(results.get(constants.results.MESSAGE_OUTPUT))
         message = str(returned_message or "ROI postprocessing completed")
         if status_id in (6, 9) or message.startswith("FAILED:"):
             raise RuntimeError(
@@ -1137,7 +1151,7 @@ def saveImagesToOmeroAsAttachments(
                         message = upload_metadata_csv_to_omero(
                             client, conn, message, job_id, [image], metadata_files, wf_id)
 
-                client.setOutput("File_Annotation", robject(file_ann._obj))
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
                 logger.warning(msg)
@@ -1629,7 +1643,6 @@ def upload_log_to_omero(
             conn, file, mimetype, namespace, description)
         # Already have other output in this script
         # But you could add this as output if you wanted log instead
-        # client.setOutput("File_Annotation", robject(annotation._obj))
 
         # Build a fully-qualified URL so it works from any browser location.
         # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
@@ -1645,7 +1658,7 @@ def upload_log_to_omero(
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
 
         for project in projects:
             project.linkAnnotation(annotation)  # link it to project.
@@ -1814,7 +1827,7 @@ def upload_zip_to_omero(
         zip_annotation = create_file_annotation_inplace(
             conn, f"{folder}.zip", mimetype, namespace, description)
 
-        client.setOutput("File_Annotation", robject(zip_annotation._obj))
+        client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(zip_annotation._obj))
 
         for project in projects:
             project.linkAnnotation(zip_annotation)  # link it to project.
@@ -3580,9 +3593,8 @@ def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
             safe_key = "Long_key_sha256_" + hashlib.sha256(raw_key).hexdigest()
             while safe_key in kv_dict or safe_key in reduced:
                 safe_key += "_"
-        reduced[safe_key] = (
-            "Large field; full value in {} (utf8_bytes={}; sha256={})".format(
-                reference, len(raw_value), hashlib.sha256(raw_value).hexdigest()))
+        reduced[safe_key] = format_large_field_reference(
+            reference, len(raw_value), hashlib.sha256(raw_value).hexdigest())
     if reduced == kv_dict:
         logger.warning("Index-size rejection for %s %s (%s); no large fields "
                        "could be reduced", object_type, object_id, ns)
@@ -5258,6 +5270,7 @@ def runScript() -> None:
             slurm_job_id = None
             wf_id = None
             slurm_data_path = None
+            permanent_storage_path = None
             folder = None
             log_file = None
             script_failed = False
@@ -5294,7 +5307,7 @@ def runScript() -> None:
                 
                 # Perform the write access check with existing connection
                 success, result_message = check_write_access_for_importer(group_name, conn=conn)
-                client.setOutput("Message", rstring(result_message))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(result_message))
                 if not success:
                     raise RuntimeError(result_message)
                 logger.info(f"Write access check successful: {result_message}")
@@ -5676,9 +5689,8 @@ def runScript() -> None:
                             or False),
                         roi_name_prefix=(unwrap(client.getInput(
                             constants.results.ROI_NAME_PREFIX)) or ""),
-                        roi_color=constants.resolve_workflow_color(
-                            unwrap(client.getInput(
-                                constants.results.ROI_COLOR)), wf_id),
+                        roi_color=(unwrap(client.getInput(
+                            constants.results.ROI_COLOR)) or ""),
                         clear_existing_rois=(unwrap(client.getInput(
                             constants.results.ROI_CLEAR_EXISTING)) or False),
                         clear_roi_filter=(unwrap(client.getInput(
@@ -5875,7 +5887,7 @@ def runScript() -> None:
 
             # Set failure output and re-raise to show red X in OMERO
             try:
-                client.setOutput("Message", rstring(f"FAILED: {message}"))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"FAILED: {message}"))
             except Exception:
                 pass
 
@@ -5907,9 +5919,13 @@ def runScript() -> None:
             try:
                 if wf_id is not None:
                     client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
+                # Tell the workflow runner which result folder was imported,
+                # so it can clean up the transfer's working files there.
+                if permanent_storage_path:
+                    client.setOutput(constants.results.RESULTS_PATH_OUTPUT, rstring(str(permanent_storage_path)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
-                    client.setOutput("Message", rstring(str(message)))
+                    client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
             except Exception as output_error:
                 logger.error(f"Failed to set output: {output_error}")
 
