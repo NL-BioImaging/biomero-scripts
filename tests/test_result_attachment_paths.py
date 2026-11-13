@@ -11,6 +11,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from script_output_names import OUTPUT_NAMES
+
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 SOURCE = ROOT / "_data" / "SLURM_Import_Results.py"
@@ -30,7 +32,8 @@ def load():
         SUPPORTED_IMAGE_EXTENSIONS=(".tif", ".tiff", ".png", ".zarr"),
         NSCREATED="test", unwrap=lambda value: value, robject=lambda value: value,
         constants=SimpleNamespace(results=SimpleNamespace(
-            OUTPUT_SLURM_JOB_ID="job_id")),
+            OUTPUT_SLURM_JOB_ID="job_id",
+            **vars(OUTPUT_NAMES))),
         upload_metadata_csv_to_omero=Mock(return_value="metadata linked"),
     )
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"),

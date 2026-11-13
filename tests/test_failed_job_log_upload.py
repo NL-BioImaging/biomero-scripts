@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from script_output_names import OUTPUT_NAMES
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -24,6 +26,7 @@ def load_log_upload_function():
             info=lambda *_args, **_kwargs: None,
             warning=lambda *_args, **_kwargs: None,
         ),
+        "constants": SimpleNamespace(results=OUTPUT_NAMES),
         "robject": lambda value: value,
         "unwrap": lambda value: getattr(value, "val", value),
         "wrap": lambda value: value,
