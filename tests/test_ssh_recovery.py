@@ -8,8 +8,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from script_output_names import OUTPUT_NAMES
-
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 SOURCE = ROOT / '__workflows/SLURM_Run_Workflow.py'
 
@@ -83,10 +81,26 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     if (not hasattr(ssh_recovery, 'DEFAULT_SSH_RECOVERY_TIMEOUT')
             and not os.environ.get('BIOMERO_TEST_SSH_RECOVERY')):
         pytest.skip('Requires core with recovery enabled by default')
-    from biomero.slurm_client import SlurmClient
+    from biomero import constants
+    from biomero.slurm_client import SlurmClient, SlurmJob
+    from biomero import eventsourcing
+    WorkflowCancelled = getattr(eventsourcing, 'WorkflowCancelled', RuntimeError)
+    from dataclasses import dataclass
+    from enum import Enum
+    from typing import Any, Callable, Optional
+    from uuid import UUID
     tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
-    names = {'hpc_recovery_scope', 'poll_slurm_jobs', 'execute_workflow_pipeline'}
-    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    names = {'hpc_recovery_scope', 'poll_slurm_jobs', 'execute_workflow_pipeline',
+             # Resume and cancel handling, once the source owns them.
+             'run_pipeline_stages', 'cancel_workflow_run', 'load_task_history',
+             'task_completed', 'slurm_job_failed', 'results_imported',
+             'decide_workflow_resume', 'WorkflowResume', 'ResumeDecision',
+             'export_data_stage', 'convert_data_stage', 'submit_workflow_jobs',
+             'monitor_slurm_jobs', 'PipelineRun', 'JobUpdate', 'process_job_state',
+             'end_failed_job', 'import_completed_job'}
+    functions = [n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
+    owns_resume = any(n.name == 'decide_workflow_resume' for n in functions)
     if not any(n.name == 'hpc_recovery_scope' for n in functions) and not os.environ.get('BIOMERO_TEST_SSH_RECOVERY'):
         pytest.skip('Pipeline heartbeat integration is not present in source')
     clock = SimpleNamespace(now=0)
@@ -128,18 +142,34 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     slurm.check_job_status = status
     slurm.get_active_job_progress = progress
     history = ['recorded'] if detached else []
+    # The resumed run finds its export and conversion done and its job running.
+    slurm.get_workflow_tasks = Mock(return_value=[
+        SimpleNamespace(task_name='export', completed=True, failed=False, status=None,
+                        job_ids=[], params={}, id='export-task'),
+        SimpleNamespace(task_name='convert', completed=True, failed=False, status=None,
+                        job_ids=[], params={}, id='convert-task'),
+        SimpleNamespace(task_name='analysis', completed=False, failed=False,
+                        status='RUNNING', job_ids=[42], params={}, id='task-id')])
     run = Mock(return_value=('', 42, 'workflow-id', 'task-id'))
     import_results = Mock(return_value={'Message': SimpleNamespace(getValue=lambda: 'Imported')})
     namespace = dict(logger=logging.getLogger(__name__), unwrap=lambda value: value,
-                     constants=SimpleNamespace(results=OUTPUT_NAMES),
-        detached=SimpleNamespace(load_task_history=lambda *a: history,
-                                 task_completed=lambda *a: True,
-                                 submitted_job=lambda *a: (42, 'task-id')),
-        EXPORT_SCRIPTS=(), CONVERSION_SCRIPTS=(), IMPORT_SCRIPTS=(),
+        EXPORT_SCRIPTS=('export',) if owns_resume else (),
+        CONVERSION_SCRIPTS=('convert',) if owns_resume else (),
+        IMPORT_SCRIPTS=(),
+        SlurmClient=SlurmClient, SlurmJob=SlurmJob, UUID=UUID, Optional=Optional,
+        Enum=Enum, dataclass=dataclass, WorkflowCancelled=WorkflowCancelled,
+        Any=Any, BlitzGateway=object, Callable=Callable, WorkflowInterrupted=getattr(
+            eventsourcing, 'WorkflowInterrupted', RuntimeError),
+        constants=constants,
         exportImageToSLURM=Mock(return_value=({}, 'export-task')),
         convertDataOnSLURM=Mock(return_value=({}, 'convert-task')),
         run_workflow=run, importResultsToOmero=import_results,
         timesleep=SimpleNamespace(sleep=lambda delay: None))
+    if not owns_resume:
+        # Sources before resume moved into the script use core's helpers.
+        namespace['detached'] = SimpleNamespace(
+            load_task_history=lambda *a: history, task_completed=lambda *a: True,
+            submitted_job=lambda *a: (42, 'task-id'))
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)
     args = (client, conn, slurm, 'workflow-id', ['analysis'],
             {}, {'analysis': {}}, {'analysis': {}}, '', 3, True, '0.4')
