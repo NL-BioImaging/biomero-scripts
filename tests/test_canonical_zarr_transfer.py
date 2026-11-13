@@ -40,6 +40,10 @@ SOURCE_ROOT = Path(os.environ.get(
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py"
 
 
+class InvalidCanonicalStore(RuntimeError):
+    """Stand-in for biomero_importer's error for a corrupt or uncommitted marker."""
+
+
 def _load_canonical_functions():
     tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
     wanted = {
@@ -105,8 +109,10 @@ def _load_canonical_functions():
         "log": lambda text: None,
         "monotonic": monotonic,
         "ThreadPoolExecutor": ThreadPoolExecutor,
-        "load_canonical_marker": lambda _path: None,
-        "write_indexed_canonical_marker": lambda *_args: None,
+        "PROCESSED_DATA_FOLDER": ".processed",
+        "InvalidCanonicalStore": InvalidCanonicalStore,
+        "load_canonical_marker": lambda _path, **_kwargs: None,
+        "write_indexed_canonical_marker": lambda *_args, **_kwargs: None,
         "pixel_identities_match": lambda left, right: left == right,
         "os": os,
         "shutil": shutil,
@@ -500,7 +506,7 @@ def test_storage_backed_plate_index_round_trip(pixel_identity):
     plate = Object(9, [])
     ns["load_group_storage_roots"] = lambda: {}
     ns["resolve_managed_source_path"] = lambda *_args: Path("/plate.zarr")
-    ns["load_canonical_marker"] = lambda _path: canonical
+    ns["load_canonical_marker"] = lambda _path, **_kwargs: canonical
 
     result = ns["attach_canonical_plate_source"](
         "connection",
@@ -545,7 +551,7 @@ def test_storage_backed_plate_marker_can_be_shared_by_duplicate_imports(
     )])
     ns["load_group_storage_roots"] = lambda: {}
     ns["resolve_managed_source_path"] = lambda *_args: Path("/plate.zarr")
-    ns["load_canonical_marker"] = lambda _path: marker_source
+    ns["load_canonical_marker"] = lambda _path, **_kwargs: marker_source
 
     restored = ns["get_canonical_plate_source"](plate)
 
@@ -924,7 +930,7 @@ def test_trust_upgrade_updates_one_store_without_new_generation(
     ])
     marker_writes = []
     ns["write_indexed_canonical_marker"] = (
-        lambda *args: marker_writes.append(args)
+        lambda *args, **_kwargs: marker_writes.append(args)
     )
 
     upgraded = ns["upgrade_reused_canonical"](
@@ -937,6 +943,84 @@ def test_trust_upgrade_updates_one_store_without_new_generation(
     assert marker_writes == [(path, upgraded)]
     assert canonical_annotation.save_count == 1
     assert canonical_annotation.values == upgraded.to_annotation_values()
+
+
+@pytest.mark.skipif(
+    "Could not write the canonical sidecar" not in SCRIPT_PATH.read_text(
+        encoding="utf-8"),
+    reason="unwritable sidecar folder handled in a later source",
+)
+def test_trust_upgrade_survives_unwritable_sidecar_folder(
+    tmp_path, pixel_identity, caplog,
+):
+    """A read-only BIOMERO folder must not fail the workflow."""
+    ns = _load_canonical_functions()
+    path = tmp_path / ".processed/Image-7.ome.zarr"
+    path.mkdir(parents=True)
+    unverified = source(pixel_identity).model_copy(update={
+        "canonical_pixel_verified": False,
+        "pixel_identity_origin": "raw",
+    })
+    obj = Object(7, [
+        annotation_for(unverified),
+        Annotation("legacy", {"Filepath": str(path)}),
+    ])
+
+    def read_only(*_args, **_kwargs):
+        raise PermissionError(13, "Read-only file system", str(path))
+
+    ns["write_indexed_canonical_marker"] = read_only
+
+    with caplog.at_level("WARNING"):
+        result = ns["upgrade_reused_canonical"]("connection", obj, unverified, path)
+
+    assert result == unverified
+    assert result.canonical_pixel_verified is False
+    assert "Could not write the canonical sidecar" in caplog.text
+
+
+@pytest.mark.skipif(
+    "Ignoring the canonical sidecar of" not in SCRIPT_PATH.read_text(
+        encoding="utf-8"),
+    reason="unreadable sidecars handled in a later source",
+)
+@pytest.mark.parametrize("error", [
+    InvalidCanonicalStore("Canonical marker is not committed"),
+    PermissionError(13, "Permission denied"),
+    ValueError("Zarr path has no name"),
+])
+def test_trust_upgrade_survives_corrupt_or_unreadable_sidecar(
+    tmp_path, pixel_identity, caplog, error,
+):
+    """A sidecar problem costs the cache, never the transfer."""
+    ns = _load_canonical_functions()
+    path = tmp_path / ".processed/Image-7.ome.zarr"
+    path.mkdir(parents=True)
+    unverified = source(pixel_identity).model_copy(update={
+        "canonical_pixel_verified": False,
+        "pixel_identity_origin": "raw",
+    })
+    obj = Object(7, [
+        annotation_for(unverified),
+        Annotation("legacy", {"Filepath": str(path)}),
+    ])
+    writes = []
+
+    def unreadable(*_args, **_kwargs):
+        raise error
+
+    ns["load_canonical_marker"] = unreadable
+    ns["write_indexed_canonical_marker"] = (
+        lambda *args, **_kwargs: writes.append(args))
+
+    with caplog.at_level("WARNING"):
+        result = ns["upgrade_reused_canonical"](
+            "connection", obj, unverified, path)
+
+    # Treated as no cached sidecar: the normal verified upgrade proceeds.
+    assert result.canonical_pixel_verified is True
+    assert "Ignoring the canonical sidecar" in caplog.text
+    assert str(path) in caplog.text
 
 
 def test_managed_zarr_location_uses_most_specific_root(tmp_path):
@@ -1104,7 +1188,8 @@ def test_indexes_existing_plate_with_storage_marker_and_compact_annotation(
         lambda *args, **kwargs: build_calls.append((args, kwargs)) or canonical
     )
     ns["write_indexed_canonical_marker"] = (
-        lambda path, source: marker_writes.append((Path(path), source))
+        lambda path, source, **_kwargs: marker_writes.append(
+            (Path(path), source))
     )
 
     indexed = ns["index_existing_plate_zarr"](

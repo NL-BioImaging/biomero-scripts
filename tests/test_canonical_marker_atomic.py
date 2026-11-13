@@ -29,8 +29,10 @@ def _marker_helpers():
         "os": os,
         "uuid4": uuid4,
         "CANONICAL_MARKER_NAME": MARKER_NAME,
-        "external_canonical_marker_path": lambda path: path.parent / "external-marker",
-        "write_indexed_canonical_marker": lambda *args: pytest.fail(
+        "PROCESSED_DATA_FOLDER": ".processed",
+        "external_canonical_marker_path": (
+            lambda path, **_kwargs: path.parent / "external-marker"),
+        "write_indexed_canonical_marker": lambda *args, **kwargs: pytest.fail(
             "Existing marker must be updated, not created again"
         ),
     }
@@ -50,7 +52,7 @@ def test_existing_canonical_marker_is_replaced_without_direct_overwrite(tmp_path
         "source": {"relativePath": "old"},
     }), encoding="utf-8")
     source = SimpleNamespace(to_dict=lambda: {"relativePath": "new"})
-    helpers["load_canonical_marker"] = lambda path: (
+    helpers["load_canonical_marker"] = lambda path, **_kwargs: (
         source if json.loads((path / MARKER_NAME).read_text(
             encoding="utf-8"
         ))["source"] == source.to_dict() else None
@@ -83,3 +85,61 @@ def test_failed_replacement_preserves_marker_and_cleans_temp_file(tmp_path):
 
     assert marker.read_text(encoding="utf-8") == original
     assert list(tmp_path.iterdir()) == [marker]
+
+
+@pytest.mark.skipif(
+    "processed_folder=PROCESSED_DATA_FOLDER" not in SCRIPT.read_text(
+        encoding="utf-8"),
+    reason="sidecar location moved to BIOMERO folders in a later source",
+)
+def test_store_with_only_a_legacy_sidecar_is_rewritten_by_the_importer(tmp_path):
+    """A legacy-only store has no current marker, so the importer writes it."""
+    helpers = _marker_helpers()
+    store = tmp_path / "image.zarr"
+    store.mkdir()
+    writes = []
+    helpers["write_indexed_canonical_marker"] = (
+        lambda path, source, **kwargs: writes.append((path, source, kwargs))
+        or tmp_path / "new-sidecar"
+    )
+    source = SimpleNamespace(to_dict=lambda: {})
+
+    result = helpers["_write_canonical_marker"](store, source)
+
+    assert result == tmp_path / "new-sidecar"
+    assert writes == [(store, source, {"processed_folder": ".processed"})]
+
+
+def _move_store_function(move_marker):
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    nodes = [node for node in tree.body
+             if isinstance(node, ast.FunctionDef)
+             and node.name == "_move_canonical_store"]
+    namespace = {
+        "PROCESSED_DATA_FOLDER": ".processed",
+        "logger": __import__("logging").getLogger("move-store-test"),
+        "move_canonical_marker": move_marker,
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT), "exec"),
+         namespace)
+    return namespace["_move_canonical_store"]
+
+
+@pytest.mark.skipif(
+    "renamed the " not in SCRIPT.read_text(encoding="utf-8"),
+    reason="sidecar move rollback arrives with a later source",
+)
+def test_failed_sidecar_move_renames_the_store_back(tmp_path):
+    def deny(*_args, **_kwargs):
+        raise PermissionError(13, "read-only")
+
+    move = _move_store_function(deny)
+    source = tmp_path / "old.zarr"
+    source.mkdir()
+    destination = tmp_path / "new.zarr"
+
+    with pytest.raises(PermissionError):
+        move(source, destination)
+
+    assert source.is_dir()
+    assert not destination.exists()
