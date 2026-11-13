@@ -328,6 +328,8 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
 
 # Version constant for easy version management
 VERSION = "2.9.0b24"
+# Output read by SLURM_Run_Workflow.py: the result folder that was imported.
+RESULTS_PATH_OUTPUT = "Results_Path"
 
 
 def load_canonical_input_snapshot(slurm_client, workflow_id):
@@ -5258,6 +5260,7 @@ def runScript() -> None:
             slurm_job_id = None
             wf_id = None
             slurm_data_path = None
+            permanent_storage_path = None
             folder = None
             log_file = None
             script_failed = False
@@ -5907,6 +5910,10 @@ def runScript() -> None:
             try:
                 if wf_id is not None:
                     client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
+                # Tell the workflow runner which result folder was imported,
+                # so it can clean up the transfer's working files there.
+                if permanent_storage_path:
+                    client.setOutput(RESULTS_PATH_OUTPUT, rstring(str(permanent_storage_path)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
                     client.setOutput("Message", rstring(str(message)))

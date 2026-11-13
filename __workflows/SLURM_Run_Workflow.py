@@ -55,6 +55,7 @@ License:
 from __future__ import print_function
 import sys
 import os
+from pathlib import Path
 import json
 from uuid import UUID, uuid4
 import omero
@@ -79,7 +80,7 @@ SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
-    from biomero.zarr_contracts import CanonicalInput
+    from biomero.zarr_contracts import CanonicalInput, TRANSFER_INPUT_MARKER
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -104,6 +105,12 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 VERSION = "2.9.0b24"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
+# Output of SLURM_Import_Results.py: the BIOMERO result folder it imported from.
+RESULTS_PATH_OUTPUT = "Results_Path"
+# Folder name that marks BIOMERO's own result storage; cleanup never leaves it.
+RESULTS_FOLDER_NAME = ".analyzed"
+# Files that mark a directory as the root of a Zarr store.
+ZARR_ROOT_FILES = (".zgroup", "zarr.json")
 
 
 def ensure_tracking_uuid(value):
@@ -113,6 +120,94 @@ def ensure_tracking_uuid(value):
     if isinstance(value, UUID):
         return value
     return UUID(str(value))
+
+
+def remove_input_markers(results_path: str,
+                         marker_name: str,
+                         results_folder_name: str = RESULTS_FOLDER_NAME,
+                         zarr_root_files: tuple = ZARR_ROOT_FILES) -> int:
+    """Remove the transfer input markers from one BIOMERO result folder.
+
+    The workflow runner owns this cleanup: the marker is only a working file
+    of the transfer, and the importer needs it until the result is imported.
+    Only files named exactly like the marker are removed, and only below a
+    folder inside BIOMERO's own result storage. Zarr stores are not searched
+    below their root, because a marker only sits at the root of a store.
+
+    Args:
+        results_path (str): Result folder of one import, below ``.analyzed``.
+        marker_name (str): File name of the input marker; the caller passes
+            ``TRANSFER_INPUT_MARKER``, which only loads with shallow Zarr.
+        results_folder_name (str): Name of the BIOMERO result storage folder
+            that ``results_path`` must be inside.
+        zarr_root_files (tuple): File names that mark a Zarr store root.
+
+    Returns:
+        int: Number of markers removed.
+    """
+    results_root = os.path.realpath(results_path)
+    if results_folder_name not in Path(results_root).parts:
+        logger.warning(
+            f"Not removing input markers: {results_root} is not inside a "
+            f"'{results_folder_name}' result folder")
+        return 0
+    if not os.path.isdir(results_root):
+        logger.warning(
+            f"Not removing input markers: result folder {results_root} "
+            "does not exist")
+        return 0
+    removed = 0
+    for directory, subdirectories, file_names in os.walk(results_root):
+        if marker_name in file_names:
+            marker_path = os.path.join(directory, marker_name)
+            try:
+                os.remove(marker_path)
+                removed += 1
+                logger.info(f"Removed input marker {marker_path}")
+            except OSError as remove_error:
+                logger.warning(
+                    f"Could not remove input marker {marker_path}: "
+                    f"{remove_error}")
+        if any(name in file_names for name in zarr_root_files):
+            subdirectories.clear()  # nothing below a store root is a marker
+    logger.info(
+        f"Removed {removed} input marker(s) below {results_root}")
+    return removed
+
+
+def remove_input_markers_after_import(import_outputs: dict) -> int:
+    """Remove the input markers from the result that was just imported.
+
+    Call this only after the result import succeeded: the importer reads the
+    marker during import, and removes it itself only after a local evaluation
+    or when the helper kept the full result. It stays in a result that was
+    shallowed on the HPC, and in a result the importer did not evaluate.
+    This one step covers all of those paths.
+
+    Args:
+        import_outputs (dict): Outputs of the result import script.
+
+    Returns:
+        int: Number of markers removed.
+    """
+    if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED):
+        logger.debug(
+            "Not removing input markers: shallow Zarr storage is off, so "
+            "the transfer wrote none")
+        return 0
+    if not import_outputs or RESULTS_PATH_OUTPUT not in import_outputs:
+        logger.warning(
+            f"Cannot remove input markers: the import script returned no "
+            f"{RESULTS_PATH_OUTPUT} output")
+        return 0
+    results_path = unwrap(import_outputs[RESULTS_PATH_OUTPUT])
+    if not results_path:
+        logger.warning(
+            f"Cannot remove input markers: empty {RESULTS_PATH_OUTPUT} output")
+        return 0
+    logger.info(
+        f"Result import is done; removing input markers from {results_path}")
+    return remove_input_markers(results_path, TRANSFER_INPUT_MARKER)
 
 
 def parse_canonical_inputs_output(results):
@@ -2526,6 +2621,8 @@ def importResultsToOmero(client: omscripts.client,
         slurmClient.workflowTracker.fail_task(task_id, error_msg)
         wf_failed = True
         raise RuntimeError(error_msg)
+    # Reached only after a successful import: the importer needed the markers.
+    remove_input_markers_after_import(rv)
     return rv
 
 
