@@ -1,0 +1,298 @@
+"""The workflow runner removes the transfer input marker after the import.
+
+The marker (``.biomero-input.json``) is written into the exported input, comes
+back inside the result, and is read by the importer. The importer removes it
+only after a local evaluation or when the helper kept the full result, so the
+run script removes it from every result once the import succeeded.
+"""
+import ast
+import logging
+import os
+from collections import defaultdict
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+
+SOURCE_ROOT = Path(os.environ.get(
+    "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
+))
+RUN_SCRIPT = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
+IMPORT_SCRIPT = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
+MARKER = ".biomero-input.json"
+RESULTS_PATH_OUTPUT = "Results_Path"
+FUNCTIONS = (
+    "remove_input_markers",
+    "remove_input_markers_after_import",
+    "importResultsToOmero",
+)
+
+
+class Node(str):
+    """A constant that is its own dotted name, like ``constants.a.B``."""
+
+    def __getattr__(self, name):
+        if name.startswith("get"):  # not an rtype: unwrap() must skip it
+            raise AttributeError(name)
+        return Node(f"{self}.{name}")
+
+
+class FakeConstants:
+    """Stand-in for ``biomero.constants`` with unique string values."""
+
+    file_output_targets = SimpleNamespace(
+        USER_VALUES=("input",), INPUT_CONTAINER="input")
+
+    def __getattr__(self, name):
+        return Node(name)
+
+
+def load_functions(shallow_enabled=True, **extra):
+    tree = ast.parse(RUN_SCRIPT.read_text(encoding="utf-8"))
+    nodes = [n for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name in FUNCTIONS]
+    assert {n.name for n in nodes} == set(FUNCTIONS), (
+        "input marker cleanup is not implemented in SLURM_Run_Workflow.py")
+    module_constants = {
+        "IMPORTER_ENABLED": True,
+        "SHALLOW_ZARR_ENABLED": shallow_enabled,
+        "TRANSFER_INPUT_MARKER": MARKER,
+        "RESULTS_PATH_OUTPUT": RESULTS_PATH_OUTPUT,
+        "RESULTS_FOLDER_NAME": ".analyzed",
+        "ZARR_ROOT_FILES": (".zgroup", "zarr.json"),
+        "IMPORT_SCRIPTS": ["SLURM_Import_Results.py"],
+        "VERSION": "test",
+    }
+    namespace = {
+        "os": os, "Path": Path, "logger": logging.getLogger("marker-test"),
+        "unwrap": lambda value: (value.getValue()
+                                 if hasattr(value, "getValue") else value),
+        "rstring": lambda v: v, "rbool": lambda v: v, "rlist": lambda v: v,
+        "rlong": lambda v: v, "Parameters": MagicMock, "UUID": str,
+        "BlitzGateway": object, "SlurmClient": object,
+        "omscripts": SimpleNamespace(client=object),
+        "constants": FakeConstants(), "wf_failed": False,
+        "wait_for_job_completion": lambda *a, **k: None,
+        **module_constants, **extra,
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(RUN_SCRIPT),
+                 "exec"), namespace)
+    return namespace
+
+
+def make_store(root: Path, name="result.zarr", shallow=False) -> Path:
+    store = root / name
+    store.mkdir(parents=True)
+    (store / "zarr.json").write_text("{}", encoding="utf-8")
+    (store / MARKER).write_text("{}", encoding="utf-8")
+    if shallow:
+        (store / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
+    else:
+        (store / "c").mkdir()
+        (store / "c" / "0").write_bytes(b"chunk")
+    return store
+
+
+@pytest.fixture
+def results_root(tmp_path):
+    root = tmp_path / "group" / ".analyzed" / "wf-1" / "20260101_000000"
+    root.mkdir(parents=True)
+    return root
+
+
+# --- the helper -----------------------------------------------------------
+
+def test_removes_the_marker_of_every_store_in_the_result(results_root):
+    first = make_store(results_root, "a.zarr")
+    second = make_store(results_root / "nested", "b.zarr", shallow=True)
+    log = results_root / "omero-1.log"
+    log.write_text("log", encoding="utf-8")
+
+    removed = load_functions()["remove_input_markers"](
+        str(results_root), MARKER)
+
+    assert removed == 2
+    assert not (first / MARKER).exists()
+    assert not (second / MARKER).exists()
+    assert (first / "zarr.json").is_file()
+    assert (first / "c" / "0").is_file()
+    assert (second / ".biomero-shallow.json").is_file()
+    assert log.is_file()
+
+
+def test_removes_only_files_named_like_the_marker(results_root):
+    store = make_store(results_root)
+    lookalike = store / f"{MARKER}.bak"
+    lookalike.write_text("{}", encoding="utf-8")
+    inside_array = store / "c" / MARKER  # below a store root: not a marker
+    inside_array.write_text("{}", encoding="utf-8")
+
+    load_functions()["remove_input_markers"](str(results_root), MARKER)
+
+    assert lookalike.is_file()
+    assert inside_array.is_file()
+
+
+def test_never_touches_a_folder_outside_biomero_result_storage(tmp_path):
+    user_folder = tmp_path / "group" / "user-data"
+    store = make_store(user_folder)
+
+    removed = load_functions()["remove_input_markers"](
+        str(user_folder), MARKER)
+
+    assert removed == 0
+    assert (store / MARKER).is_file()
+
+
+def test_a_missing_result_folder_is_not_an_error(tmp_path):
+    missing = tmp_path / ".analyzed" / "gone"
+
+    assert load_functions()["remove_input_markers"](
+        str(missing), MARKER) == 0
+
+
+def test_cleanup_is_repeatable(results_root):
+    make_store(results_root)
+    remove = load_functions()["remove_input_markers"]
+
+    assert remove(str(results_root), MARKER) == 1
+    assert remove(str(results_root), MARKER) == 0
+
+
+def test_a_marker_that_cannot_be_removed_does_not_fail_the_run(
+        results_root, caplog):
+    store = make_store(results_root)
+    functions = load_functions()
+
+    def refuse(path):
+        raise PermissionError("read-only")
+
+    functions["os"] = SimpleNamespace(
+        walk=os.walk, remove=refuse, path=os.path)
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        removed = functions["remove_input_markers"](
+            str(results_root), MARKER)
+
+    assert removed == 0
+    assert (store / MARKER).is_file()
+    assert any(r.levelno == logging.WARNING and "Could not remove" in
+               r.getMessage() for r in caplog.records)
+
+
+# --- the decision after an import -----------------------------------------
+
+def test_skips_when_shallow_zarr_is_off_and_says_why(results_root, caplog):
+    store = make_store(results_root)
+
+    with caplog.at_level(logging.DEBUG, logger="marker-test"):
+        removed = load_functions(shallow_enabled=False)[
+            "remove_input_markers_after_import"](
+                {RESULTS_PATH_OUTPUT: str(results_root)})
+
+    assert removed == 0
+    assert (store / MARKER).is_file()
+    assert any(r.levelno == logging.DEBUG and "shallow Zarr storage is off"
+               in r.getMessage() for r in caplog.records)
+
+
+def test_warns_when_the_import_returned_no_result_folder(caplog):
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        removed = load_functions()["remove_input_markers_after_import"]({})
+
+    assert removed == 0
+    assert any(r.levelno == logging.WARNING and RESULTS_PATH_OUTPUT in
+               r.getMessage() for r in caplog.records)
+
+
+# --- one test per result path, through the real import step ---------------
+
+def importer_removes_marker(store: Path):
+    """Local evaluation or helper kept the full result: importer removes it."""
+    (store / MARKER).unlink()
+
+
+PATHS = {
+    # Result shallowed on the HPC: the importer accepts it, marker stays.
+    "remote-shallow": (True, False),
+    # Helper kept the full result: the importer removes the marker.
+    "remote-kept-full": (False, True),
+    # The importer evaluated the store itself: it removes the marker.
+    "local-evaluation": (False, True),
+    # Importer received a plain (legacy) import: it never looks at the marker.
+    "no-importer-evaluation": (False, False),
+}
+
+
+def fake_script_environment(run_omero_script):
+    functions = load_functions(run_omero_script=run_omero_script)
+    script = SimpleNamespace(id=7, getVersion=lambda: "v",
+                             getName=lambda: "SLURM_Import_Results.py")
+    conn = MagicMock()
+    conn.getScriptService.return_value.getScripts.return_value = [script]
+    constants = FakeConstants()
+    inputs = {constants.transfer.IDS: [1],
+              constants.transfer.DATA_TYPE: constants.transfer.DATA_TYPE_DATASET}
+    client = SimpleNamespace(getInput=lambda key: inputs.get(key))
+
+    def import_results():
+        return functions["importResultsToOmero"](
+            client, conn, MagicMock(), 99, defaultdict(bool), "wf-1")
+    return import_results
+
+
+def job_with_status(status_id):
+    return SimpleNamespace(getStatus=lambda: SimpleNamespace(
+        getId=lambda: status_id))
+
+
+@pytest.mark.parametrize("importer_removes_today", [True, False],
+                         ids=["importer-removes-as-today",
+                              "importer-no-longer-removes"])
+@pytest.mark.parametrize("path", sorted(PATHS))
+def test_marker_is_gone_after_import_on_every_path(
+        path, importer_removes_today, results_root):
+    shallow, importer_removes_on_this_path = PATHS[path]
+    store = make_store(results_root, shallow=shallow)
+    seen = {}
+
+    def fake_import(client, svc, script_id, inputs, **kwargs):
+        seen["marker_present_at_import"] = (store / MARKER).is_file()
+        if importer_removes_today and importer_removes_on_this_path:
+            importer_removes_marker(store)
+        return ({"Message": "imported",
+                 RESULTS_PATH_OUTPUT: str(results_root)}, job_with_status(3))
+
+    fake_script_environment(fake_import)()
+
+    assert seen["marker_present_at_import"], (
+        "the marker must still exist when the importer runs")
+    assert not (store / MARKER).exists()
+    assert (store / "zarr.json").is_file()
+
+
+def test_marker_stays_when_the_import_fails(results_root):
+    store = make_store(results_root)
+
+    def failing_import(client, svc, script_id, inputs, **kwargs):
+        return ({"Message": "FAILED: importer down",
+                 RESULTS_PATH_OUTPUT: str(results_root)}, job_with_status(6))
+
+    with pytest.raises(RuntimeError):
+        fake_script_environment(failing_import)()
+
+    assert (store / MARKER).is_file(), "a failed import is retried later"
+
+
+# --- the contract with the import script -----------------------------------
+
+def test_import_script_reports_the_result_folder_the_runner_cleans():
+    run_source = RUN_SCRIPT.read_text(encoding="utf-8")
+    import_source = IMPORT_SCRIPT.read_text(encoding="utf-8")
+
+    assert f'RESULTS_PATH_OUTPUT = "{RESULTS_PATH_OUTPUT}"' in run_source
+    assert f'RESULTS_PATH_OUTPUT = "{RESULTS_PATH_OUTPUT}"' in import_source
+    assert (
+        "client.setOutput(RESULTS_PATH_OUTPUT, "
+        "rstring(str(permanent_storage_path)))"
+    ) in import_source
