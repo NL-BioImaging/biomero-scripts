@@ -80,7 +80,8 @@ SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
-    from biomero_schema.zarr import CanonicalInput, TRANSFER_INPUT_MARKER
+    from biomero.zarr_contracts import CanonicalInput
+    from biomero_schema.zarr import TRANSFER_INPUT_MARKER
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
