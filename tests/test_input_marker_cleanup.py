@@ -21,6 +21,9 @@ SOURCE_ROOT = Path(os.environ.get(
 ))
 RUN_SCRIPT = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
 IMPORT_SCRIPT = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
+from biomero_schema.zarr import TRANSFER_INPUT_MARKER
+
+# The file name the transfer writes; pinned against the schema constant below.
 MARKER = ".biomero-input.json"
 RESULTS_PATH_OUTPUT = "Results_Path"
 FUNCTIONS = (
@@ -51,16 +54,26 @@ class FakeConstants:
         return Node(name)
 
 
-def load_functions(shallow_enabled=True, **extra):
+class RString:
+    """Like ``rstring``: a value that is read with ``getValue()``."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def getValue(self):
+        return self.value
+
+
+def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
     tree = ast.parse(RUN_SCRIPT.read_text(encoding="utf-8"))
     nodes = [n for n in tree.body
              if isinstance(n, ast.FunctionDef) and n.name in FUNCTIONS]
     assert {n.name for n in nodes} == set(FUNCTIONS), (
         "input marker cleanup is not implemented in SLURM_Run_Workflow.py")
     module_constants = {
-        "IMPORTER_ENABLED": True,
+        "IMPORTER_ENABLED": importer_enabled,
         "SHALLOW_ZARR_ENABLED": shallow_enabled,
-        "SHALLOW_ZARR_STORAGE_ENABLED": shallow_enabled,
+        "SHALLOW_ZARR_STORAGE_ENABLED": importer_enabled and shallow_enabled,
         "TRANSFER_INPUT_MARKER": MARKER,
         "RESULTS_PATH_OUTPUT": RESULTS_PATH_OUTPUT,
         "RESULTS_FOLDER_NAME": ".analyzed",
@@ -147,6 +160,19 @@ def test_never_touches_a_folder_outside_biomero_result_storage(tmp_path):
 
     assert removed == 0
     assert (store / MARKER).is_file()
+
+
+def test_a_path_that_climbs_out_of_the_result_folder_is_refused(
+        results_root):
+    group_folder = results_root.parents[2]
+    user_store = make_store(group_folder / "user-data")
+    escape = results_root / ".." / ".." / ".." / "user-data"
+    assert (escape / user_store.name / MARKER).is_file()
+
+    removed = load_functions()["remove_input_markers"](str(escape), MARKER)
+
+    assert removed == 0
+    assert (user_store / MARKER).is_file()
 
 
 def test_a_missing_result_folder_is_not_an_error(tmp_path):
@@ -272,18 +298,34 @@ def test_an_unreadable_folder_only_warns(results_root, caplog):
 
 # --- the decision after an import -----------------------------------------
 
-def test_skips_when_shallow_zarr_is_off_and_says_why(results_root, caplog):
+@pytest.mark.parametrize("importer_enabled, shallow_enabled", [
+    (True, False), (False, True), (False, False)],
+    ids=["shallow-off", "importer-off", "both-off"])
+def test_skips_when_shallow_zarr_is_off_and_says_why(
+        results_root, caplog, importer_enabled, shallow_enabled):
     store = make_store(results_root)
 
     with caplog.at_level(logging.DEBUG, logger="marker-test"):
-        removed = load_functions(shallow_enabled=False)[
+        removed = load_functions(
+            shallow_enabled=shallow_enabled,
+            importer_enabled=importer_enabled)[
             "remove_input_markers_after_import"](
-                {RESULTS_PATH_OUTPUT: str(results_root)})
+                {RESULTS_PATH_OUTPUT: RString(str(results_root))})
 
     assert removed == 0
     assert (store / MARKER).is_file()
     assert any(r.levelno == logging.DEBUG and "shallow Zarr storage is off"
                in r.getMessage() for r in caplog.records)
+
+
+def test_warns_when_the_result_folder_output_is_empty(caplog):
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        removed = load_functions()["remove_input_markers_after_import"](
+            {RESULTS_PATH_OUTPUT: RString("")})
+
+    assert removed == 0
+    assert any(r.levelno == logging.WARNING and "empty" in r.getMessage()
+               for r in caplog.records)
 
 
 def test_warns_when_the_import_returned_no_result_folder(caplog):
@@ -351,7 +393,7 @@ def test_marker_is_gone_after_import_on_every_path(
         if importer_removes_today and importer_removes_on_this_path:
             importer_removes_marker(store)
         return ({"Message": "imported",
-                 RESULTS_PATH_OUTPUT: str(results_root)}, job_with_status(3))
+                 RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(3))
 
     fake_script_environment(fake_import)()
 
@@ -366,7 +408,7 @@ def test_marker_stays_when_the_import_fails(results_root):
 
     def failing_import(client, svc, script_id, inputs, **kwargs):
         return ({"Message": "FAILED: importer down",
-                 RESULTS_PATH_OUTPUT: str(results_root)}, job_with_status(6))
+                 RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(6))
 
     with pytest.raises(RuntimeError):
         fake_script_environment(failing_import)()
@@ -379,7 +421,7 @@ def test_a_failing_cleanup_does_not_fail_the_import(results_root, caplog):
 
     def fake_import(client, svc, script_id, inputs, **kwargs):
         return ({"Message": "imported",
-                 RESULTS_PATH_OUTPUT: str(results_root)}, job_with_status(3))
+                 RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(3))
 
     def broken_cleanup(import_outputs):
         raise RuntimeError("disk gone")
@@ -408,7 +450,26 @@ def test_a_failing_cleanup_does_not_fail_the_import(results_root, caplog):
 
 # --- the contract with the import script -----------------------------------
 
+def test_the_guarded_schema_import_gives_the_file_name_the_transfer_writes():
+    tree = ast.parse(RUN_SCRIPT.read_text(encoding="utf-8"))
+    guarded_names = {
+        alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.If)
+        and "IMPORTER_ENABLED" in ast.unparse(node.test)
+        for child in ast.walk(node)
+        if isinstance(child, ast.ImportFrom)
+        and child.module == "biomero_schema.zarr"
+        for alias in child.names
+    }
+
+    assert "TRANSFER_INPUT_MARKER" in guarded_names
+    assert TRANSFER_INPUT_MARKER == MARKER
+
+
 def test_import_script_reports_the_result_folder_the_runner_cleans():
+    # The contract between the two scripts is textual: the importer sets an
+    # output by name and the runner reads it by name, and only a real OMERO
+    # run connects them. This pins the name and the call on both sides.
     run_source = RUN_SCRIPT.read_text(encoding="utf-8")
     import_source = IMPORT_SCRIPT.read_text(encoding="utf-8")
 
