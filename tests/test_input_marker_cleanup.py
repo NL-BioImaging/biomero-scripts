@@ -25,7 +25,6 @@ from biomero_schema.zarr import TRANSFER_INPUT_MARKER
 
 # The file name the transfer writes; pinned against the schema constant below.
 MARKER = ".biomero-input.json"
-RESULTS_PATH_OUTPUT = "Results_Path"
 FUNCTIONS = (
     "is_biomero_result_folder",
     "log_walk_error",
@@ -64,6 +63,11 @@ class RString:
         return self.value
 
 
+# The scripts read the output name from biomero.constants.results, which is
+# injected here like every other constant; any unique value will do.
+RESULTS_PATH_OUTPUT = FakeConstants().results.RESULTS_PATH_OUTPUT
+
+
 def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
     tree = ast.parse(RUN_SCRIPT.read_text(encoding="utf-8"))
     nodes = [n for n in tree.body
@@ -75,7 +79,6 @@ def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
         "SHALLOW_ZARR_ENABLED": shallow_enabled,
         "SHALLOW_ZARR_STORAGE_ENABLED": importer_enabled and shallow_enabled,
         "TRANSFER_INPUT_MARKER": MARKER,
-        "RESULTS_PATH_OUTPUT": RESULTS_PATH_OUTPUT,
         "RESULTS_FOLDER_NAME": ".analyzed",
         "ZARR_ROOT_FILES": (".zgroup", "zarr.json"),
         "IMPORT_SCRIPTS": ["SLURM_Import_Results.py"],
@@ -466,16 +469,20 @@ def test_the_guarded_schema_import_gives_the_file_name_the_transfer_writes():
     assert TRANSFER_INPUT_MARKER == MARKER
 
 
-def test_import_script_reports_the_result_folder_the_runner_cleans():
+def test_both_scripts_use_the_core_constant_for_the_result_folder_output():
     # The contract between the two scripts is textual: the importer sets an
     # output by name and the runner reads it by name, and only a real OMERO
-    # run connects them. This pins the name and the call on both sides.
+    # run connects them. Both must take the name from biomero.constants, so
+    # they cannot drift apart (biomero#110).
     run_source = RUN_SCRIPT.read_text(encoding="utf-8")
     import_source = IMPORT_SCRIPT.read_text(encoding="utf-8")
+    core_constant = "constants.results.RESULTS_PATH_OUTPUT"
 
-    assert f'RESULTS_PATH_OUTPUT = "{RESULTS_PATH_OUTPUT}"' in run_source
-    assert f'RESULTS_PATH_OUTPUT = "{RESULTS_PATH_OUTPUT}"' in import_source
+    assert core_constant in run_source
     assert (
-        "client.setOutput(RESULTS_PATH_OUTPUT, "
+        f"client.setOutput({core_constant}, "
         "rstring(str(permanent_storage_path)))"
     ) in import_source
+    for source in (run_source, import_source):
+        assert "RESULTS_PATH_OUTPUT =" not in source, "defined locally"
+        assert '"Results_Path"' not in source
