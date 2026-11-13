@@ -8,6 +8,7 @@ run script removes it from every result once the import succeeded.
 import ast
 import logging
 import os
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,8 @@ IMPORT_SCRIPT = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
 MARKER = ".biomero-input.json"
 RESULTS_PATH_OUTPUT = "Results_Path"
 FUNCTIONS = (
+    "is_biomero_result_folder",
+    "log_walk_error",
     "remove_input_markers",
     "remove_input_markers_after_import",
     "importResultsToOmero",
@@ -57,6 +60,7 @@ def load_functions(shallow_enabled=True, **extra):
     module_constants = {
         "IMPORTER_ENABLED": True,
         "SHALLOW_ZARR_ENABLED": shallow_enabled,
+        "SHALLOW_ZARR_STORAGE_ENABLED": shallow_enabled,
         "TRANSFER_INPUT_MARKER": MARKER,
         "RESULTS_PATH_OUTPUT": RESULTS_PATH_OUTPUT,
         "RESULTS_FOLDER_NAME": ".analyzed",
@@ -180,6 +184,92 @@ def test_a_marker_that_cannot_be_removed_does_not_fail_the_run(
                r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.parametrize("depth", [".analyzed", ".analyzed/wf-1"])
+def test_refuses_the_storage_folder_and_a_workflow_folder(tmp_path, depth):
+    folder = tmp_path / "group" / depth
+    store = make_store(folder)
+    other_import = make_store(
+        tmp_path / "group" / ".analyzed" / "wf-2" / "20260102_000000")
+
+    removed = load_functions()["remove_input_markers"](str(folder), MARKER)
+
+    assert removed == 0
+    assert (store / MARKER).is_file()
+    assert (other_import / MARKER).is_file()
+
+
+def test_a_result_folder_linked_to_user_data_is_refused(tmp_path):
+    user_store = make_store(tmp_path / "user-data")
+    link = tmp_path / "group" / ".analyzed" / "wf-1" / "20260101_000000"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(user_store.parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        if os.name != "nt" or subprocess.run(  # a junction resolves alike
+                ["cmd", "/c", "mklink", "/J", str(link),
+                 str(user_store.parent)],
+                capture_output=True).returncode != 0:
+            pytest.skip("links cannot be created here")
+
+    removed = load_functions()["remove_input_markers"](str(link), MARKER)
+
+    assert removed == 0
+    assert (user_store / MARKER).is_file()
+
+
+def test_links_inside_a_result_folder_are_not_followed(
+        tmp_path, results_root):
+    user_store = make_store(tmp_path / "user-data")
+    try:
+        (results_root / "shortcut").symlink_to(
+            user_store.parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks cannot be created here")
+
+    removed = load_functions()["remove_input_markers"](
+        str(results_root), MARKER)
+
+    assert removed == 0
+    assert (user_store / MARKER).is_file()
+
+
+def test_the_search_never_follows_links(results_root):
+    # Also covers platforms where the link test above has to skip.
+    make_store(results_root)
+    functions = load_functions()
+    calls = []
+
+    def recording_walk(top, **kwargs):
+        calls.append(kwargs)
+        return os.walk(top, **kwargs)
+
+    functions["os"] = SimpleNamespace(
+        walk=recording_walk, remove=os.remove, path=os.path)
+    functions["remove_input_markers"](str(results_root), MARKER)
+
+    assert calls and calls[0].get("followlinks") is False
+
+
+def test_an_unreadable_folder_only_warns(results_root, caplog):
+    store = make_store(results_root)
+    functions = load_functions()
+
+    def failing_walk(top, onerror=None, followlinks=False):
+        onerror(PermissionError("no access"))
+        return iter(())
+
+    functions["os"] = SimpleNamespace(
+        walk=failing_walk, remove=os.remove, path=os.path)
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        removed = functions["remove_input_markers"](
+            str(results_root), MARKER)
+
+    assert removed == 0
+    assert (store / MARKER).is_file()
+    assert any(r.levelno == logging.WARNING and "skipped a folder" in
+               r.getMessage() for r in caplog.records)
+
+
 # --- the decision after an import -----------------------------------------
 
 def test_skips_when_shallow_zarr_is_off_and_says_why(results_root, caplog):
@@ -282,6 +372,38 @@ def test_marker_stays_when_the_import_fails(results_root):
         fake_script_environment(failing_import)()
 
     assert (store / MARKER).is_file(), "a failed import is retried later"
+
+
+def test_a_failing_cleanup_does_not_fail_the_import(results_root, caplog):
+    store = make_store(results_root)
+
+    def fake_import(client, svc, script_id, inputs, **kwargs):
+        return ({"Message": "imported",
+                 RESULTS_PATH_OUTPUT: str(results_root)}, job_with_status(3))
+
+    def broken_cleanup(import_outputs):
+        raise RuntimeError("disk gone")
+
+    functions = load_functions(run_omero_script=fake_import)
+    functions["remove_input_markers_after_import"] = broken_cleanup
+    script = SimpleNamespace(id=7, getVersion=lambda: "v",
+                             getName=lambda: "SLURM_Import_Results.py")
+    conn = MagicMock()
+    conn.getScriptService.return_value.getScripts.return_value = [script]
+    constants = FakeConstants()
+    inputs = {constants.transfer.IDS: [1],
+              constants.transfer.DATA_TYPE: constants.transfer.DATA_TYPE_DATASET}
+    client = SimpleNamespace(getInput=lambda key: inputs.get(key))
+
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        rv = functions["importResultsToOmero"](
+            client, conn, MagicMock(), 99, defaultdict(bool), "wf-1")
+
+    assert rv["Message"] == "imported"
+    assert (store / MARKER).is_file()
+    record = next(r for r in caplog.records
+                  if "cleanup failed" in r.getMessage())
+    assert record.levelno == logging.WARNING and record.exc_info
 
 
 # --- the contract with the import script -----------------------------------
