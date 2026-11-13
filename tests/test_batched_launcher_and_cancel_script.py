@@ -131,6 +131,8 @@ def test_batched_launcher_params_include_every_key_the_processor_reads():
 # ----------------------------- cancel script ----------------------------- #
 
 def cancel_runscript(inputs, user_id, is_admin):
+    if not CANCEL.exists():
+        pytest.skip('Source has no cancel script')
     nodes = source_nodes(CANCEL, {
         'request_cancel', 'runScript', '_WORKFLOW_ID', '_REASON',
         '_DEFAULT_REASON', '_MAX_REASON_LENGTH', 'VERSION'})
