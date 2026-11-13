@@ -108,3 +108,38 @@ def test_store_with_only_a_legacy_sidecar_is_rewritten_by_the_importer(tmp_path)
 
     assert result == tmp_path / "new-sidecar"
     assert writes == [(store, source, {"processed_folder": ".processed"})]
+
+
+def _move_store_function(move_marker):
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    nodes = [node for node in tree.body
+             if isinstance(node, ast.FunctionDef)
+             and node.name == "_move_canonical_store"]
+    namespace = {
+        "PROCESSED_DATA_FOLDER": ".processed",
+        "logger": __import__("logging").getLogger("move-store-test"),
+        "move_canonical_marker": move_marker,
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT), "exec"),
+         namespace)
+    return namespace["_move_canonical_store"]
+
+
+@pytest.mark.skipif(
+    "renamed the " not in SCRIPT.read_text(encoding="utf-8"),
+    reason="sidecar move rollback arrives with a later source",
+)
+def test_failed_sidecar_move_renames_the_store_back(tmp_path):
+    def deny(*_args, **_kwargs):
+        raise PermissionError(13, "read-only")
+
+    move = _move_store_function(deny)
+    source = tmp_path / "old.zarr"
+    source.mkdir()
+    destination = tmp_path / "new.zarr"
+
+    with pytest.raises(PermissionError):
+        move(source, destination)
+
+    assert source.is_dir()
+    assert not destination.exists()
