@@ -220,8 +220,11 @@ Historical imports are inspected only when explicitly retried.
 This protects image registration; it does not make optional ROI creation and
 attachment postprocessing exactly-once operations.
 
-Use an importer release that checks database write acknowledgement and recovers
-interrupted shallow transactions before reading a store. These recovery changes
+Use `biomero-importer>=1.5.0b14`: it keeps the canonical-source sidecars under
+BIOMERO's own `.processed` folders, which the image transfer and the shallow
+storage migration read through the importer's helpers. It also checks database
+write acknowledgement and recovers interrupted shallow transactions before
+reading a store. These recovery changes
 support v2 and v3 and do not change canonical-store format or identity policy.
 
 ## Development
