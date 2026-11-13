@@ -30,8 +30,10 @@ UI_MESSAGES_NAME = "UI_messages"
 
 
 def uses_core_constants():
-    return any("constants.results." in path.read_text(encoding="utf-8")
-               for path in SCRIPTS)
+    """Tell whether any script already reads a shared name from core."""
+    return any(f"constants.results.{constant}" in path.read_text(
+        encoding="utf-8") for path in SCRIPTS
+        for constant in SHARED_OUTPUTS.values())
 
 
 def is_allowed(node, parent):
