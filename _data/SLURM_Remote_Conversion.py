@@ -157,7 +157,7 @@ def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
 
         client.setOutput("Conversion_Log", robject(annotation._obj))
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
         logger.info(
             f"Uploaded conversion log {local_path} to OMERO (file {obj_id}), "
             f"linked to {len(targets or [])} container(s)")
@@ -359,11 +359,11 @@ def runScript():
                     slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
 
                 # Always set output message with error for parent detection
-                client.setOutput("Message", rstring(str(message)))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
                 raise e
 
             # Set successful output message
-            client.setOutput("Message", rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
             # slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()

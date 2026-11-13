@@ -300,12 +300,12 @@ Connection ready? {slurmClient.validate()}""",
                 allowed_formats=allowed_formats,
             )
 
-            client.setOutput("Message", rstring(message))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(message))
             client.setOutput("Slurm_Path", rstring(slurm_path))
 
         except Exception as exc:
             logger.exception("File transfer failed")
-            client.setOutput("Message", rstring(f"ERROR: {exc}"))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"ERROR: {exc}"))
             raise
 
         finally:

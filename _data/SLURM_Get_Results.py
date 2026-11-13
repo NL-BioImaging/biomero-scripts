@@ -224,7 +224,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         job = process.getJob()
         status_id = (int(unwrap(job.getStatus().getId()))
                      if job is not None else None)
-        returned_message = unwrap(results.get("Message"))
+        returned_message = unwrap(results.get(constants.results.MESSAGE_OUTPUT))
         message = str(returned_message or "ROI postprocessing completed")
         if status_id in (6, 9) or message.startswith("FAILED:"):
             raise RuntimeError(
@@ -634,7 +634,7 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=N
                 logger.debug(
                     f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
-                client.setOutput("File_Annotation", robject(file_ann._obj))
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
                 logger.warning(msg)
@@ -1649,7 +1649,7 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
 
 
         for project in projects:
@@ -1686,7 +1686,7 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, w
             f"{folder}.zip", mimetype=mimetype,
             ns=namespace, desc=description)
 
-        client.setOutput("File_Annotation", robject(zip_annotation._obj))
+        client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(zip_annotation._obj))
 
         for project in projects:
             project.linkAnnotation(zip_annotation)  # link it to project.
@@ -2564,14 +2564,14 @@ def runScript():
                             message += f"\nCleanup disabled: Local files preserved at {folder}"
                             logger.info(f"Cleanup disabled: Preserved local files at {folder}")
 
-            client.setOutput("Message", rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
         except Exception as e:
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
 
             # Set failure output and re-raise to show red X in OMERO
             try:
-                client.setOutput("Message", rstring(f"FAILED: {message}"))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"FAILED: {message}"))
             except Exception:
                 pass
 

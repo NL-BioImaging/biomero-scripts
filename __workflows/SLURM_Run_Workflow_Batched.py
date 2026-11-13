@@ -387,7 +387,7 @@ def runScript():
                 client.getInput(wf_name)) for wf_name in workflows}
             if not any(selected_workflows.values()):
                 errormsg = "ERROR: Please select at least 1 workflow!"
-                client.setOutput("Message", rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(errormsg))
                 raise ValueError(errormsg)
             version_errors = ""
             for wf, selected in selected_workflows.items():
@@ -417,7 +417,7 @@ def runScript():
                     selected_output[output_option] = True
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
-                client.setOutput("Message", rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(errormsg))
                 raise ValueError(errormsg)
             else:
                 logger.info(f"Output options chosen: {selected_output}")
@@ -552,7 +552,7 @@ def runScript():
                      "selected_output": selected_output,
                      "group": group,
                      constants.transfer.IDS: list(image_ids)})
-                client.setOutput("Message", rstring(
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                     f"Your {len(batch_ids_list)} batches are queued and run "
                     f"in the background: you can close this tab. Results are "
                     f"imported into OMERO automatically and progress is shown "
@@ -645,16 +645,16 @@ def runScript():
                             try:
                                 results = process.getResults(
                                     0)  # 0 ms; RtypeDict
-                                if 'Message' in results:
-                                    result_msg = results['Message'].getValue()
+                                if constants.results.MESSAGE_OUTPUT in results:
+                                    result_msg = results[constants.results.MESSAGE_OUTPUT].getValue()
                                     logger.info(result_msg)
                                     UI_messages['Message'].extend(
                                         [f">> Batch {i}: ",
                                          result_msg])
 
-                                if 'File_Annotation' in results:
+                                if constants.results.FILE_ANNOTATION_OUTPUT in results:
                                     UI_messages['File_Annotation'].append(
-                                        results['File_Annotation'].getValue())
+                                        results[constants.results.FILE_ANNOTATION_OUTPUT].getValue())
                             except Exception as results_e:
                                 logger.error(
                                     f"Error getting results for batch {i}: {results_e}")
@@ -723,7 +723,7 @@ def runScript():
                     proc.close(False)  # stop the scripts
 
             # 7. Script output
-            client.setOutput("Message",
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
                              rstring("\n".join(UI_messages['Message'])))
 
             if wf_failed:

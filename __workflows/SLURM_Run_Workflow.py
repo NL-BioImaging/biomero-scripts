@@ -103,7 +103,6 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 VERSION = "2.9.0b24"
-CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 
 def ensure_tracking_uuid(value):
@@ -117,14 +116,14 @@ def ensure_tracking_uuid(value):
 
 def parse_canonical_inputs_output(results):
     """Validate canonical input records returned by Image Transfer."""
-    if not results or CANONICAL_INPUTS_OUTPUT not in results:
+    if not results or constants.results.CANONICAL_INPUTS_OUTPUT not in results:
         logger.debug(
-            f"Image Transfer returned no {CANONICAL_INPUTS_OUTPUT} output")
+            f"Image Transfer returned no {constants.results.CANONICAL_INPUTS_OUTPUT} output")
         return ()
-    raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
+    raw_value = unwrap(results[constants.results.CANONICAL_INPUTS_OUTPUT])
     if not raw_value:
         logger.debug(
-            f"Image Transfer returned an empty {CANONICAL_INPUTS_OUTPUT} "
+            f"Image Transfer returned an empty {constants.results.CANONICAL_INPUTS_OUTPUT} "
             "output")
         return ()
     payload = json.loads(raw_value)
@@ -516,8 +515,8 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
             
             # Get message content
             message = ""
-            if 'Message' in rv:
-                message = unwrap(rv['Message'])
+            if constants.results.MESSAGE_OUTPUT in rv:
+                message = unwrap(rv[constants.results.MESSAGE_OUTPUT])
                 if message:
                     logger.info(f"Write access validation message: {message}")
             
@@ -941,7 +940,7 @@ def runScript():
                 client.getInput(wf_name)) for wf_name in workflows}
             if not any(selected_workflows.values()):
                 errormsg = "ERROR: Please select at least 1 workflow!"
-                client.setOutput("Message", rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(errormsg))
                 raise ValueError(errormsg)
             version_errors = ""
             for wf, selected in selected_workflows.items():
@@ -955,7 +954,7 @@ def runScript():
             selected_output = resolve_selected_output(client)
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
-                client.setOutput("Message", rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(errormsg))
                 raise ValueError(errormsg)
             else:
                 logger.info(f"Output options chosen: {selected_output}")
@@ -1040,7 +1039,7 @@ def runScript():
                     output_settings=output_settings,
                     UI_messages=UI_messages)
 
-            client.setOutput("Message", rstring(UI_messages))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(UI_messages))
 
         except Exception as e:
             # Only mark workflow as failed if we actually started one
@@ -1053,7 +1052,7 @@ def runScript():
                 except Exception as db_e:
                     logger.error(
                         f"Database error marking workflow {wf_id} as failed: {db_e}")
-            client.setOutput("Message", rstring(
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                 f"{UI_messages} ERROR: {str(e)}"))
             raise  # Re-raise the exception after handling
 
@@ -1165,8 +1164,8 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
             reconstruct_shallow_zarr=use_zarr_format,
         )
         logger.debug(f"Ran data export: {rv.keys()}, {rv}")
-        if 'Message' in rv:
-            logger.info(rv['Message'].getValue())  # log
+        if constants.results.MESSAGE_OUTPUT in rv:
+            logger.info(rv[constants.results.MESSAGE_OUTPUT].getValue())  # log
         UI_messages += "Exported data to Slurm. "
 
     logger.info('''
@@ -1203,9 +1202,9 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
             client, conn, slurmClient, zipfile, source_format,
             target_format, wf_id)
         logger.debug(f"Ran data conversion: {rv_conv.keys()}, {rv_conv}")
-        if 'Message' in rv_conv:
-            logger.info(rv_conv['Message'].getValue())  # log
-            UI_messages += rv_conv['Message'].getValue() + " "
+        if constants.results.MESSAGE_OUTPUT in rv_conv:
+            logger.info(rv_conv[constants.results.MESSAGE_OUTPUT].getValue())  # log
+            UI_messages += rv_conv[constants.results.MESSAGE_OUTPUT].getValue() + " "
 
     slurm_job_ids = {}
     task_ids = {}
@@ -1309,8 +1308,8 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
 
                     if rv_imp:
                         try:
-                            if rv_imp['Message']:
-                                log_msg = f"{rv_imp['Message'].getValue()}"
+                            if rv_imp[constants.results.MESSAGE_OUTPUT]:
+                                log_msg = f"{rv_imp[constants.results.MESSAGE_OUTPUT].getValue()}"
                         except KeyError:
                             log_msg += "Data import status unknown."
                         # Guard: importResultsToOmero may have
@@ -1326,16 +1325,16 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
                                 f"{log_msg}"
                             )
                         try:
-                            if rv_imp['URL']:
+                            if rv_imp[constants.results.URL_OUTPUT]:
                                 client.setOutput(
-                                    "URL", rv_imp['URL'])
+                                    constants.results.URL_OUTPUT, rv_imp[constants.results.URL_OUTPUT])
                         except KeyError:
                             log_msg += "|No URL|"
                         try:
-                            if rv_imp["File_Annotation"]:
-                                client.setOutput("File_Annotation",
+                            if rv_imp[constants.results.FILE_ANNOTATION_OUTPUT]:
+                                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
                                                  rv_imp[
-                                                     "File_Annotation"])
+                                                     constants.results.FILE_ANNOTATION_OUTPUT])
                         except KeyError:
                             log_msg += "|No Annotation|"
                     else:
@@ -1447,7 +1446,7 @@ def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id,
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
         client.setOutput("Job_Log", robject(annotation._obj))
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
         logger.info(
             f"Uploaded log for failed job {slurm_job_id} to OMERO "
             f"(file {obj_id})")
@@ -1572,7 +1571,7 @@ def run_workflow(slurmClient: SlurmClient,
                     ft_rv, _ = run_omero_script(client, svc, ft_script_id, ft_inputs,
                                                slurmClient=slurmClient)
                     slurm_path = unwrap(ft_rv.get('Slurm_Path')) if ft_rv else None
-                    ft_msg = unwrap(ft_rv.get('Message', None)) if ft_rv else ''
+                    ft_msg = unwrap(ft_rv.get(constants.results.MESSAGE_OUTPUT, None)) if ft_rv else ''
                     if slurm_path:
                         collected_paths.append(slurm_path)
                         UI_messages += (
@@ -1800,9 +1799,9 @@ def convertDataOnSLURM(client: omscripts.client,
 
         if rv and isinstance(rv, dict):
             # Extract the Message content if available
-            if 'Message' in rv:
+            if constants.results.MESSAGE_OUTPUT in rv:
                 try:
-                    message_content = rv['Message'].getValue()
+                    message_content = rv[constants.results.MESSAGE_OUTPUT].getValue()
 
                     # Check for error indicators in the message
                     error_indicators = [
@@ -1964,9 +1963,9 @@ def exportImageToSLURM(client: omscripts.client,
                 success = False
 
         if rv and isinstance(rv, dict):
-            if 'Message' in rv:
+            if constants.results.MESSAGE_OUTPUT in rv:
                 try:
-                    message_content = rv['Message'].getValue()
+                    message_content = rv[constants.results.MESSAGE_OUTPUT].getValue()
                     error_indicators = [
                         'ERROR:',
                         'FAILED:',
@@ -2502,7 +2501,7 @@ def importResultsToOmero(client: omscripts.client,
             script_failed = True  # Assume failure if we can't get status
     
     try:
-        msg = unwrap(rv['Message'])
+        msg = unwrap(rv[constants.results.MESSAGE_OUTPUT])
 
         # When a sub-script raises an exception, OMERO's runner catches it and
         # still completes the job (status != 6), but the script sets the Message

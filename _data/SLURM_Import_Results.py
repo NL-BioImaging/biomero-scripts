@@ -247,7 +247,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         job = process.getJob()
         status_id = (int(unwrap(job.getStatus().getId()))
                      if job is not None else None)
-        returned_message = unwrap(results.get("Message"))
+        returned_message = unwrap(results.get(constants.results.MESSAGE_OUTPUT))
         message = str(returned_message or "ROI postprocessing completed")
         if status_id in (6, 9) or message.startswith("FAILED:"):
             raise RuntimeError(
@@ -1137,7 +1137,7 @@ def saveImagesToOmeroAsAttachments(
                         message = upload_metadata_csv_to_omero(
                             client, conn, message, job_id, [image], metadata_files, wf_id)
 
-                client.setOutput("File_Annotation", robject(file_ann._obj))
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
                 logger.warning(msg)
@@ -1645,7 +1645,7 @@ def upload_log_to_omero(
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
 
         for project in projects:
             project.linkAnnotation(annotation)  # link it to project.
@@ -1814,7 +1814,7 @@ def upload_zip_to_omero(
         zip_annotation = create_file_annotation_inplace(
             conn, f"{folder}.zip", mimetype, namespace, description)
 
-        client.setOutput("File_Annotation", robject(zip_annotation._obj))
+        client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT, robject(zip_annotation._obj))
 
         for project in projects:
             project.linkAnnotation(zip_annotation)  # link it to project.
@@ -5294,7 +5294,7 @@ def runScript() -> None:
                 
                 # Perform the write access check with existing connection
                 success, result_message = check_write_access_for_importer(group_name, conn=conn)
-                client.setOutput("Message", rstring(result_message))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(result_message))
                 if not success:
                     raise RuntimeError(result_message)
                 logger.info(f"Write access check successful: {result_message}")
@@ -5875,7 +5875,7 @@ def runScript() -> None:
 
             # Set failure output and re-raise to show red X in OMERO
             try:
-                client.setOutput("Message", rstring(f"FAILED: {message}"))
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"FAILED: {message}"))
             except Exception:
                 pass
 
@@ -5909,7 +5909,7 @@ def runScript() -> None:
                     client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
-                    client.setOutput("Message", rstring(str(message)))
+                    client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
             except Exception as output_error:
                 logger.error(f"Failed to set output: {output_error}")
 
