@@ -1593,7 +1593,17 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
     upgraded = (verified_plate_source(source) if is_plate else
                 source.model_copy(update={"canonical_pixel_verified": True,
                                           "pixel_identity_origin": "canonical-bootstrap"}))
-    write_indexed_canonical_marker(source_path, upgraded)
+    try:
+        write_indexed_canonical_marker(source_path, upgraded)
+    except OSError as exc:
+        # The sidecar is only an optimisation. Without it the registration
+        # stays as it was and the input is reused unverified, as when the
+        # backing store cannot be confirmed above.
+        logger.warning(
+            "Could not write the canonical sidecar for %s (%s); keeping the "
+            "existing registration unverified and continuing", source_path,
+            exc)
+        return source
     if is_plate:
         attach_canonical_plate_source(conn, obj, upgraded)
     else:
