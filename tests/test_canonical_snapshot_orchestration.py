@@ -35,6 +35,9 @@ def _load_snapshot_functions():
     ]
     namespace = {
         "CANONICAL_INPUTS_OUTPUT": CANONICAL_INPUTS_OUTPUT,
+        # Current source reads the name from biomero.constants.results.
+        "constants": SimpleNamespace(results=SimpleNamespace(
+            CANONICAL_INPUTS_OUTPUT=CANONICAL_INPUTS_OUTPUT)),
         "CanonicalInput": CanonicalInput,
         "UUID": UUID,
         "json": json,

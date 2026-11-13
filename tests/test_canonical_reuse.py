@@ -52,7 +52,8 @@ def test_cached_plate_upgrade_requires_matching_backing_path(
             "canonical_pixel_verified": False})}) for i in source.images)})
     ns["get_legacy_zarr_path"] = lambda _: path if same_backing else tmp_path / "other.zarr"
     writes = []
-    ns["write_indexed_canonical_marker"] = lambda *args: writes.append(args)
+    ns["write_indexed_canonical_marker"] = (
+        lambda *args, **_kwargs: writes.append(args))
     ns["attach_canonical_plate_source"] = lambda *args: None
     result = ns["upgrade_reused_canonical"](None, object(), source, path)
     assert all(i.source.canonical_pixel_verified for i in result.images) == same_backing

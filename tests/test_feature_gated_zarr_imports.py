@@ -2,10 +2,32 @@ import ast
 import os
 from pathlib import Path
 
+import pytest
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
+
+
+def _zarr_module(path):
+    """The module the script imports the Zarr contracts from.
+
+    Older source revisions used the biomero.zarr_contracts re-export of the
+    schema; current ones import biomero_schema.zarr directly. A script that
+    still imports anything from biomero.zarr_contracts counts as the old form,
+    even when it already takes another name (the input marker) from the
+    schema. Any other form fails, so a new import path is not silently
+    skipped.
+
+    Remove the old form once biomero-scripts#88 is merged and the harness no
+    longer has to test older source revisions.
+    """
+    source = path.read_text(encoding="utf-8")
+    new_form = "from biomero_schema.zarr import" in source
+    old_form = "from biomero.zarr_contracts import" in source
+    assert new_form or old_form, f"unknown Zarr import form in {path.name}"
+    return "biomero.zarr_contracts" if old_form else "biomero_schema.zarr"
 
 
 def _guarded_imports(path, module):
@@ -35,14 +57,25 @@ def test_image_transfer_loads_zarr_contracts_for_evergreen_restore():
         for node in tree.body
         if (
             isinstance(node, ast.ImportFrom)
-            and node.module == "biomero.zarr_contracts"
+            and node.module == _zarr_module(path)
         )
     ]
 
     assert len(imports) == 1
-    assert not _guarded_imports(path, "biomero.zarr_contracts")
+    assert not _guarded_imports(path, _zarr_module(path))
 
 
 def test_workflow_runner_loads_zarr_contracts_only_inside_feature_gate():
     path = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
-    assert _guarded_imports(path, "biomero.zarr_contracts")
+    assert _guarded_imports(path, _zarr_module(path))
+
+
+def test_scripts_import_zarr_contracts_from_the_schema_package():
+    sources = [
+        SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py",
+        SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py",
+    ]
+    if all(_zarr_module(path) == "biomero.zarr_contracts" for path in sources):
+        pytest.skip("source revision predates the direct schema imports")
+    for path in sources:
+        assert "biomero.zarr_contracts" not in path.read_text(encoding="utf-8")
