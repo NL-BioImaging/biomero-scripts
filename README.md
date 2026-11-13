@@ -41,8 +41,9 @@ Use the released NL-BIOMERO containers for a coordinated installation. For a
 custom deployment, follow the [scripts installation guide](https://nl-bioimaging.github.io/biomero/scripts.html#installation-and-upgrades)
 and install the scripts on the OMERO server and detached worker.
 
-Deploy matching core and scripts releases together. This release requires core's
-`biomero.provenance` and `biomero.maintenance` APIs even when optional features
+Deploy matching core and scripts releases together. This release requires
+`biomero>=2.9.0b26`, which includes `biomero.metadata_views` (renamed from
+`biomero.provenance`) and `biomero.maintenance` APIs even when optional features
 are disabled. Prerelease tag counters can differ between repositories; use the
 component references supplied by the NL-BIOMERO release.
 
