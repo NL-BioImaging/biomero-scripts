@@ -108,8 +108,6 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 VERSION = "2.9.0b24"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
-# Output of SLURM_Import_Results.py: the BIOMERO result folder it imported from.
-RESULTS_PATH_OUTPUT = "Results_Path"
 # BIOMERO's own result storage: <group folder>/.analyzed/<workflow>/<timestamp>.
 RESULTS_FOLDER_NAME = ".analyzed"
 # Files that mark a directory as the root of a Zarr store.
@@ -216,15 +214,16 @@ def remove_input_markers_after_import(import_outputs: dict) -> int:
             "Not removing input markers: shallow Zarr storage is off, so "
             "the transfer wrote none")
         return 0
-    if not import_outputs or RESULTS_PATH_OUTPUT not in import_outputs:
+    if not import_outputs or constants.results.RESULTS_PATH_OUTPUT not in import_outputs:
         logger.warning(
             f"Cannot remove input markers: the import script returned no "
-            f"{RESULTS_PATH_OUTPUT} output")
+            f"{constants.results.RESULTS_PATH_OUTPUT} output")
         return 0
-    results_path = unwrap(import_outputs[RESULTS_PATH_OUTPUT])
+    results_path = unwrap(import_outputs[constants.results.RESULTS_PATH_OUTPUT])
     if not results_path:
         logger.warning(
-            f"Cannot remove input markers: empty {RESULTS_PATH_OUTPUT} output")
+            f"Cannot remove input markers: empty "
+            f"{constants.results.RESULTS_PATH_OUTPUT} output")
         return 0
     logger.info(
         f"Result import is done; removing input markers from {results_path}")
