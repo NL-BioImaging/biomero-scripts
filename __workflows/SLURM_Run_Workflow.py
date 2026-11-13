@@ -1669,8 +1669,9 @@ def convert_data_stage(pipeline, history, zipfile, use_zarr_format, UI_messages)
         target_format, pipeline.wf_id)
     logger.debug(f"Ran data conversion: {rv_conv.keys()}, {rv_conv}")
     if constants.results.MESSAGE_OUTPUT in rv_conv:
-        logger.info(rv_conv[constants.results.MESSAGE_OUTPUT].getValue())  # log
-        UI_messages += rv_conv[constants.results.MESSAGE_OUTPUT].getValue() + " "
+        conversion_message = rv_conv[constants.results.MESSAGE_OUTPUT].getValue()
+        logger.info(conversion_message)  # log
+        UI_messages += conversion_message + " "
     return UI_messages
 
 
@@ -1848,13 +1849,16 @@ def import_completed_job(pipeline, slurm_job_id, task_id, workflow_name,
                          f"be marked failed): {log_msg}")
         try:
             if rv_imp[constants.results.URL_OUTPUT]:
-                pipeline.client.setOutput(constants.results.URL_OUTPUT, rv_imp[constants.results.URL_OUTPUT])
+                pipeline.client.setOutput(
+                    constants.results.URL_OUTPUT,
+                    rv_imp[constants.results.URL_OUTPUT])
         except KeyError:
             log_msg += "|No URL|"
         try:
             if rv_imp[constants.results.FILE_ANNOTATION_OUTPUT]:
-                pipeline.client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
-                                     rv_imp[constants.results.FILE_ANNOTATION_OUTPUT])
+                pipeline.client.setOutput(
+                    constants.results.FILE_ANNOTATION_OUTPUT,
+                    rv_imp[constants.results.FILE_ANNOTATION_OUTPUT])
         except KeyError:
             log_msg += "|No Annotation|"
     else:

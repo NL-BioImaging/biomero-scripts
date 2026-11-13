@@ -1643,7 +1643,6 @@ def upload_log_to_omero(
             conn, file, mimetype, namespace, description)
         # Already have other output in this script
         # But you could add this as output if you wanted log instead
-        # client.setOutput("File_Annotation", robject(annotation._obj))
 
         # Build a fully-qualified URL so it works from any browser location.
         # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
