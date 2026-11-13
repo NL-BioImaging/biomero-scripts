@@ -669,7 +669,12 @@ def test_an_import_that_reports_failure_fails_the_run(tracker, workflow_id):
 
 
 def test_every_stage_that_catches_exceptions_lets_a_cancel_pass():
-    """Each generic handler around a sub-script run re-raises a cancel first."""
+    """Each generic handler around a sub-script run re-raises a cancel first.
+
+    Structural on purpose: the behavioural tests drive the export and
+    conversion handlers; this guards any handler added around a sub-script
+    later (a new stage) that they do not reach.
+    """
     problems = []
     # validate_importer_write_access runs before a workflow exists: no cancel
     # can be pending there.
