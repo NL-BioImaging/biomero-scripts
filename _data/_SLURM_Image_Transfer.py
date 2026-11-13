@@ -74,7 +74,7 @@ try:
 except ImportError:
     import Image
 from biomero import SlurmClient, constants
-from biomero.zarr_contracts import (
+from biomero_schema.zarr import (
     CANONICAL_PLATE_IMAGE_NAMESPACE,
     CANONICAL_PLATE_LABEL_NAMESPACE,
     CANONICAL_PLATE_SOURCE_NAMESPACE,
