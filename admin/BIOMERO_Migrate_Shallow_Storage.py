@@ -34,6 +34,8 @@ from biomero_importer.utils.canonical_store import (
     CANONICAL_MARKER_NAME,
     external_canonical_marker_path,
     load_canonical_marker,
+    move_canonical_marker,
+    remove_legacy_canonical_marker,
     write_indexed_canonical_marker,
 )
 from biomero_shallower.migration import (
@@ -520,17 +522,15 @@ def _write_canonical_marker(path, source):
 
 
 def _move_canonical_store(source, destination):
-    """Rename one generated store and any external marker without copying."""
+    """Rename one generated store and any external sidecar without copying."""
     if source == destination:
         return
     if destination.exists():
         raise FileExistsError(f"Stable canonical destination exists: {destination}")
-    old_external = external_canonical_marker_path(source)
-    new_external = external_canonical_marker_path(destination)
     source.rename(destination)
-    if old_external.is_file():
-        new_external.parent.mkdir(parents=True, exist_ok=True)
-        old_external.rename(new_external)
+    # The sidecar is keyed by the store's location in a BIOMERO folder (or, for
+    # an older beta, sits next to the store); the importer moves either one.
+    move_canonical_marker(source, destination)
 
 
 def _canonical_registration_values(source):
@@ -723,6 +723,7 @@ def _apply_canonical_consolidation(
             if path.exists():
                 shutil.rmtree(path)
             external_canonical_marker_path(path).unlink(missing_ok=True)
+            remove_legacy_canonical_marker(path)
     return results
 
 
