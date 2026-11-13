@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from script_output_names import OUTPUT_NAMES
+
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
@@ -43,11 +45,24 @@ class Node(str):
         return Node(f"{self}.{name}")
 
 
+class FakeResults:
+    """``constants.results``: core's real shared output names, and unique
+    values for every other constant."""
+
+    def __getattr__(self, name):
+        if hasattr(OUTPUT_NAMES, name):
+            return getattr(OUTPUT_NAMES, name)
+        return Node(f"results.{name}")
+
+
 class FakeConstants:
     """Stand-in for ``biomero.constants`` with unique string values."""
 
     file_output_targets = SimpleNamespace(
         USER_VALUES=("input",), INPUT_CONTAINER="input")
+
+    # The shared output names are core's real ones, as the scripts use them.
+    results = FakeResults()
 
     def __getattr__(self, name):
         return Node(name)
@@ -64,8 +79,8 @@ class RString:
 
 
 # The scripts read the output name from biomero.constants.results, which is
-# injected here like every other constant; any unique value will do.
-RESULTS_PATH_OUTPUT = FakeConstants().results.RESULTS_PATH_OUTPUT
+# injected here like every other constant.
+RESULTS_PATH_OUTPUT = OUTPUT_NAMES.RESULTS_PATH_OUTPUT
 
 
 def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
