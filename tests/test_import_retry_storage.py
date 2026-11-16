@@ -8,6 +8,7 @@ from uuid import UUID
 import zipfile
 
 import pytest
+from biomero import constants
 from biomero.storage import read_analyzed_data_folder
 
 
@@ -202,3 +203,34 @@ def test_import_retry_skips_slurm_retrieval_for_staged_results(tmp_path):
     assert result[2] == str(archive)
     assert result[3] == "490_out"
     assert "Reusing results already retrieved" in result[4]
+
+
+def staged_result(analyzed_folder, workflow_id, slurm_job_id="490"):
+    """A complete staged result below ``analyzed_folder``."""
+    staged = analyzed_folder / workflow_id / "20260827_140415"
+    staged.mkdir(parents=True)
+    (staged / f"omero-{slurm_job_id}.log").write_text("log", encoding="utf-8")
+    (staged / ".biomero-results-retrieved.json").write_text(
+        json.dumps({
+            "schema": 1,
+            "status": "complete",
+            "workflowId": workflow_id,
+            "slurmJobId": slurm_job_id,
+        }),
+        encoding="utf-8",
+    )
+    return staged
+
+
+def test_import_retry_looks_in_the_configured_result_folder(
+        tmp_path, monkeypatch):
+    workflow_id = "b4e4a5f8-a7a3-4a76-873b-daa164f0f3e7"
+    monkeypatch.setenv(constants.slurm_env.ANALYZED_DATA_FOLDER, ".results")
+    custom = staged_result(tmp_path / ".results", workflow_id)
+    default_name = staged_result(tmp_path / ".analyzed", workflow_id)
+
+    storage_path, _ = load_find_existing_result_storage(tmp_path)(
+        "system", workflow_id, "490")
+
+    assert storage_path == str(custom)
+    assert storage_path != str(default_name)

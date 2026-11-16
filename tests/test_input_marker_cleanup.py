@@ -108,12 +108,6 @@ def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
     return namespace
 
 
-@pytest.fixture(autouse=True)
-def default_result_folder(monkeypatch):
-    """Every test starts from the default result folder, whatever the host."""
-    monkeypatch.delenv(slurm_env.ANALYZED_DATA_FOLDER, raising=False)
-
-
 def make_store(root: Path, name="result.zarr", shallow=False) -> Path:
     store = root / name
     store.mkdir(parents=True)
@@ -340,7 +334,10 @@ def test_a_marker_that_cannot_be_removed_does_not_fail_the_run(
                r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("depth", [DEFAULT_ANALYZED_DATA_FOLDER, f"{DEFAULT_ANALYZED_DATA_FOLDER}/wf-1"])
+@pytest.mark.parametrize("depth", [
+    DEFAULT_ANALYZED_DATA_FOLDER,
+    f"{DEFAULT_ANALYZED_DATA_FOLDER}/wf-1",
+])
 def test_refuses_the_storage_folder_and_a_workflow_folder(tmp_path, depth):
     folder = tmp_path / "group" / depth
     store = make_store(folder)
@@ -603,3 +600,17 @@ def test_both_scripts_use_the_core_constant_for_the_result_folder_output():
     for source in (run_source, import_source):
         assert "RESULTS_PATH_OUTPUT =" not in source, "defined locally"
         assert '"Results_Path"' not in source
+
+
+@pytest.mark.parametrize("script", [RUN_SCRIPT, IMPORT_SCRIPT],
+                         ids=["run", "import"])
+def test_no_script_hardcodes_the_default_result_folder_name(script):
+    # Every place that makes or finds the result folder (the import's result
+    # path, the retry lookup, the finalize lock folder, the sweep's scope
+    # check) must read ANALYZED_DATA_FOLDER; a literal ignores the setting.
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    literals = [node.lineno for node in ast.walk(tree)
+                if isinstance(node, ast.Constant)
+                and node.value == DEFAULT_ANALYZED_DATA_FOLDER]
+
+    assert not literals, f"{script.name} hardcodes the folder at {literals}"
