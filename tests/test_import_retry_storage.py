@@ -41,13 +41,6 @@ def load_find_existing_result_storage(base_path):
                 for target in node.targets
             )
         ) or (
-            isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name)
-                and target.id == "RESULTS_FOLDER"
-                for target in node.targets
-            )
-        ) or (
             isinstance(node, ast.FunctionDef)
             and node.name in required_functions
         )
