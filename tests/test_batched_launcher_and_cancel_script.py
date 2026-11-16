@@ -76,9 +76,15 @@ class RType:
 
 
 def batched_registration():
+    # Skip only when the source has no detached batched pipeline at all; a
+    # source that registers launcher tasks must keep this function.
+    if not BATCHED.exists() or 'add_launcher_task' not in BATCHED.read_text(
+            encoding='utf-8'):
+        pytest.skip('Source has no detached batched launcher')
     nodes = source_nodes(BATCHED, {'register_detached_batches', 'VERSION'})
-    if not any(isinstance(n, ast.FunctionDef) for n in nodes):
-        pytest.skip('Source has no batched launcher registration')
+    assert any(isinstance(n, ast.FunctionDef) for n in nodes), (
+        'Batched script registers launcher tasks but lacks '
+        'register_detached_batches')
     return run_source(
         BATCHED, nodes, constants=constants,
         logger=logging.getLogger('batched'),
@@ -117,6 +123,8 @@ def test_batched_launcher_records_the_contract_the_supervisor_reads():
 
 def test_batched_launcher_params_include_every_key_the_processor_reads():
     """The processor's batched parent reads exactly these keys."""
+    # Hand-written pin of what NL-BIOMERO's batched parent reads; update it
+    # together with the processor when that set of keys changes.
     processor_keys = {'batches', 'base_inputs', 'effective_type',
                       'selected_output', 'group', 'workflows'}
     tracker = WorkflowTracker()
@@ -136,9 +144,9 @@ def cancel_runscript(inputs, user_id, is_admin):
     nodes = source_nodes(CANCEL, {
         'request_cancel', 'runScript', '_WORKFLOW_ID', '_REASON',
         '_DEFAULT_REASON', '_MAX_REASON_LENGTH', 'VERSION'})
-    if not any(isinstance(n, ast.FunctionDef) and n.name == 'runScript'
-               for n in nodes):
-        pytest.skip('Source has no cancel script')
+    # The script file exists, so runScript is part of its contract.
+    assert any(isinstance(n, ast.FunctionDef) and n.name == 'runScript'
+               for n in nodes), 'Cancel script lacks runScript'
     outputs = {}
     client = SimpleNamespace(
         getInputs=lambda unwrap=False: dict(inputs),
