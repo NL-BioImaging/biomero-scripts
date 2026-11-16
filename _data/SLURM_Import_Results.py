@@ -53,8 +53,9 @@ When cleanup is enabled, this script removes:
 - SLURM server: Original job results directory, temporary zip files, job logs
 - Local: Temporary files from zip operations (if any were created)
 - Permanent storage: The bulk ``{job_id}_out.zip`` is deleted from the result folder
-  (``ANALYZED_DATA_FOLDER``, default ``.analyzed``) once import completes **unless** it was attached to OMERO (in which case
-  OMERO may reference the file directly via an in-place symlink and it must remain).
+  (``ANALYZED_DATA_FOLDER``, default ``.analyzed``) once import completes
+  **unless** it was attached to OMERO (in which case OMERO may reference the
+  file directly via an in-place symlink and it must remain).
 
 OUTPUTS:
 - Message: concise summary of the import.
