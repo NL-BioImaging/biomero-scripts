@@ -8,8 +8,6 @@ from uuid import UUID
 import zipfile
 
 import pytest
-from biomero import constants
-from biomero.storage import read_analyzed_data_folder
 
 
 SOURCE_ROOT = Path(os.environ.get(
@@ -40,6 +38,13 @@ def load_find_existing_result_storage(base_path):
                 for target in node.targets
             )
         ) or (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "RESULTS_FOLDER"
+                for target in node.targets
+            )
+        ) or (
             isinstance(node, ast.FunctionDef)
             and node.name in required_functions
         )
@@ -52,7 +57,6 @@ def load_find_existing_result_storage(base_path):
         "json": json,
         "logger": logging.getLogger(__name__),
         "os": os,
-        "read_analyzed_data_folder": read_analyzed_data_folder,
         "zipfile": zipfile,
         "get_importer_group_base_path": lambda _group_name: str(base_path),
     }
@@ -205,9 +209,9 @@ def test_import_retry_skips_slurm_retrieval_for_staged_results(tmp_path):
     assert "Reusing results already retrieved" in result[4]
 
 
-def staged_result(analyzed_folder, workflow_id, slurm_job_id="490"):
-    """A complete staged result below ``analyzed_folder``."""
-    staged = analyzed_folder / workflow_id / "20260827_140415"
+def staged_result(results_folder, workflow_id, slurm_job_id="490"):
+    """A complete staged result below ``results_folder``."""
+    staged = results_folder / workflow_id / "20260827_140415"
     staged.mkdir(parents=True)
     (staged / f"omero-{slurm_job_id}.log").write_text("log", encoding="utf-8")
     (staged / ".biomero-results-retrieved.json").write_text(
@@ -222,15 +226,14 @@ def staged_result(analyzed_folder, workflow_id, slurm_job_id="490"):
     return staged
 
 
-def test_import_retry_looks_in_the_configured_result_folder(
-        tmp_path, monkeypatch):
+def test_import_retry_looks_only_in_the_results_folder(tmp_path):
     workflow_id = "b4e4a5f8-a7a3-4a76-873b-daa164f0f3e7"
-    monkeypatch.setenv(constants.slurm_env.ANALYZED_DATA_FOLDER, ".results")
-    custom = staged_result(tmp_path / ".results", workflow_id)
-    default_name = staged_result(tmp_path / ".analyzed", workflow_id)
+    staged_result(tmp_path / "elsewhere", workflow_id)
+    find_existing = load_find_existing_result_storage(tmp_path)
 
-    storage_path, _ = load_find_existing_result_storage(tmp_path)(
-        "system", workflow_id, "490")
+    assert find_existing("system", workflow_id, "490") == (None, None)
 
-    assert storage_path == str(custom)
-    assert storage_path != str(default_name)
+    expected = staged_result(tmp_path / ".analyzed", workflow_id)
+
+    storage_path, _ = find_existing("system", workflow_id, "490")
+    assert storage_path == str(expected)
