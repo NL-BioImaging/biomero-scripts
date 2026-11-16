@@ -40,6 +40,18 @@ SOURCE_ROOT = Path(os.environ.get(
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py"
 
 
+def _uses_processed_folder(path):
+    """Whether the source keeps sidecars in BIOMERO folders.
+
+    Gates on the keyword the feature adds to the sidecar calls, not on log
+    text, so rewording a message fails the tests instead of skipping them.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return any(
+        isinstance(node, ast.keyword) and node.arg == "processed_folder"
+        for node in ast.walk(tree))
+
+
 class InvalidCanonicalStore(RuntimeError):
     """Stand-in for biomero_importer's error for a corrupt or uncommitted marker."""
 
@@ -946,8 +958,7 @@ def test_trust_upgrade_updates_one_store_without_new_generation(
 
 
 @pytest.mark.skipif(
-    "Could not write the canonical sidecar" not in SCRIPT_PATH.read_text(
-        encoding="utf-8"),
+    not _uses_processed_folder(SCRIPT_PATH),
     reason="unwritable sidecar folder handled in a later source",
 )
 def test_trust_upgrade_survives_unwritable_sidecar_folder(
@@ -980,8 +991,7 @@ def test_trust_upgrade_survives_unwritable_sidecar_folder(
 
 
 @pytest.mark.skipif(
-    "Ignoring the canonical sidecar of" not in SCRIPT_PATH.read_text(
-        encoding="utf-8"),
+    not _uses_processed_folder(SCRIPT_PATH),
     reason="unreadable sidecars handled in a later source",
 )
 @pytest.mark.parametrize("error", [

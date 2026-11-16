@@ -18,6 +18,18 @@ SCRIPT = SOURCE_ROOT / "admin" / "BIOMERO_Migrate_Shallow_Storage.py"
 MARKER_NAME = ".biomero-canonical.json"
 
 
+def _uses_processed_folder(path):
+    """Whether the source keeps sidecars in BIOMERO folders.
+
+    Gates on the keyword the feature adds to the sidecar calls, not on log
+    text, so rewording a message fails the tests instead of skipping them.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return any(
+        isinstance(node, ast.keyword) and node.arg == "processed_folder"
+        for node in ast.walk(tree))
+
+
 def _marker_helpers():
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
     names = {"_write_json", "_canonical_marker_path", "_write_canonical_marker"}
@@ -88,8 +100,7 @@ def test_failed_replacement_preserves_marker_and_cleans_temp_file(tmp_path):
 
 
 @pytest.mark.skipif(
-    "processed_folder=PROCESSED_DATA_FOLDER" not in SCRIPT.read_text(
-        encoding="utf-8"),
+    not _uses_processed_folder(SCRIPT),
     reason="sidecar location moved to BIOMERO folders in a later source",
 )
 def test_store_with_only_a_legacy_sidecar_is_rewritten_by_the_importer(tmp_path):
@@ -126,7 +137,7 @@ def _move_store_function(move_marker):
 
 
 @pytest.mark.skipif(
-    "renamed the " not in SCRIPT.read_text(encoding="utf-8"),
+    "move_canonical_marker" not in SCRIPT.read_text(encoding="utf-8"),
     reason="sidecar move rollback arrives with a later source",
 )
 def test_failed_sidecar_move_renames_the_store_back(tmp_path):

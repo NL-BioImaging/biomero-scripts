@@ -37,7 +37,7 @@ class OmeroObject:
         return None
 
 
-def _load_namespace(tmp_path, existing_zarr, calls):
+def _load_namespace(existing_zarr, calls):
     tree = ast.parse(TRANSFER_PATH.read_text(encoding="utf-8"))
     nodes = [node for node in tree.body
              if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]
@@ -87,7 +87,6 @@ def _load_namespace(tmp_path, existing_zarr, calls):
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TRANSFER_PATH),
                  "exec"), namespace)
-    namespace["read_zarr_semantic_guard"] = lambda *_args: guard
     return namespace
 
 
@@ -104,7 +103,7 @@ def test_unwritable_biomero_folder_warns_and_packages_zarr_directly(
     # The BIOMERO folder cannot be created: a file occupies its name.
     (existing.parent / ".processed").write_text("blocked")
     calls = []
-    namespace = _load_namespace(tmp_path, existing, calls)
+    namespace = _load_namespace(existing, calls)
     namespace["is_compatible_zarr_source"] = lambda *_args: True
     packaged = {}
 
