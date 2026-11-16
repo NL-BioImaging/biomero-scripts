@@ -9,7 +9,9 @@ import ast
 import datetime
 import logging
 import os
+import re
 import subprocess
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -180,11 +182,29 @@ def test_a_path_that_climbs_out_of_the_result_folder_is_refused(
     assert (user_store / MARKER).is_file()
 
 
-def test_a_missing_result_folder_is_not_an_error(tmp_path):
-    missing = tmp_path / RESULTS_FOLDER / "gone"
+def test_a_missing_result_folder_is_not_an_error(tmp_path, caplog):
+    missing = tmp_path / RESULTS_FOLDER / WORKFLOW_ID / "20260101_000000"
 
-    assert load_functions()["remove_input_markers"](
-        str(missing), MARKER, WORKFLOW_ID) == 0
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        removed = load_functions()["remove_input_markers"](
+            str(missing), MARKER, WORKFLOW_ID)
+
+    assert removed == 0
+    assert any(r.levelno == logging.WARNING and "does not exist" in
+               r.getMessage() for r in caplog.records)
+
+
+def test_the_workflow_id_is_compared_as_text_for_a_real_uuid(tmp_path):
+    workflow_id = uuid.uuid4()
+    results_path = (tmp_path / RESULTS_FOLDER / str(workflow_id)
+                    / "20260101_000000")
+    store = make_store(results_path)
+
+    removed = load_functions()["remove_input_markers"](
+        str(results_path), MARKER, workflow_id)
+
+    assert removed == 1
+    assert not (store / MARKER).exists()
 
 
 def test_cleanup_is_repeatable(results_root):
@@ -568,7 +588,7 @@ def test_both_scripts_use_the_core_constant_for_the_result_folder_output():
     assert (
         f"client.setOutput({core_constant}, "
         "rstring(str(permanent_storage_path)))"
-    ) in import_source
+    ) in re.sub(r"\s+", " ", import_source).replace("( ", "(")
     for source in (run_source, import_source):
         assert "RESULTS_PATH_OUTPUT =" not in source, "defined locally"
         assert '"Results_Path"' not in source
@@ -594,3 +614,14 @@ def test_only_the_import_script_names_the_results_folder_and_only_once():
 
     assert not hardcoded, hardcoded
     assert len(string_constant_lines(IMPORT_SCRIPT, RESULTS_FOLDER)) == 1
+
+
+def test_the_import_script_reads_the_results_folder_constant_three_times():
+    # The result path, the retry lookup and the finalize lock folder in
+    # runScript (not executed by any test) must all use the constant.
+    tree = ast.parse(IMPORT_SCRIPT.read_text(encoding="utf-8"))
+    uses = [node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == "RESULTS_FOLDER"
+            and isinstance(node.ctx, ast.Load)]
+
+    assert len(uses) == 3, uses
