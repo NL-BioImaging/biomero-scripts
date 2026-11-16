@@ -34,7 +34,11 @@ def _load_snapshot_functions():
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     namespace = {
+        # Source that defines the name locally reads this one; source that
+        # takes it from core reads constants.results.
         "CANONICAL_INPUTS_OUTPUT": CANONICAL_INPUTS_OUTPUT,
+        "constants": SimpleNamespace(results=SimpleNamespace(
+            CANONICAL_INPUTS_OUTPUT=CANONICAL_INPUTS_OUTPUT)),
         "CanonicalInput": CanonicalInput,
         "UUID": UUID,
         "json": json,
