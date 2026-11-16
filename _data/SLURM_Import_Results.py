@@ -52,21 +52,19 @@ CLEANUP BEHAVIOR:
 When cleanup is enabled, this script removes:
 - SLURM server: Original job results directory, temporary zip files, job logs
 - Local: Temporary files from zip operations (if any were created)
-- Permanent storage: The bulk ``{job_id}_out.zip`` is deleted from the result folder
-  (``ANALYZED_DATA_FOLDER``, default ``.analyzed``) once import completes
-  **unless** it was attached to OMERO (in which case OMERO may reference the
-  file directly via an in-place symlink and it must remain).
+- Permanent storage: The bulk ``{job_id}_out.zip`` is deleted from the ``.analyzed``
+  directory once import completes **unless** it was attached to OMERO (in which
+  case OMERO may reference the file directly via an in-place symlink and it must
+  remain).
 
 OUTPUTS:
 - Message: concise summary of the import.
 - Workflow_UUID: the workflow the results belong to.
-- Results_Path: the ``<result folder>/uuid/timestamp`` folder that was imported from
-  (the result folder is ``ANALYZED_DATA_FOLDER``, default ``.analyzed``);
+- Results_Path: the ``.analyzed/uuid/timestamp`` folder that was imported from;
   SLURM_Run_Workflow.py uses it to remove the transfer input markers afterwards.
 
 PERMANENT STORAGE (otherwise preserved):
-- Permanent storage: <result folder>/uuid/timestamp/ directories and extracted
-  contents (result folder: ``ANALYZED_DATA_FOLDER``, default ``.analyzed``)
+- Permanent storage: .analyzed/uuid/timestamp/ directories and extracted contents
 - Complete workflow preservation: images, CSVs, metadata, logs, analysis results
 - Enables both data preservation and biomero-importer access to image files
 - This is completely separate from temporary SLURM files
@@ -111,7 +109,6 @@ from omero_metadata.populate import ParsingContext
 import ezomero
 
 from biomero import SlurmClient, constants
-from biomero.storage import read_analyzed_data_folder
 try:
     from biomero.metadata_views import (
         format_large_field_reference, render_workflow_metadata)
@@ -131,6 +128,9 @@ USE_INPLACE_ATTACHMENTS = os.getenv("USE_INPLACE_ATTACHMENTS", "true").lower() =
 
 logger = logging.getLogger(__name__)
 
+# BIOMERO's result folder under the group folder; configurability is tracked
+# in NL-BIOMERO#111.
+RESULTS_FOLDER = ".analyzed"
 RESULTS_RETRIEVED_MARKER = ".biomero-results-retrieved.json"
 RESULT_IMPORT_STATE = ".biomero-result-import.json"
 IMPORT_POLL_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -1902,9 +1902,8 @@ def get_importer_group_base_path(group_name: str) -> str:
 def get_workflow_results_path(group_name: str, wf_id: Optional[str]) -> str:
     """Get the full path for workflow results in PERMANENT comprehensive storage.
 
-    Creates path structure: /base_path/<result folder>/uuid/timestamp/
-    - result folder: Marker directory for analyzed workflow results
-      (``ANALYZED_DATA_FOLDER``, default ``.analyzed``)
+    Creates path structure: /base_path/.analyzed/uuid/timestamp/
+    - .analyzed: Marker directory for analyzed workflow results
     - uuid: Workflow ID for organization
     - timestamp: Ensures uniqueness for multiple imports from same workflow
 
@@ -1958,7 +1957,7 @@ def get_workflow_results_path(group_name: str, wf_id: Optional[str]) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     results_path = os.path.join(
-        base_path, read_analyzed_data_folder(), wf_id, timestamp)
+        base_path, RESULTS_FOLDER, wf_id, timestamp)
     return results_path
 
 
@@ -1970,13 +1969,12 @@ def find_existing_result_storage(
     """Find durable results left by an earlier import attempt.
 
     Result retrieval happens before importer registration. If registration
-    fails, the copy in the result folder (``ANALYZED_DATA_FOLDER``, default
-    ``.analyzed``) must be reusable without retransferring the
+    fails, the ``.analyzed`` copy must be reusable without retransferring the
     same Slurm output or requiring its temporary remote job log.
     """
     base_path = get_importer_group_base_path(group_name)
     workflow_path = os.path.join(
-        base_path, read_analyzed_data_folder(), str(wf_id)) if base_path else None
+        base_path, RESULTS_FOLDER, str(wf_id)) if base_path else None
     if not workflow_path or not os.path.isdir(workflow_path):
         return None, None
 
@@ -2306,9 +2304,8 @@ def move_results_to_permanent_storage(
     1. Data preservation: Complete workflow results archived permanently
     2. Importer access: Images available for biomero-importer processing
 
-    Creates structure: /storage/group/<result folder>/uuid/timestamp/
-    - result folder: Marker directory for analyzed/processed results
-      (``ANALYZED_DATA_FOLDER``, default ``.analyzed``)
+    Creates structure: /storage/group/.analyzed/uuid/timestamp/
+    - .analyzed: Marker directory for analyzed/processed results
     - uuid: Workflow UUID for organization
     - timestamp: Ensures uniqueness for multiple imports from same workflow
     - Contents: ALL result files including images, CSVs, metadata, logs, etc.
@@ -4544,7 +4541,7 @@ def process_non_image_file_outputs(
     Args:
         conn: Open OMERO BlitzGateway connection.
         permanent_storage_path: Path to the permanent workflow storage directory
-            (the ``<result folder>/{uuid}/{timestamp}`` directory).
+            (the ``.analyzed/{uuid}/{timestamp}`` directory).
         projects: List of OMERO projects/plates/datasets to link annotations to.
         slurm_job_id: SLURM job ID used in annotation descriptions.
         metadata_files: File paths that were already attached as metadata CSVs
@@ -4650,14 +4647,14 @@ def cleanup_resources(
     """Handle cleanup of SLURM and local resources.
 
     IMPORTANT: This function only cleans up temporary files. The permanent storage
-    (result folders) is NEVER touched by cleanup operations.
+    (.analyzed directories) is NEVER touched by cleanup operations.
 
     What gets cleaned when cleanup is enabled:
     - SLURM server: Original job results directory, temporary zip files, job logs  
     - Local: Zip workflow temporary files (folder, log_file) if they exist
 
     What is NEVER cleaned (preserved permanently):
-    - Permanent storage: <result folder>/uuid/timestamp/ directories and ALL contents
+    - Permanent storage: .analyzed/uuid/timestamp/ directories and ALL contents
     - This includes complete workflow results: images, CSVs, metadata, logs, etc.
     - Enables both data preservation and biomero-importer processing
 
@@ -4713,7 +4710,7 @@ def cleanup_resources(
             logger.info("No temporary files to clean")
 
         # Explicit confirmation of what's preserved
-        message += "\nPermanent storage (result folders) preserved with ALL workflow data"
+        message += "\nPermanent storage (.analyzed directories) preserved with ALL workflow data"
         logger.info(
             "CLEANUP COMPLETE: Comprehensive permanent storage preserved, temporary files removed")
 
@@ -4944,7 +4941,7 @@ def check_write_access_for_importer(group_name: str, test_wf_id: str = None, con
                 os.rmdir(workflow_dir)
             except OSError:
                 pass  # Directory not empty, that's fine
-            # Try to remove the result folder if it's empty
+            # Try to remove the .analyzed directory if it's empty
             analyzed_dir = os.path.dirname(workflow_dir)
             try:
                 os.rmdir(analyzed_dir)
@@ -5439,7 +5436,7 @@ def runScript() -> None:
             # including concurrent first attempts before a result folder exists.
             result_recovery = recovery_locks.enter_context(result_import_recovery(
                 os.path.join(get_importer_group_base_path(group_name),
-                             read_analyzed_data_folder(), str(wf_id)),
+                             RESULTS_FOLDER, str(wf_id)),
                 name=f".biomero-finalize-{uuid.uuid5(uuid.NAMESPACE_URL, str(slurm_job_id))}.lock"))
             # Update task status to IMPORTING if task_id is available
             if task_id and slurmClient.track_workflows:
