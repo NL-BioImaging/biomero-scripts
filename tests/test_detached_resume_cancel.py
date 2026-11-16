@@ -108,6 +108,7 @@ def runner_namespace(**overrides):
         Any=Any, Callable=Callable, WorkflowInterrupted=eventsourcing.WorkflowInterrupted,
         Parameters=object, rlong=lambda value: value,
         IMPORTER_ENABLED=False, SHALLOW_ZARR_ENABLED=False,
+        SHALLOW_ZARR_STORAGE_ENABLED=False,
         ensure_tracking_uuid=eventsourcing_uuid,
         constants=biomero_constants, VERSION='2.9.0-test',
         EXPORT_SCRIPTS=(EXPORT,), CONVERSION_SCRIPTS=(CONVERT,),
