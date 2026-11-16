@@ -251,6 +251,7 @@ def test_workflow_preflight_accepts_ready_remote_shallower():
     validator.__globals__.update(
         IMPORTER_ENABLED=True,
         SHALLOW_ZARR_ENABLED=True,
+        SHALLOW_ZARR_STORAGE_ENABLED=True,
     )
     with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
         validator(client, use_zarr_format=True)
@@ -277,6 +278,7 @@ def test_workflow_preflight_rejects_missing_remote_shallower_before_launch():
     validator.__globals__.update(
         IMPORTER_ENABLED=True,
         SHALLOW_ZARR_ENABLED=True,
+        SHALLOW_ZARR_STORAGE_ENABLED=True,
     )
     with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
         with pytest.raises(RuntimeError, match="SLURM Init Environment"):
@@ -303,6 +305,7 @@ def test_workflow_preflight_rejects_incompatible_remote_shallower():
     validator.__globals__.update(
         IMPORTER_ENABLED=True,
         SHALLOW_ZARR_ENABLED=True,
+        SHALLOW_ZARR_STORAGE_ENABLED=True,
     )
     with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
         with pytest.raises(RuntimeError, match="unsupported manifest schema"):
@@ -333,6 +336,7 @@ def test_workflow_preflight_is_inert_unless_remote_shallow_path_is_enabled(
     validator.__globals__.update(
         IMPORTER_ENABLED=importer_enabled,
         SHALLOW_ZARR_ENABLED=shallow_enabled,
+        SHALLOW_ZARR_STORAGE_ENABLED=importer_enabled and shallow_enabled,
     )
 
     validator(client, use_zarr_format=use_zarr)

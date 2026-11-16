@@ -1368,7 +1368,9 @@ def test_snapshot_hashes_labels_already_in_canonical_zarr(
 def test_image_transfer_publishes_canonical_inputs_output():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
-    assert 'CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"' in script
+    # Defined locally, or taken from core's constants.results.
+    assert ('CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"' in script
+            or "constants.results.CANONICAL_INPUTS_OUTPUT," in script)
     assert "client.setOutput(" in script
     assert "CANONICAL_INPUTS_OUTPUT," in script
 
