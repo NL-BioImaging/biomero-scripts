@@ -68,6 +68,7 @@ import omero.scripts as omscripts
 import datetime
 import inspect
 from biomero import SlurmClient, constants
+from biomero.storage import read_analyzed_data_folder
 import logging
 import time as timesleep
 from paramiko import SSHException
@@ -108,10 +109,6 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 VERSION = "2.9.0b24"
 CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
-# BIOMERO's own result storage: <group folder>/.analyzed/<workflow>/<timestamp>.
-RESULTS_FOLDER_NAME = ".analyzed"
-# Files that mark a directory as the root of a Zarr store.
-ZARR_ROOT_FILES = (".zgroup", "zarr.json")
 
 
 def ensure_tracking_uuid(value):
@@ -130,12 +127,13 @@ def is_biomero_result_folder(results_root: str) -> bool:
         results_root (str): Resolved path to check.
 
     Returns:
-        bool: True for ``<...>/.analyzed/<workflow>/<timestamp>``, as made by
-        ``get_workflow_results_path`` in SLURM_Import_Results.py. The
-        ``.analyzed`` folder itself and a workflow folder are not accepted,
-        because they hold the results of other imports.
+        bool: True for ``<...>/<result folder>/<workflow>/<timestamp>``, as
+        made by ``get_workflow_results_path`` in SLURM_Import_Results.py;
+        the result folder is ``ANALYZED_DATA_FOLDER`` (default
+        ``.analyzed``). The result folder itself and a workflow folder are
+        not accepted, because they hold the results of other imports.
     """
-    return Path(results_root).parent.parent.name == RESULTS_FOLDER_NAME
+    return Path(results_root).parent.parent.name == read_analyzed_data_folder()
 
 
 def log_walk_error(walk_error: OSError) -> None:
@@ -150,12 +148,13 @@ def remove_input_markers(results_path: str, marker_name: str) -> int:
     of the transfer, and the importer needs it until the result is imported.
     Only files named exactly like the marker are removed, and only below one
     import's result folder in BIOMERO's own result storage. Links are not
-    followed, and Zarr stores are not searched below their root, because a
-    marker only sits at the root of a store.
+    followed, and the search stops at the stores: the result folder holds the
+    exported stores directly, and the marker sits at the root of each.
 
     Args:
         results_path (str): Result folder of one import,
-            ``.analyzed/<workflow>/<timestamp>``.
+            ``<result folder>/<workflow>/<timestamp>`` (the result folder is
+            ``ANALYZED_DATA_FOLDER``, default ``.analyzed``).
         marker_name (str): File name of the input marker; the caller passes
             ``TRANSFER_INPUT_MARKER``, which only loads with shallow Zarr.
 
@@ -166,7 +165,8 @@ def remove_input_markers(results_path: str, marker_name: str) -> int:
     if not is_biomero_result_folder(results_root):
         logger.warning(
             f"Not removing input markers: {results_root} is not a result "
-            f"folder of the form {RESULTS_FOLDER_NAME}/<workflow>/<timestamp>")
+            f"folder of the form {read_analyzed_data_folder()}"
+            "/<workflow>/<timestamp>")
         return 0
     if not os.path.isdir(results_root):
         logger.warning(
@@ -176,6 +176,8 @@ def remove_input_markers(results_path: str, marker_name: str) -> int:
     removed = 0
     for directory, subdirectories, file_names in os.walk(
             results_root, onerror=log_walk_error, followlinks=False):
+        if directory == results_root:
+            continue  # the stores are its subfolders; no marker sits here
         if marker_name in file_names:
             marker_path = os.path.join(directory, marker_name)
             try:
@@ -186,8 +188,7 @@ def remove_input_markers(results_path: str, marker_name: str) -> int:
                 logger.warning(
                     f"Could not remove input marker {marker_path}: "
                     f"{remove_error}")
-        if any(name in file_names for name in ZARR_ROOT_FILES):
-            subdirectories.clear()  # nothing below a store root is a marker
+        subdirectories.clear()  # nothing below a store root is a marker
     logger.info(
         f"Removed {removed} input marker(s) below {results_root}")
     return removed
