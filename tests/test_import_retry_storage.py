@@ -28,13 +28,16 @@ def load_find_existing_result_storage(base_path):
         "find_existing_result_storage",
         "has_result_retrieval_marker",
     }
+    # Module constants the functions read; RESULTS_FOLDER is only defined by
+    # source that has the result folder constant.
+    required_constants = {"RESULTS_RETRIEVED_MARKER", "RESULTS_FOLDER"}
     body = [
         node for node in tree.body
         if (
             isinstance(node, ast.Assign)
             and any(
                 isinstance(target, ast.Name)
-                and target.id == "RESULTS_RETRIEVED_MARKER"
+                and target.id in required_constants
                 for target in node.targets
             )
         ) or (
