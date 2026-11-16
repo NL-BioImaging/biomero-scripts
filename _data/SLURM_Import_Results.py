@@ -53,9 +53,8 @@ When cleanup is enabled, this script removes:
 - SLURM server: Original job results directory, temporary zip files, job logs
 - Local: Temporary files from zip operations (if any were created)
 - Permanent storage: The bulk ``{job_id}_out.zip`` is deleted from the ``.analyzed``
-  directory once import completes **unless** it was attached to OMERO (in which
-  case OMERO may reference the file directly via an in-place symlink and it must
-  remain).
+  directory once import completes **unless** it was attached to OMERO (in which case
+  OMERO may reference the file directly via an in-place symlink and it must remain).
 
 OUTPUTS:
 - Message: concise summary of the import.
@@ -1903,7 +1902,7 @@ def get_workflow_results_path(group_name: str, wf_id: Optional[str]) -> str:
     """Get the full path for workflow results in PERMANENT comprehensive storage.
 
     Creates path structure: /base_path/.analyzed/uuid/timestamp/
-    - .analyzed: Marker directory for analyzed workflow results
+    - .analyzed: Marker directory for analyzed workflow results 
     - uuid: Workflow ID for organization
     - timestamp: Ensures uniqueness for multiple imports from same workflow
 
@@ -2305,7 +2304,7 @@ def move_results_to_permanent_storage(
     2. Importer access: Images available for biomero-importer processing
 
     Creates structure: /storage/group/.analyzed/uuid/timestamp/
-    - .analyzed: Marker directory for analyzed/processed results
+    - .analyzed: Marker directory for analyzed/processed results  
     - uuid: Workflow UUID for organization
     - timestamp: Ensures uniqueness for multiple imports from same workflow
     - Contents: ALL result files including images, CSVs, metadata, logs, etc.
@@ -5926,7 +5925,9 @@ def runScript() -> None:
                 # Tell the workflow runner which result folder was imported,
                 # so it can clean up the transfer's working files there.
                 if permanent_storage_path:
-                    client.setOutput(constants.results.RESULTS_PATH_OUTPUT, rstring(str(permanent_storage_path)))
+                    client.setOutput(
+                        constants.results.RESULTS_PATH_OUTPUT,
+                        rstring(str(permanent_storage_path)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
                     client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
