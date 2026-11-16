@@ -131,7 +131,6 @@ QUALITATIVE_COLOR_SCHEME = (
 )
 ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
 VERSION = "2.9.0b24"
-CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 
 def ensure_tracking_uuid(value):
@@ -144,17 +143,19 @@ def ensure_tracking_uuid(value):
 
 
 def is_result_folder_of_workflow(results_root: str, workflow_id: UUID) -> bool:
-    """Tell whether a path is one import's result folder of this workflow.
+    """Tell whether the parent folder of a path is named like this workflow.
+
+    ``get_workflow_results_path`` in SLURM_Import_Results.py makes
+    ``<...>/<workflow id>/<timestamp>``; this checks only the workflow id
+    part, so the result folder of another workflow, a workflow folder and
+    most unrelated paths are not accepted.
 
     Args:
         results_root (str): Resolved path to check.
         workflow_id (UUID): Workflow UUID of this run.
 
     Returns:
-        bool: True for ``<...>/<workflow id>/<timestamp>``, the shape that
-        ``get_workflow_results_path`` in SLURM_Import_Results.py makes. A
-        folder that holds the results of other workflows, or any path outside
-        BIOMERO's result storage, is not accepted.
+        bool: True if the name of the parent folder is the workflow id.
     """
     return Path(results_root).parent.name == str(workflow_id)
 
@@ -241,12 +242,13 @@ def remove_input_markers_after_import(
             "Not removing input markers: shallow Zarr storage is off, so "
             "the transfer wrote none")
         return 0
-    if not import_outputs or constants.results.RESULTS_PATH_OUTPUT not in import_outputs:
+    results_path_output = constants.results.RESULTS_PATH_OUTPUT
+    if not import_outputs or results_path_output not in import_outputs:
         logger.warning(
             f"Cannot remove input markers: the import script returned no "
             f"{constants.results.RESULTS_PATH_OUTPUT} output")
         return 0
-    results_path = unwrap(import_outputs[constants.results.RESULTS_PATH_OUTPUT])
+    results_path = unwrap(import_outputs[results_path_output])
     if not results_path:
         logger.warning(
             f"Cannot remove input markers: empty "
@@ -260,14 +262,16 @@ def remove_input_markers_after_import(
 
 def parse_canonical_inputs_output(results):
     """Validate canonical input records returned by Image Transfer."""
-    if not results or CANONICAL_INPUTS_OUTPUT not in results:
+    if not results or constants.results.CANONICAL_INPUTS_OUTPUT not in results:
         logger.debug(
-            f"Image Transfer returned no {CANONICAL_INPUTS_OUTPUT} output")
+            f"Image Transfer returned no "
+            f"{constants.results.CANONICAL_INPUTS_OUTPUT} output")
         return ()
-    raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
+    raw_value = unwrap(results[constants.results.CANONICAL_INPUTS_OUTPUT])
     if not raw_value:
         logger.debug(
-            f"Image Transfer returned an empty {CANONICAL_INPUTS_OUTPUT} "
+            f"Image Transfer returned an empty "
+            f"{constants.results.CANONICAL_INPUTS_OUTPUT} "
             "output")
         return ()
     payload = json.loads(raw_value)
@@ -752,7 +756,7 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
 def validate_remote_shallower_ready(slurmClient: SlurmClient,
                                     use_zarr_format: bool) -> None:
     """Fail before workflow submission when remote shallowing cannot run."""
-    if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and use_zarr_format
+    if not (SHALLOW_ZARR_STORAGE_ENABLED and use_zarr_format
             and slurmClient.remote_shallow_zarr):
         logger.debug(
             "Remote shallower readiness check skipped: "
@@ -805,7 +809,7 @@ def runScript():
             and handled gracefully.
     """
     shallow_state = ("enabled by flags"
-                     if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+                     if SHALLOW_ZARR_STORAGE_ENABLED
                      else "disabled, results stay full")
     logger.info(
         f"Shallow Zarr results: BIOMERO_SHALLOW_ZARR={SHALLOW_ZARR_ENABLED}, "
@@ -2486,7 +2490,7 @@ def exportImageToSLURM(client: omscripts.client,
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+        if SHALLOW_ZARR_STORAGE_ENABLED:
             logger.info(
                 "Shallow Zarr enabled: reading canonical inputs returned by "
                 f"Image Transfer for workflow {wf_id}")

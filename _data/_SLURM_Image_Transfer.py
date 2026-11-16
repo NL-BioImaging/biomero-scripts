@@ -159,7 +159,6 @@ GROUP_MAPPINGS_FILE = os.getenv(
 )
 IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
 IMPORT_MOUNT_STORAGE_ROOT = "import-mount-data"
-CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 SCRIPT_CLIENT_KEEPALIVE_SECONDS = 60
 
 # keep track of log strings.
@@ -3356,7 +3355,7 @@ def run_script():
             _require_keepalive(conn.keepAlive, "writing Image Transfer outputs")
             client.setOutput("Message", rstring(message))
             client.setOutput(
-                CANONICAL_INPUTS_OUTPUT,
+                constants.results.CANONICAL_INPUTS_OUTPUT,
                 rstring(json.dumps([
                     item.to_dict() for item in canonical_inputs
                 ], separators=(",", ":"), sort_keys=True)),
