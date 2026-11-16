@@ -76,7 +76,6 @@ from biomero.slurm_client import SlurmJob
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
-from biomero.storage import read_analyzed_data_folder
 import logging
 import time as timesleep
 from paramiko import SSHException
@@ -144,20 +143,20 @@ def ensure_tracking_uuid(value):
     return UUID(str(value))
 
 
-def is_biomero_result_folder(results_root: str) -> bool:
-    """Tell whether a path is one import's result folder in BIOMERO storage.
+def is_result_folder_of_workflow(results_root: str, workflow_id: UUID) -> bool:
+    """Tell whether a path is one import's result folder of this workflow.
 
     Args:
         results_root (str): Resolved path to check.
+        workflow_id (UUID): Workflow UUID of this run.
 
     Returns:
-        bool: True for ``<...>/<result folder>/<workflow>/<timestamp>``, as
-        made by ``get_workflow_results_path`` in SLURM_Import_Results.py;
-        the result folder is ``ANALYZED_DATA_FOLDER`` (default
-        ``.analyzed``). The result folder itself and a workflow folder are
-        not accepted, because they hold the results of other imports.
+        bool: True for ``<...>/<workflow id>/<timestamp>``, the shape that
+        ``get_workflow_results_path`` in SLURM_Import_Results.py makes. A
+        folder that holds the results of other workflows, or any path outside
+        BIOMERO's result storage, is not accepted.
     """
-    return Path(results_root).parent.parent.name == read_analyzed_data_folder()
+    return Path(results_root).parent.name == str(workflow_id)
 
 
 def log_walk_error(walk_error: OSError) -> None:
@@ -165,32 +164,33 @@ def log_walk_error(walk_error: OSError) -> None:
     logger.warning(f"Input marker search skipped a folder: {walk_error}")
 
 
-def remove_input_markers(results_path: str, marker_name: str) -> int:
+def remove_input_markers(
+        results_path: str, marker_name: str, workflow_id: UUID) -> int:
     """Remove the transfer input markers from one BIOMERO result folder.
 
     The workflow runner owns this cleanup: the marker is only a working file
     of the transfer, and the importer needs it until the result is imported.
     Only files named exactly like the marker are removed, and only below one
-    import's result folder in BIOMERO's own result storage. Links are not
+    import's result folder of this workflow. Links are not
     followed, and the search stops at the stores: the result folder holds the
     exported stores directly, and the marker sits at the root of each.
 
     Args:
         results_path (str): Result folder of one import,
-            ``<result folder>/<workflow>/<timestamp>`` (the result folder is
-            ``ANALYZED_DATA_FOLDER``, default ``.analyzed``).
+            ``<...>/<workflow id>/<timestamp>``.
         marker_name (str): File name of the input marker; the caller passes
             ``TRANSFER_INPUT_MARKER``, which only loads with shallow Zarr.
+        workflow_id (UUID): Workflow UUID of this run; the result folder
+            must belong to it.
 
     Returns:
         int: Number of markers removed.
     """
     results_root = os.path.realpath(results_path)
-    if not is_biomero_result_folder(results_root):
+    if not is_result_folder_of_workflow(results_root, workflow_id):
         logger.warning(
             f"Not removing input markers: {results_root} is not a result "
-            f"folder of the form {read_analyzed_data_folder()}"
-            "/<workflow>/<timestamp>")
+            f"folder of the form <...>/{workflow_id}/<timestamp>")
         return 0
     if not os.path.isdir(results_root):
         logger.warning(
@@ -218,7 +218,8 @@ def remove_input_markers(results_path: str, marker_name: str) -> int:
     return removed
 
 
-def remove_input_markers_after_import(import_outputs: dict) -> int:
+def remove_input_markers_after_import(
+        import_outputs: dict, workflow_id: UUID) -> int:
     """Remove the input markers from the result that was just imported.
 
     Call this only after the result import succeeded: the importer reads the
@@ -230,6 +231,7 @@ def remove_input_markers_after_import(import_outputs: dict) -> int:
 
     Args:
         import_outputs (dict): Outputs of the result import script.
+        workflow_id (UUID): Workflow UUID of this run.
 
     Returns:
         int: Number of markers removed.
@@ -252,7 +254,8 @@ def remove_input_markers_after_import(import_outputs: dict) -> int:
         return 0
     logger.info(
         f"Result import is done; removing input markers from {results_path}")
-    return remove_input_markers(results_path, TRANSFER_INPUT_MARKER)
+    return remove_input_markers(
+        results_path, TRANSFER_INPUT_MARKER, workflow_id)
 
 
 def parse_canonical_inputs_output(results):
@@ -3004,7 +3007,7 @@ def importResultsToOmero(client: omscripts.client,
         raise RuntimeError(error_msg)
     # Reached only after a successful import: the importer needed the markers.
     try:
-        remove_input_markers_after_import(rv)
+        remove_input_markers_after_import(rv, wf_id)
     except Exception as cleanup_error:
         # The result is imported; a cleanup problem must not fail the run.
         logger.warning(
