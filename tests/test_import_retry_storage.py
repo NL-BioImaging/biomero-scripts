@@ -8,6 +8,7 @@ from uuid import UUID
 import zipfile
 
 import pytest
+from biomero.storage import read_analyzed_data_folder
 
 
 SOURCE_ROOT = Path(os.environ.get(
@@ -50,6 +51,7 @@ def load_find_existing_result_storage(base_path):
         "json": json,
         "logger": logging.getLogger(__name__),
         "os": os,
+        "read_analyzed_data_folder": read_analyzed_data_folder,
         "zipfile": zipfile,
         "get_importer_group_base_path": lambda _group_name: str(base_path),
     }
