@@ -23,7 +23,9 @@ def load_functions(relative, names, **values):
     root = Path(os.environ["BIOMERO_SCRIPTS_ROOT"])
     tree = ast.parse((root / relative).read_text(encoding="utf-8"))
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    namespace = dict(json=json, UUID=UUID, logger=logging.getLogger(__name__), **values)
+    namespace = dict(json=json, UUID=UUID, logger=logging.getLogger(__name__),
+                     PROCESSED_DATA_FOLDER=".processed",
+                     InvalidCanonicalStore=RuntimeError, **values)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), relative, "exec"), namespace)
     return namespace
 
@@ -171,7 +173,7 @@ def test_reuse_adopts_refreshed_current_cache_without_hashing(tmp_path):
         "dataset_path": "s1", "comparison_shape": old.pixel_identity.shape})
     updated = old.model_copy(update={"pixel_identity": identity})
     ns = _load_canonical_functions()
-    ns["load_canonical_marker"] = lambda _: updated
+    ns["load_canonical_marker"] = lambda _, **_kwargs: updated
     ns["get_legacy_zarr_path"] = lambda _: pytest.fail("Current cache should be reused")
     writes = []
     ns["_update_canonical_annotation"] = lambda annotation, values: writes.append(values)
