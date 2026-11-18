@@ -54,6 +54,8 @@ from biomero import SlurmClient, constants
 from biomero.detached import detached_mode_enabled
 import logging
 from itertools import islice
+from typing import Any, Dict, List
+from uuid import UUID
 import time as timesleep
 import pprint
 
@@ -83,10 +85,17 @@ VERSION = "2.9.0b24"
 # batches are run inline as sub-scripts.
 
 
-def register_detached_batches(client, slurmClient, wf_id,
-                              selected_workflow_names, batch_ids_list,
-                              batch_size, effective_type, inputs,
-                              selected_output, group, image_ids):
+def register_detached_batches(client: omscripts.client,
+                              slurmClient: SlurmClient,
+                              wf_id: UUID,
+                              selected_workflow_names: List[str],
+                              batch_ids_list: List[List[int]],
+                              batch_size: int,
+                              effective_type: str,
+                              inputs: Dict[str, Any],
+                              selected_output: Dict[str, Any],
+                              group: int,
+                              image_ids: List[int]) -> UUID:
     """Record a batched request as a launcher task for the detached supervisor.
 
     The task's params are the contract with the supervisor's batched parent:
@@ -95,17 +104,20 @@ def register_detached_batches(client, slurmClient, wf_id,
     starts from, the ``selected_output``, the ``group`` and all image IDs.
 
     Args:
-        client: OMERO script client whose inputs are recorded.
-        slurmClient: Active SLURM client, whose tracker records the task.
-        wf_id: Workflow the launcher belongs to.
-        selected_workflow_names: Workflows the user chose.
-        batch_ids_list: The IDs of each batch.
-        batch_size: Items per batch.
-        effective_type: Data type of the items after batching.
-        inputs: Script inputs as rtypes, as sent to each batch.
-        selected_output: Resolved output options.
-        group: Active OMERO group ID.
-        image_ids: All item IDs of the request.
+        client (omscripts.client): OMERO script client whose inputs are
+            recorded.
+        slurmClient (SlurmClient): Active SLURM client, whose tracker records
+            the task.
+        wf_id (UUID): Workflow the launcher belongs to.
+        selected_workflow_names (List[str]): Workflows the user chose.
+        batch_ids_list (List[List[int]]): The IDs of each batch.
+        batch_size (int): Items per batch.
+        effective_type (str): Data type of the items after batching.
+        inputs (Dict[str, Any]): Script inputs as rtypes, as sent to each
+            batch.
+        selected_output (Dict[str, Any]): Resolved output options.
+        group (int): Active OMERO group ID.
+        image_ids (List[int]): All item IDs of the request.
 
     Returns:
         UUID: The launcher task ID.
@@ -424,7 +436,8 @@ def runScript():
                 client.getInput(wf_name)) for wf_name in workflows}
             if not any(selected_workflows.values()):
                 errormsg = "ERROR: Please select at least 1 workflow!"
-                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(errormsg))
                 raise ValueError(errormsg)
             version_errors = ""
             for wf, selected in selected_workflows.items():
@@ -454,7 +467,8 @@ def runScript():
                     selected_output[output_option] = True
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
-                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(errormsg))
                 raise ValueError(errormsg)
             else:
                 logger.info(f"Output options chosen: {selected_output}")
@@ -675,15 +689,19 @@ def runScript():
                                 results = process.getResults(
                                     0)  # 0 ms; RtypeDict
                                 if constants.results.MESSAGE_OUTPUT in results:
-                                    result_msg = results[constants.results.MESSAGE_OUTPUT].getValue()
+                                    result_msg = results[
+                                        constants.results.MESSAGE_OUTPUT
+                                    ].getValue()
                                     logger.info(result_msg)
                                     UI_messages['Message'].extend(
                                         [f">> Batch {i}: ",
                                          result_msg])
 
-                                if constants.results.FILE_ANNOTATION_OUTPUT in results:
+                                annotation_key = (
+                                    constants.results.FILE_ANNOTATION_OUTPUT)
+                                if annotation_key in results:
                                     UI_messages['File_Annotation'].append(
-                                        results[constants.results.FILE_ANNOTATION_OUTPUT].getValue())
+                                        results[annotation_key].getValue())
                             except Exception as results_e:
                                 logger.error(
                                     f"Error getting results for batch {i}: {results_e}")

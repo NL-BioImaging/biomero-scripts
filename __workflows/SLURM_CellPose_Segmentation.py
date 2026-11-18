@@ -229,12 +229,14 @@ def runScript():
                     logger.warning(print_result)
                     slurmClient.workflowTracker.fail_workflow(
                         wf_id, "Error checking job status")
-                    client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(print_result))
+                    client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                     rstring(print_result))
 
             # 7. Script output
             logger.info(print_result)
             if not 'ERROR' in print_result:
-                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(print_result))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(print_result))
                 slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()

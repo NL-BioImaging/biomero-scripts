@@ -179,7 +179,8 @@ def runScript():
                     obj = client.upload(export_file, type=mimetype)
                     obj_id = obj.id.val
                     url = f"get_original_file/{obj_id}/"
-                    client.setOutput(constants.results.URL_OUTPUT, wrap({"type": "URL", "href": url}))
+                    client.setOutput(constants.results.URL_OUTPUT,
+                                     wrap({"type": "URL", "href": url}))
                     # Attach logfile (OriginalFile) to Project
                     conn = BlitzGateway(client_obj=client)
                     project_ids = unwrap(client.getInput("Project"))
@@ -205,7 +206,8 @@ def runScript():
                 except Exception as e:
                     message += f" Importing logfile failed: {e}\n"
 
-            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(str(message)))
 
         finally:
             client.closeSession()
