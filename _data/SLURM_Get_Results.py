@@ -2221,7 +2221,7 @@ def runScript():
             scripts.String(constants.results.ROI_COLOR,
                            optional=True,
                            grouping="08.95",
-                           description="Optional #RRGGBB ROI color override. Leave empty to derive a stable color from the workflow UUID.",
+                           description="Optional #RRGGBB ROI color. The workflow runner resolves it before starting this script; if left empty, the ROI script uses its own default color.",
                            default=""),
             scripts.Bool(constants.results.ROI_CLEAR_EXISTING,
                          optional=True,
