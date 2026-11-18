@@ -469,7 +469,7 @@ def test_detached_launcher_records_zarr_execution_policy():
     assert isinstance(extra_params, ast.Dict)
     key_names = runner_key_names(RUNNER_PATH)
     recorded = {
-        key_names.get(key.id) if isinstance(key, ast.Name) else key.value: value
+        key_names[key.id] if isinstance(key, ast.Name) else key.value: value
         for key, value in zip(extra_params.keys, extra_params.values)
         if isinstance(key, ast.Name) or (
             isinstance(key, ast.Constant) and isinstance(key.value, str))

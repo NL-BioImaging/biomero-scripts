@@ -25,11 +25,9 @@ def runner_key_names(source_path: Path) -> dict:
                 and node.targets[0].id.startswith("LAUNCHER_")
                 and isinstance(node.value, ast.Constant)):
             names[node.targets[0].id] = node.value.value
-    try:
-        from biomero.metadata_views import (WF_FILE_PARAMS_PREFIX,
-                                            WF_PARAMS_PREFIX)
-    except ImportError:
-        return names
+    # A core without these names must fail here, not later with a KeyError.
+    from biomero.metadata_views import (WF_FILE_PARAMS_PREFIX,
+                                        WF_PARAMS_PREFIX)
     names.update(WF_PARAMS_PREFIX=WF_PARAMS_PREFIX,
                  WF_FILE_PARAMS_PREFIX=WF_FILE_PARAMS_PREFIX)
     return names
