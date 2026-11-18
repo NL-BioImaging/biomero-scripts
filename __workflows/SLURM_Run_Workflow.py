@@ -58,7 +58,7 @@ import os
 from pathlib import Path
 import json
 import re
-from typing import Optional, Union
+from typing import Any, Callable, ContextManager, Optional, Union
 from uuid import UUID, uuid4
 import omero
 from omero.grid import JobParams
@@ -69,7 +69,7 @@ from omero.gateway import BlitzGateway
 import omero.scripts as omscripts
 import datetime
 import inspect
-from biomero import SlurmClient, constants
+from biomero import SlurmClient, constants, ssh_recovery
 import logging
 import time as timesleep
 from paramiko import SSHException
@@ -1239,13 +1239,18 @@ def read_hpc_command(slurm_client, command, **kwargs):
     return reader(command, **kwargs)
 
 
-def hpc_recovery_scope(slurm_client, heartbeat):
-    """Keep caller-owned sessions alive during nested core transport retries."""
-    from contextlib import nullcontext
-    try:
-        from biomero import ssh_recovery
-    except ImportError:
-        return nullcontext()
+def hpc_recovery_scope(slurm_client: SlurmClient,
+                       heartbeat: Callable[[], Any]) -> ContextManager:
+    """Keep caller-owned sessions alive during nested core transport retries.
+
+    Args:
+        slurm_client (SlurmClient): Active SLURM client.
+        heartbeat (Callable[[], Any]): Called to keep the caller's session
+            alive while core retries.
+
+    Returns:
+        ContextManager: Core's recovery scope for the client.
+    """
     return ssh_recovery.scope(slurm_client, heartbeat)
 
 
