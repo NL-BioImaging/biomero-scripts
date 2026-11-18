@@ -2,6 +2,7 @@ import ast
 import json
 import re
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ from biomero_schema.zarr import (
     CanonicalZarrSource,
     PixelIdentity,
 )
+
+from sidecar_feature import sidecars_live_in_biomero_folders
 
 
 SOURCE_ROOT = Path(os.environ.get(
@@ -206,3 +209,94 @@ def test_locator_update_only_changes_old_paths_or_generations():
         "relativePath": "Plate-2.ome.zarr",
         "sourceGeneration": 1,
     }, replacements)
+
+
+def _apply_consolidation_function(**stand_ins):
+    """The real ``_apply_canonical_consolidation`` with its collaborators stubbed."""
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_apply_canonical_consolidation")
+    namespace = {
+        "shutil": shutil,
+        "discover_shallow_references": lambda conn: [],
+        "_canonical_marker_path": lambda path: (_ for _ in ()).throw(
+            ValueError("no marker")),
+        "_write_canonical_marker": lambda path, source: None,
+        "_write_annotation": lambda conn, record, values: None,
+        "_delete_annotation": lambda conn, record: None,
+        "_canonical_registration_values": lambda source: {},
+        "_write_json": lambda path, value: None,
+        **stand_ins,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]),
+                 str(SCRIPT_PATH), "exec"), namespace)
+    return namespace["_apply_canonical_consolidation"]
+
+
+def _importer_sidecar(store):
+    """Where the importer keeps the sidecar of a Zarr (its documented layout)."""
+    return store.parent / ".processed" / ".biomero" / f"{store.name}.canonical.json"
+
+
+def _remove_external_canonical_markers(store):
+    """Stand-in for the importer's helper: drop the sidecar, then its empty folder.
+
+    The empty-folder behaviour is the importer's (``rmdir`` semantics), not the
+    script's; the test pins that the script calls the helper for every
+    generated store and not for the selected one.
+    """
+    sidecar = _importer_sidecar(store)
+    if sidecar.exists():
+        sidecar.unlink()
+        try:
+            sidecar.parent.rmdir()
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
+    reason="sidecars are handled through the importer in a later source",
+)
+@pytest.mark.parametrize("stable_has_sidecar", [False, True],
+                         ids=["folder-left-empty", "folder-still-used"])
+def test_consolidation_removes_the_sidecars_of_generated_stores(
+        tmp_path, stable_has_sidecar):
+    """The destructive phase leaves no generated store, no sidecar of it, and no empty .biomero."""
+    selected = tmp_path / "project" / ".processed" / "Plate-1.g1.ome.zarr"
+    generated = tmp_path / "project" / ".processed" / "Plate-1.g2.ome.zarr"
+    destination = tmp_path / "project" / ".processed" / "Plate-1.ome.zarr"
+    for store in (selected, generated):
+        store.mkdir(parents=True)
+    sidecars = [_importer_sidecar(generated)]
+    if stable_has_sidecar:
+        sidecars.append(_importer_sidecar(destination))
+    for sidecar in sidecars:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text("{}", encoding="utf-8")
+    moved = []
+    plan = {
+        "object_type": "Plate", "object_id": 1,
+        "selected": {"path": selected, "annotation_id": 11},
+        "destination": destination,
+        "records": [{"annotation_id": 11, "marker_status": "valid"}],
+        "legacy_metadata": [], "legacy_paths": (selected, generated),
+        "reclaim": False, "source": object(),
+    }
+    apply_consolidation = _apply_consolidation_function(
+        _move_canonical_store=lambda source, target: moved.append(
+            (source, target)) or source.rename(target),
+        remove_external_canonical_markers=_remove_external_canonical_markers)
+
+    apply_consolidation(None, [plan], {}, {}, tmp_path)
+
+    assert moved == [(selected, destination)]
+    assert destination.is_dir() and not selected.exists()
+    assert not generated.exists()
+    assert not _importer_sidecar(generated).exists()
+    biomero_folder = _importer_sidecar(generated).parent
+    # An empty .biomero folder is removed; one still holding the stable
+    # store's sidecar stays, with that sidecar.
+    assert biomero_folder.exists() is stable_has_sidecar
+    assert _importer_sidecar(destination).exists() is stable_has_sidecar

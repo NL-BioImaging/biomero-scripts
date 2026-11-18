@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from script_output_names import OUTPUT_NAMES
+from sidecar_feature import sidecars_live_in_biomero_folders
 from biomero_shallower.ngff import read_attrs as read_ngff_attrs
 
 from biomero_schema.zarr import (
@@ -38,18 +39,6 @@ SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py"
-
-
-def _uses_processed_folder(path):
-    """Whether the source keeps sidecars in BIOMERO folders.
-
-    Gates on the keyword the feature adds to the sidecar calls, not on log
-    text, so rewording a message fails the tests instead of skipping them.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    return any(
-        isinstance(node, ast.keyword) and node.arg == "processed_folder"
-        for node in ast.walk(tree))
 
 
 class InvalidCanonicalStore(RuntimeError):
@@ -958,7 +947,7 @@ def test_trust_upgrade_updates_one_store_without_new_generation(
 
 
 @pytest.mark.skipif(
-    not _uses_processed_folder(SCRIPT_PATH),
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
     reason="unwritable sidecar folder handled in a later source",
 )
 def test_trust_upgrade_survives_unwritable_sidecar_folder(
@@ -991,7 +980,7 @@ def test_trust_upgrade_survives_unwritable_sidecar_folder(
 
 
 @pytest.mark.skipif(
-    not _uses_processed_folder(SCRIPT_PATH),
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
     reason="unreadable sidecars handled in a later source",
 )
 @pytest.mark.parametrize("error", [
