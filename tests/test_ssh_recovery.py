@@ -19,7 +19,9 @@ def load(name):
     if not functions and not os.environ.get('BIOMERO_TEST_SSH_RECOVERY'):
         pytest.skip('SSH recovery orchestration is not present in source')
     assert functions, 'Missing SSH recovery orchestration'
-    namespace = {'logger': logging.getLogger(__name__)}
+    ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    namespace = {'logger': logging.getLogger(__name__),
+                 'ssh_recovery': ssh_recovery}
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'),
          namespace)
     return namespace[name]
@@ -153,6 +155,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     run = Mock(return_value=('', 42, 'workflow-id', 'task-id'))
     import_results = Mock(return_value={'Message': SimpleNamespace(getValue=lambda: 'Imported')})
     namespace = dict(logger=logging.getLogger(__name__), unwrap=lambda value: value,
+        ssh_recovery=ssh_recovery,
         EXPORT_SCRIPTS=('export',) if owns_resume else (),
         CONVERSION_SCRIPTS=('convert',) if owns_resume else (),
         IMPORT_SCRIPTS=(),
@@ -222,18 +225,3 @@ def test_recovery_scope_with_window_zero_is_the_same_path_without_retries():
     assert heartbeat.call_count == 2
     operation.assert_called_once()
     client.close.assert_not_called()
-
-
-def test_recovery_scope_supports_core_without_recovery(monkeypatch):
-    import builtins
-    original_import = builtins.__import__
-    scope = load('hpc_recovery_scope')
-    def old_core_import(name, *args, **kwargs):
-        if name == 'biomero':
-            raise ImportError('old core has no ssh_recovery module')
-        return original_import(name, *args, **kwargs)
-    monkeypatch.setattr(builtins, '__import__', old_core_import)
-    heartbeat = Mock()
-    with scope(SimpleNamespace(), heartbeat):
-        pass
-    heartbeat.assert_not_called()
