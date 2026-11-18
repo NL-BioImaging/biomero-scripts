@@ -1,21 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2023 T T Luik
-# Copyright (C) 2006-2014 University of Dundee. All rights reserved.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+# Original work Copyright (C) 2006-2014 University of Dundee. All rights
+#                    reserved.
+# Modified work Copyright 2023 Torec Luik, Amsterdam UMC
+# Licensed under the GNU General Public License version 2; see LICENSE.
 
 """
 BIOMERO SLURM Image Transfer Script
@@ -94,7 +83,7 @@ from biomero_schema.zarr import (
     ZarrLabelComponent,
 )
 import sys
-from typing import Any, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +112,6 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         from biomero_importer.utils.canonical_store import (
             CanonicalStore,
             InvalidCanonicalStore,
-            PROCESSED_DATA_FOLDER,
             load_canonical_marker,
             write_indexed_canonical_marker,
         )
@@ -479,8 +467,19 @@ def bind_canonical_plate_source(source, index):
     })
 
 
-def get_canonical_plate_source(plate):
-    """Resolve compact storage-backed or legacy canonical Plate metadata."""
+def get_canonical_plate_source(plate: Any) -> Optional[CanonicalPlateSource]:
+    """Resolve compact storage-backed or legacy canonical Plate metadata.
+
+    Args:
+        plate (Any): OMERO Plate wrapper whose annotations are inspected.
+
+    Returns:
+        Optional[CanonicalPlateSource]: The Plate's single canonical
+        registration, or None when it has none.
+
+    Raises:
+        ValueError: If the Plate has more than one canonical registration.
+    """
     plate_id = int(plate.getId())
     candidates = []
     indexes = []
@@ -532,8 +531,7 @@ def get_canonical_plate_source(plate):
                 load_group_storage_roots(),
             )
             if managed_path is not None:
-                managed_source = load_canonical_marker(
-                    managed_path, processed_folder=PROCESSED_DATA_FOLDER)
+                managed_source = load_canonical_marker(managed_path)
                 if (
                     isinstance(managed_source, CanonicalPlateSource)
                     and managed_source.storage_root == index.storage_root
@@ -1467,19 +1465,41 @@ def promote_exported_image_zarr(
 
 
 def index_existing_image_zarr(
-    conn,
-    image,
-    existing_path,
-    storage_roots,
+    conn: BlitzGateway,
+    image: Any,
+    existing_path: Path,
+    storage_roots: Dict[str, Path],
     *,
-    source_generation=1,
-    identity_provider=None,
-    semantic_guard_reader=None,
-    promotion_service_factory=None,
-    annotation_writer=None,
-    defer_identity=False,
-):
-    """Index the authoritative managed backing Zarr without rereading OMERO."""
+    source_generation: int = 1,
+    identity_provider: Optional[Any] = None,
+    semantic_guard_reader: Optional[Callable[..., Any]] = None,
+    promotion_service_factory: Optional[Callable[..., Any]] = None,
+    annotation_writer: Optional[Callable[..., Any]] = None,
+    defer_identity: bool = False,
+) -> CanonicalZarrSource:
+    """Index the authoritative managed backing Zarr without rereading OMERO.
+
+    Writes the canonical sidecar before the OMERO annotation.
+
+    Args:
+        conn (BlitzGateway): OMERO connection of the requesting user.
+        image (Any): OMERO Image wrapper backed by the Zarr.
+        existing_path (Path): The managed Zarr store.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        source_generation (int): Generation of the registration.
+        identity_provider (Optional[Any]): Pixel identity provider; defaults
+            to ISCC-BIO.
+        semantic_guard_reader (Optional[Callable[..., Any]]): Reader of the
+            Zarr's semantic guard; defaults to the importer's.
+        promotion_service_factory (Optional[Callable[..., Any]]): Unused by
+            this function.
+        annotation_writer (Optional[Callable[..., Any]]): Writer of the
+            OMERO annotation; defaults to ``post_map_annotation``.
+        defer_identity (bool): Skip measuring the pixel identity.
+
+    Returns:
+        CanonicalZarrSource: The registration that was written and attached.
+    """
     storage_id, storage_root, relative_path = locate_managed_zarr(
         existing_path,
         storage_roots,
@@ -1531,8 +1551,7 @@ def index_existing_image_zarr(
         pixel_identity_origin="canonical-bootstrap",
         canonical_pixel_verified=existing_identity is not None,
     )
-    write_indexed_canonical_marker(
-        existing_path, source, processed_folder=PROCESSED_DATA_FOLDER)
+    write_indexed_canonical_marker(existing_path, source)
     attach_canonical_source(
         conn,
         image,
@@ -1592,8 +1611,7 @@ def upgrade_reused_canonical(
     """
     is_plate = isinstance(source, CanonicalPlateSource)
     try:
-        cached = load_canonical_marker(
-            source_path, processed_folder=PROCESSED_DATA_FOLDER)
+        cached = load_canonical_marker(source_path)
     except (OSError, InvalidCanonicalStore, ValueError) as exc:
         # A corrupt, uncommitted or unreachable sidecar only costs the cache:
         # the workflow continues as if there were none.
@@ -1629,8 +1647,7 @@ def upgrade_reused_canonical(
                 source.model_copy(update={"canonical_pixel_verified": True,
                                           "pixel_identity_origin": "canonical-bootstrap"}))
     try:
-        write_indexed_canonical_marker(
-            source_path, upgraded, processed_folder=PROCESSED_DATA_FOLDER)
+        write_indexed_canonical_marker(source_path, upgraded)
     except OSError as exc:
         # The sidecar is only an optimisation. Without it the registration
         # stays as it was and the input is reused unverified, as when the
@@ -1686,17 +1703,35 @@ def verify_exported_plate_source(conn, plate, export_path, source,
 
 
 def index_existing_plate_zarr(
-    conn,
-    plate,
-    existing_path,
-    storage_roots,
+    conn: BlitzGateway,
+    plate: Any,
+    existing_path: Path,
+    storage_roots: Dict[str, Path],
     *,
-    source_generation=1,
-    identity_provider=None,
-    annotation_writer=None,
-    defer_identity=False,
-):
-    """Index a managed Plate Zarr in place using per-image identities."""
+    source_generation: int = 1,
+    identity_provider: Optional[Any] = None,
+    annotation_writer: Optional[Callable[..., Any]] = None,
+    defer_identity: bool = False,
+) -> CanonicalPlateSource:
+    """Index a managed Plate Zarr in place using per-image identities.
+
+    Writes the canonical sidecar before the OMERO annotations.
+
+    Args:
+        conn (BlitzGateway): OMERO connection of the requesting user.
+        plate (Any): OMERO Plate wrapper backed by the Zarr.
+        existing_path (Path): The managed Plate Zarr store.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        source_generation (int): Generation of the registration.
+        identity_provider (Optional[Any]): Pixel identity provider; defaults
+            to ISCC-BIO.
+        annotation_writer (Optional[Callable[..., Any]]): Writer of the
+            OMERO annotations; defaults to ``post_map_annotation``.
+        defer_identity (bool): Skip measuring the pixel identities.
+
+    Returns:
+        CanonicalPlateSource: The registration that was written and attached.
+    """
     storage_id, _storage_root, relative_path = locate_managed_zarr(
         existing_path,
         storage_roots,
@@ -1713,8 +1748,7 @@ def index_existing_plate_zarr(
     )
     if not defer_identity:
         source = verified_plate_source(source)
-    write_indexed_canonical_marker(
-        existing_path, source, processed_folder=PROCESSED_DATA_FOLDER)
+    write_indexed_canonical_marker(existing_path, source)
     attach_canonical_plate_source(
         conn,
         plate,

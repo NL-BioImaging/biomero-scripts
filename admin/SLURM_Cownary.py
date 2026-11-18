@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # Copyright 2026 Amsterdam UMC
-# Use is subject to license terms supplied in LICENSE.
+# Licensed under the GNU General Public License version 2; see LICENSE.
 
 """Run a fixed lolcow job as an end-to-end Slurm cownary (admin only)."""
 
