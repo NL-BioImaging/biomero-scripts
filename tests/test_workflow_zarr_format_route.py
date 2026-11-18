@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import biomero.constants as biomero_constants
 from runner_key_names import runner_key_names
 
 
@@ -38,7 +39,7 @@ def test_detached_and_batch_child_input_resolution(use_zarr, requested, expected
     namespace = {
         "unwrap": lambda value: value,
         "constants": SimpleNamespace(
-            launcher_params=pytest.importorskip("biomero.constants").launcher_params,
+            launcher_params=biomero_constants.launcher_params,
             transfer=SimpleNamespace(OME_VERSION="version", OME_ZARR_VERSION_0_4="0.4",
                                      OME_ZARR_VERSION_0_5="0.5"),
             workflow=SimpleNamespace(USE_ZARR_FORMAT="use_zarr")),

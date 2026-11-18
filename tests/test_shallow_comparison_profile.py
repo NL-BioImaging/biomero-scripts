@@ -1,10 +1,12 @@
 """Current comparison metadata is lazy; source linkage never fabricates hashes."""
 from pathlib import Path
+import ast
 import os
 from types import SimpleNamespace
 
 import pytest
 
+import biomero.constants as biomero_constants
 from runner_key_names import runner_key_names
 from test_canonical_zarr_transfer import _load_canonical_functions
 
@@ -12,6 +14,13 @@ pytestmark = pytest.mark.skipif(
     "defer_identity" not in (Path(os.environ["BIOMERO_SCRIPTS_ROOT"]) /
                             "_data/_SLURM_Image_Transfer.py").read_text(encoding="utf-8"),
     reason="Lazy source comparison profile is not present in selected production source",
+)
+
+
+# The batched launcher names the key by its literal or by core's constant.
+BASE_INPUTS_KEYS = (
+    ast.parse("'base_inputs'", mode="eval").body,
+    ast.parse("constants.launcher_params.BASE_INPUTS", mode="eval").body,
 )
 
 
@@ -34,7 +43,7 @@ def load_functions(relative, names, **values):
 def policy_helpers():
     constants = SimpleNamespace(
         CLEANUP="cleanup",
-        launcher_params=pytest.importorskip("biomero.constants").launcher_params,
+        launcher_params=biomero_constants.launcher_params,
         workflow=SimpleNamespace(USE_ZARR_FORMAT="use_zarr",
             SKIP_ORIGINAL_PIXEL_COMPARISON="Skip_Original_Pixel_Comparison"),
         transfer=SimpleNamespace(DATA_TYPE="type", IDS="ids", OME_VERSION="version",
@@ -55,7 +64,7 @@ def test_parameter_key_matches_shared_core_contract_when_paired():
         core_constants = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(core_constants)
     else:
-        core_constants = pytest.importorskip("biomero.constants")
+        core_constants = biomero_constants
     assert core_constants.workflow.SKIP_ORIGINAL_PIXEL_COMPARISON == (
         "Skip_Original_Pixel_Comparison")
 
@@ -105,8 +114,9 @@ def test_batched_launcher_preserves_parameter_for_child_resolution():
     tree = ast.parse(path.read_text(encoding="utf-8"))
     base_inputs = next(value for node in ast.walk(tree) if isinstance(node, ast.Dict)
                        for key, value in zip(node.keys, node.values)
-                       if key is not None and ast.unparse(key) in (
-                           "'base_inputs'", "constants.launcher_params.BASE_INPUTS"))
+                       if key is not None and any(
+                           ast.dump(key) == ast.dump(accepted)
+                           for accepted in BASE_INPUTS_KEYS))
     raw = {"Skip_Original_Pixel_Comparison": SimpleNamespace(val=True)}
     recorded = eval(compile(ast.Expression(base_inputs), str(path), "eval"), {
         "inputs": raw, "unwrap": lambda value: value.val})
@@ -135,7 +145,7 @@ def test_policy_is_read_from_executed_task_not_current_admin_config():
     tracker = SimpleNamespace(repository=SimpleNamespace(get=records.__getitem__),
                               get_canonical_input_manifest=lambda _: manifest)
     ns = load_functions("_data/SLURM_Import_Results.py", {"load_canonical_input_snapshot"},
-                        constants=pytest.importorskip("biomero.constants"))
+                        constants=biomero_constants)
     result = ns["load_canonical_input_snapshot"](
         SimpleNamespace(workflowTracker=tracker, track_workflows=True), wf_id)
     assert result.original_pixels_not_required is True

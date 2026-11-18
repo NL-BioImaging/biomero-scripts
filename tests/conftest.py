@@ -6,6 +6,12 @@ annotations of those functions are evaluated when they are defined, which
 would require every such namespace to provide each annotated name (``List``,
 ``UUID``, ``SlurmClient``, ...). The tests do not depend on annotations, so
 they are dropped from function signatures when a script is parsed.
+
+Only function signatures are touched; annotations in class bodies (dataclass
+fields, ``NamedTuple``) and on variables are kept. The harness has about 45
+``compile(...)`` sites and no shared loader, so a ``from __future__ import
+annotations`` compiler flag cannot be applied in one place; patching
+``ast.parse`` here is the one central point.
 """
 import ast
 
