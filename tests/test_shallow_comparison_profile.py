@@ -33,6 +33,7 @@ def load_functions(relative, names, **values):
 def policy_helpers():
     constants = SimpleNamespace(
         CLEANUP="cleanup",
+        launcher_params=pytest.importorskip("biomero.constants").launcher_params,
         workflow=SimpleNamespace(USE_ZARR_FORMAT="use_zarr",
             SKIP_ORIGINAL_PIXEL_COMPARISON="Skip_Original_Pixel_Comparison"),
         transfer=SimpleNamespace(DATA_TYPE="type", IDS="ids", OME_VERSION="version",
@@ -102,8 +103,8 @@ def test_batched_launcher_preserves_parameter_for_child_resolution():
     tree = ast.parse(path.read_text(encoding="utf-8"))
     base_inputs = next(value for node in ast.walk(tree) if isinstance(node, ast.Dict)
                        for key, value in zip(node.keys, node.values)
-                       if ast.unparse(key) in ("'base_inputs'",
-                                               "constants.launcher_params.BASE_INPUTS"))
+                       if key is not None and ast.unparse(key) in (
+                           "'base_inputs'", "constants.launcher_params.BASE_INPUTS"))
     raw = {"Skip_Original_Pixel_Comparison": SimpleNamespace(val=True)}
     recorded = eval(compile(ast.Expression(base_inputs), str(path), "eval"), {
         "inputs": raw, "unwrap": lambda value: value.val})
@@ -131,7 +132,8 @@ def test_policy_is_read_from_executed_task_not_current_admin_config():
     records = {wf_id: SimpleNamespace(tasks=[task_id]), task_id: task}
     tracker = SimpleNamespace(repository=SimpleNamespace(get=records.__getitem__),
                               get_canonical_input_manifest=lambda _: manifest)
-    ns = load_functions("_data/SLURM_Import_Results.py", {"load_canonical_input_snapshot"})
+    ns = load_functions("_data/SLURM_Import_Results.py", {"load_canonical_input_snapshot"},
+                        constants=pytest.importorskip("biomero.constants"))
     result = ns["load_canonical_input_snapshot"](
         SimpleNamespace(workflowTracker=tracker, track_workflows=True), wf_id)
     assert result.original_pixels_not_required is True
