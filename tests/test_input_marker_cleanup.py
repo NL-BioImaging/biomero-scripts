@@ -6,29 +6,32 @@ only after a local evaluation or when the helper kept the full result, so the
 run script removes it from every result once the import succeeded.
 """
 import ast
+import datetime
 import logging
 import os
+import re
 import subprocess
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
-
-from script_output_names import OUTPUT_NAMES
+from biomero_schema.zarr import TRANSFER_INPUT_MARKER
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 RUN_SCRIPT = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
 IMPORT_SCRIPT = SOURCE_ROOT / "_data" / "SLURM_Import_Results.py"
-from biomero_schema.zarr import TRANSFER_INPUT_MARKER
-
-# The file name the transfer writes; pinned against the schema constant below.
-MARKER = ".biomero-input.json"
+MARKER = TRANSFER_INPUT_MARKER
+# BIOMERO's result folder under the group folder (fixed in 1.8).
+RESULTS_FOLDER = ".analyzed"
+WORKFLOW_ID = "wf-1"
 FUNCTIONS = (
-    "is_biomero_result_folder",
+    "is_result_folder_of_workflow",
     "log_walk_error",
     "remove_input_markers",
     "remove_input_markers_after_import",
@@ -45,24 +48,11 @@ class Node(str):
         return Node(f"{self}.{name}")
 
 
-class FakeResults:
-    """``constants.results``: core's real shared output names, and unique
-    values for every other constant."""
-
-    def __getattr__(self, name):
-        if hasattr(OUTPUT_NAMES, name):
-            return getattr(OUTPUT_NAMES, name)
-        return Node(f"results.{name}")
-
-
 class FakeConstants:
     """Stand-in for ``biomero.constants`` with unique string values."""
 
     file_output_targets = SimpleNamespace(
         USER_VALUES=("input",), INPUT_CONTAINER="input")
-
-    # The shared output names are core's real ones, as the scripts use them.
-    results = FakeResults()
 
     def __getattr__(self, name):
         return Node(name)
@@ -79,8 +69,8 @@ class RString:
 
 
 # The scripts read the output name from biomero.constants.results, which is
-# injected here like every other constant.
-RESULTS_PATH_OUTPUT = OUTPUT_NAMES.RESULTS_PATH_OUTPUT
+# injected here like every other constant; any unique value will do.
+RESULTS_PATH_OUTPUT = FakeConstants().results.RESULTS_PATH_OUTPUT
 
 
 def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
@@ -94,8 +84,6 @@ def load_functions(shallow_enabled=True, importer_enabled=True, **extra):
         "SHALLOW_ZARR_ENABLED": shallow_enabled,
         "SHALLOW_ZARR_STORAGE_ENABLED": importer_enabled and shallow_enabled,
         "TRANSFER_INPUT_MARKER": MARKER,
-        "RESULTS_FOLDER_NAME": ".analyzed",
-        "ZARR_ROOT_FILES": (".zgroup", "zarr.json"),
         "IMPORT_SCRIPTS": ["SLURM_Import_Results.py"],
         "VERSION": "test",
     }
@@ -131,7 +119,8 @@ def make_store(root: Path, name="result.zarr", shallow=False) -> Path:
 
 @pytest.fixture
 def results_root(tmp_path):
-    root = tmp_path / "group" / ".analyzed" / "wf-1" / "20260101_000000"
+    root = (tmp_path / "group" / RESULTS_FOLDER
+            / "wf-1" / "20260101_000000")
     root.mkdir(parents=True)
     return root
 
@@ -140,12 +129,12 @@ def results_root(tmp_path):
 
 def test_removes_the_marker_of_every_store_in_the_result(results_root):
     first = make_store(results_root, "a.zarr")
-    second = make_store(results_root / "nested", "b.zarr", shallow=True)
+    second = make_store(results_root, "b.zarr", shallow=True)
     log = results_root / "omero-1.log"
     log.write_text("log", encoding="utf-8")
 
     removed = load_functions()["remove_input_markers"](
-        str(results_root), MARKER)
+        str(results_root), MARKER, WORKFLOW_ID)
 
     assert removed == 2
     assert not (first / MARKER).exists()
@@ -163,7 +152,7 @@ def test_removes_only_files_named_like_the_marker(results_root):
     inside_array = store / "c" / MARKER  # below a store root: not a marker
     inside_array.write_text("{}", encoding="utf-8")
 
-    load_functions()["remove_input_markers"](str(results_root), MARKER)
+    load_functions()["remove_input_markers"](str(results_root), MARKER, WORKFLOW_ID)
 
     assert lookalike.is_file()
     assert inside_array.is_file()
@@ -174,7 +163,7 @@ def test_never_touches_a_folder_outside_biomero_result_storage(tmp_path):
     store = make_store(user_folder)
 
     removed = load_functions()["remove_input_markers"](
-        str(user_folder), MARKER)
+        str(user_folder), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (store / MARKER).is_file()
@@ -187,25 +176,132 @@ def test_a_path_that_climbs_out_of_the_result_folder_is_refused(
     escape = results_root / ".." / ".." / ".." / "user-data"
     assert (escape / user_store.name / MARKER).is_file()
 
-    removed = load_functions()["remove_input_markers"](str(escape), MARKER)
+    removed = load_functions()["remove_input_markers"](str(escape), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (user_store / MARKER).is_file()
 
 
-def test_a_missing_result_folder_is_not_an_error(tmp_path):
-    missing = tmp_path / ".analyzed" / "gone"
+def test_a_missing_result_folder_is_not_an_error(tmp_path, caplog):
+    missing = tmp_path / RESULTS_FOLDER / WORKFLOW_ID / "20260101_000000"
 
-    assert load_functions()["remove_input_markers"](
-        str(missing), MARKER) == 0
+    with caplog.at_level(logging.WARNING, logger="marker-test"):
+        removed = load_functions()["remove_input_markers"](
+            str(missing), MARKER, WORKFLOW_ID)
+
+    assert removed == 0
+    assert any(r.levelno == logging.WARNING and "does not exist" in
+               r.getMessage() for r in caplog.records)
+
+
+def test_the_workflow_id_is_compared_as_text_for_a_real_uuid(tmp_path):
+    workflow_id = uuid.uuid4()
+    results_path = (tmp_path / RESULTS_FOLDER / str(workflow_id)
+                    / "20260101_000000")
+    store = make_store(results_path)
+
+    removed = load_functions()["remove_input_markers"](
+        str(results_path), MARKER, workflow_id)
+
+    assert removed == 1
+    assert not (store / MARKER).exists()
 
 
 def test_cleanup_is_repeatable(results_root):
     make_store(results_root)
     remove = load_functions()["remove_input_markers"]
 
-    assert remove(str(results_root), MARKER) == 1
-    assert remove(str(results_root), MARKER) == 0
+    assert remove(str(results_root), MARKER, WORKFLOW_ID) == 1
+    assert remove(str(results_root), MARKER, WORKFLOW_ID) == 0
+
+
+# --- the search depth: the marker is at the root of each exported store ----
+
+def test_a_marker_deeper_inside_a_store_is_not_removed(results_root):
+    store = make_store(results_root)
+    deep = store / "labels" / "0" / "c"
+    deep.mkdir(parents=True)
+    (deep / MARKER).write_text("{}", encoding="utf-8")
+
+    removed = load_functions()["remove_input_markers"](
+        str(results_root), MARKER, WORKFLOW_ID)
+
+    assert removed == 1
+    assert not (store / MARKER).exists()
+    assert (deep / MARKER).is_file()
+
+
+def test_the_search_stops_at_the_stores_and_does_not_descend(results_root):
+    make_store(results_root)
+    make_store(results_root / "not-a-store-root", "b.zarr")
+    functions = load_functions()
+    visited = []
+
+    def recording_walk(top, **kwargs):
+        for directory, subdirectories, file_names in os.walk(top, **kwargs):
+            visited.append(Path(directory).relative_to(top).parts)
+            yield directory, subdirectories, file_names
+
+    functions["os"] = SimpleNamespace(
+        walk=recording_walk, remove=os.remove, path=os.path)
+    removed = functions["remove_input_markers"](str(results_root), MARKER, WORKFLOW_ID)
+
+    assert removed == 1
+    assert max(len(parts) for parts in visited) == 1, visited
+
+
+# --- the sweep only accepts this run's result folder ----------------------
+
+def load_get_workflow_results_path(base_path):
+    tree = ast.parse(IMPORT_SCRIPT.read_text(encoding="utf-8"))
+    nodes = [n for n in tree.body
+             if (isinstance(n, ast.FunctionDef)
+                 and n.name == "get_workflow_results_path")
+             or (isinstance(n, ast.Assign) and any(
+                 isinstance(t, ast.Name) and t.id == "RESULTS_FOLDER"
+                 for t in n.targets))]
+    namespace = {
+        "Optional": Optional, "os": os, "datetime": datetime.datetime,
+        "logger": logging.getLogger("marker-test"),
+        "get_importer_group_base_path": lambda _group_name: str(base_path),
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]),
+                 str(IMPORT_SCRIPT), "exec"), namespace)
+    return namespace["get_workflow_results_path"]
+
+
+def test_the_sweep_refuses_the_result_folder_of_another_workflow(tmp_path):
+    other = (tmp_path / "group" / RESULTS_FOLDER / "wf-2"
+             / "20260101_000000")
+    store = make_store(other)
+
+    removed = load_functions()["remove_input_markers"](
+        str(other), MARKER, WORKFLOW_ID)
+
+    assert removed == 0
+    assert (store / MARKER).is_file()
+
+
+def test_the_sweep_accepts_the_path_the_import_makes(tmp_path):
+    results_path = Path(
+        load_get_workflow_results_path(tmp_path)("group", WORKFLOW_ID))
+    store = make_store(results_path)
+
+    removed = load_functions()["remove_input_markers"](
+        str(results_path), MARKER, WORKFLOW_ID)
+
+    assert removed == 1
+    assert not (store / MARKER).exists()
+
+
+def test_the_import_makes_its_result_folder_under_the_results_folder(
+        tmp_path):
+    results_path = load_get_workflow_results_path(tmp_path)(
+        "group", WORKFLOW_ID)
+
+    relative = Path(results_path).relative_to(tmp_path)
+    assert relative.parts[:2] == (RESULTS_FOLDER, WORKFLOW_ID)
+    assert len(relative.parts) == 3  # <result folder>/<workflow>/<timestamp>
 
 
 def test_a_marker_that_cannot_be_removed_does_not_fail_the_run(
@@ -220,7 +316,7 @@ def test_a_marker_that_cannot_be_removed_does_not_fail_the_run(
         walk=os.walk, remove=refuse, path=os.path)
     with caplog.at_level(logging.WARNING, logger="marker-test"):
         removed = functions["remove_input_markers"](
-            str(results_root), MARKER)
+            str(results_root), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (store / MARKER).is_file()
@@ -228,14 +324,17 @@ def test_a_marker_that_cannot_be_removed_does_not_fail_the_run(
                r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("depth", [".analyzed", ".analyzed/wf-1"])
+@pytest.mark.parametrize("depth", [
+    RESULTS_FOLDER,
+    f"{RESULTS_FOLDER}/wf-1",
+])
 def test_refuses_the_storage_folder_and_a_workflow_folder(tmp_path, depth):
     folder = tmp_path / "group" / depth
     store = make_store(folder)
     other_import = make_store(
-        tmp_path / "group" / ".analyzed" / "wf-2" / "20260102_000000")
+        tmp_path / "group" / RESULTS_FOLDER / "wf-2" / "20260102_000000")
 
-    removed = load_functions()["remove_input_markers"](str(folder), MARKER)
+    removed = load_functions()["remove_input_markers"](str(folder), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (store / MARKER).is_file()
@@ -244,7 +343,8 @@ def test_refuses_the_storage_folder_and_a_workflow_folder(tmp_path, depth):
 
 def test_a_result_folder_linked_to_user_data_is_refused(tmp_path):
     user_store = make_store(tmp_path / "user-data")
-    link = tmp_path / "group" / ".analyzed" / "wf-1" / "20260101_000000"
+    link = (tmp_path / "group" / RESULTS_FOLDER / "wf-1"
+            / "20260101_000000")
     link.parent.mkdir(parents=True)
     try:
         link.symlink_to(user_store.parent, target_is_directory=True)
@@ -255,7 +355,7 @@ def test_a_result_folder_linked_to_user_data_is_refused(tmp_path):
                 capture_output=True).returncode != 0:
             pytest.skip("links cannot be created here")
 
-    removed = load_functions()["remove_input_markers"](str(link), MARKER)
+    removed = load_functions()["remove_input_markers"](str(link), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (user_store / MARKER).is_file()
@@ -271,7 +371,7 @@ def test_links_inside_a_result_folder_are_not_followed(
         pytest.skip("symlinks cannot be created here")
 
     removed = load_functions()["remove_input_markers"](
-        str(results_root), MARKER)
+        str(results_root), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (user_store / MARKER).is_file()
@@ -289,7 +389,7 @@ def test_the_search_never_follows_links(results_root):
 
     functions["os"] = SimpleNamespace(
         walk=recording_walk, remove=os.remove, path=os.path)
-    functions["remove_input_markers"](str(results_root), MARKER)
+    functions["remove_input_markers"](str(results_root), MARKER, WORKFLOW_ID)
 
     assert calls and calls[0].get("followlinks") is False
 
@@ -306,7 +406,7 @@ def test_an_unreadable_folder_only_warns(results_root, caplog):
         walk=failing_walk, remove=os.remove, path=os.path)
     with caplog.at_level(logging.WARNING, logger="marker-test"):
         removed = functions["remove_input_markers"](
-            str(results_root), MARKER)
+            str(results_root), MARKER, WORKFLOW_ID)
 
     assert removed == 0
     assert (store / MARKER).is_file()
@@ -328,7 +428,8 @@ def test_skips_when_shallow_zarr_is_off_and_says_why(
             shallow_enabled=shallow_enabled,
             importer_enabled=importer_enabled)[
             "remove_input_markers_after_import"](
-                {RESULTS_PATH_OUTPUT: RString(str(results_root))})
+                {RESULTS_PATH_OUTPUT: RString(str(results_root))},
+                WORKFLOW_ID)
 
     assert removed == 0
     assert (store / MARKER).is_file()
@@ -339,7 +440,7 @@ def test_skips_when_shallow_zarr_is_off_and_says_why(
 def test_warns_when_the_result_folder_output_is_empty(caplog):
     with caplog.at_level(logging.WARNING, logger="marker-test"):
         removed = load_functions()["remove_input_markers_after_import"](
-            {RESULTS_PATH_OUTPUT: RString("")})
+            {RESULTS_PATH_OUTPUT: RString("")}, WORKFLOW_ID)
 
     assert removed == 0
     assert any(r.levelno == logging.WARNING and "empty" in r.getMessage()
@@ -348,7 +449,8 @@ def test_warns_when_the_result_folder_output_is_empty(caplog):
 
 def test_warns_when_the_import_returned_no_result_folder(caplog):
     with caplog.at_level(logging.WARNING, logger="marker-test"):
-        removed = load_functions()["remove_input_markers_after_import"]({})
+        removed = load_functions()["remove_input_markers_after_import"](
+            {}, WORKFLOW_ID)
 
     assert removed == 0
     assert any(r.levelno == logging.WARNING and RESULTS_PATH_OUTPUT in
@@ -362,20 +464,22 @@ def importer_removes_marker(store: Path):
     (store / MARKER).unlink()
 
 
+# Per result path: is the result shallowed on the HPC (the importer accepts it
+# and the marker stays), and does the importer itself remove the marker?
 PATHS = {
-    # Result shallowed on the HPC: the importer accepts it, marker stays.
-    "remote-shallow": (True, False),
-    # Helper kept the full result: the importer removes the marker.
-    "remote-kept-full": (False, True),
-    # The importer evaluated the store itself: it removes the marker.
-    "local-evaluation": (False, True),
+    "remote-shallow": {"shallow": True, "importer_removes": False},
+    # Helper kept the full result, or the importer evaluated the store itself.
+    "importer-removes-marker": {"shallow": False, "importer_removes": True},
     # Importer received a plain (legacy) import: it never looks at the marker.
-    "no-importer-evaluation": (False, False),
+    "no-importer-evaluation": {"shallow": False, "importer_removes": False},
 }
 
 
-def fake_script_environment(run_omero_script):
+def fake_script_environment(run_omero_script, cleanup=None):
+    """The import step of the run script, with a fake import and cleanup."""
     functions = load_functions(run_omero_script=run_omero_script)
+    if cleanup is not None:
+        functions["remove_input_markers_after_import"] = cleanup
     script = SimpleNamespace(id=7, getVersion=lambda: "v",
                              getName=lambda: "SLURM_Import_Results.py")
     conn = MagicMock()
@@ -402,13 +506,12 @@ def job_with_status(status_id):
 @pytest.mark.parametrize("path", sorted(PATHS))
 def test_marker_is_gone_after_import_on_every_path(
         path, importer_removes_today, results_root):
-    shallow, importer_removes_on_this_path = PATHS[path]
-    store = make_store(results_root, shallow=shallow)
+    store = make_store(results_root, shallow=PATHS[path]["shallow"])
     seen = {}
 
     def fake_import(client, svc, script_id, inputs, **kwargs):
         seen["marker_present_at_import"] = (store / MARKER).is_file()
-        if importer_removes_today and importer_removes_on_this_path:
+        if importer_removes_today and PATHS[path]["importer_removes"]:
             importer_removes_marker(store)
         return ({"Message": "imported",
                  RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(3))
@@ -441,23 +544,11 @@ def test_a_failing_cleanup_does_not_fail_the_import(results_root, caplog):
         return ({"Message": "imported",
                  RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(3))
 
-    def broken_cleanup(import_outputs):
+    def broken_cleanup(import_outputs, workflow_id):
         raise RuntimeError("disk gone")
 
-    functions = load_functions(run_omero_script=fake_import)
-    functions["remove_input_markers_after_import"] = broken_cleanup
-    script = SimpleNamespace(id=7, getVersion=lambda: "v",
-                             getName=lambda: "SLURM_Import_Results.py")
-    conn = MagicMock()
-    conn.getScriptService.return_value.getScripts.return_value = [script]
-    constants = FakeConstants()
-    inputs = {constants.transfer.IDS: [1],
-              constants.transfer.DATA_TYPE: constants.transfer.DATA_TYPE_DATASET}
-    client = SimpleNamespace(getInput=lambda key: inputs.get(key))
-
     with caplog.at_level(logging.WARNING, logger="marker-test"):
-        rv = functions["importResultsToOmero"](
-            client, conn, MagicMock(), 99, defaultdict(bool), "wf-1")
+        rv = fake_script_environment(fake_import, cleanup=broken_cleanup)()
 
     assert rv["Message"] == "imported"
     assert (store / MARKER).is_file()
@@ -497,7 +588,40 @@ def test_both_scripts_use_the_core_constant_for_the_result_folder_output():
     assert (
         f"client.setOutput({core_constant}, "
         "rstring(str(permanent_storage_path)))"
-    ) in import_source
+    ) in re.sub(r"\s+", " ", import_source).replace("( ", "(")
     for source in (run_source, import_source):
         assert "RESULTS_PATH_OUTPUT =" not in source, "defined locally"
         assert '"Results_Path"' not in source
+
+
+def string_constant_lines(script, value):
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    return [node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.value == value]
+
+
+def test_only_the_import_script_names_the_results_folder_and_only_once():
+    # The folder is one constant of SLURM_Import_Results.py (RESULTS_FOLDER);
+    # a second literal there, or one in another script, can drift from it.
+    scripts = sorted(
+        path for folder in ("__workflows", "_data", "admin")
+        for path in (SOURCE_ROOT / folder).glob("*.py"))
+    hardcoded = {}
+    for script in scripts:
+        lines = string_constant_lines(script, RESULTS_FOLDER)
+        if lines and script != IMPORT_SCRIPT:
+            hardcoded[script.name] = lines
+
+    assert not hardcoded, hardcoded
+    assert len(string_constant_lines(IMPORT_SCRIPT, RESULTS_FOLDER)) == 1
+
+
+def test_the_import_script_reads_the_results_folder_constant_three_times():
+    # The result path, the retry lookup and the finalize lock folder in
+    # runScript (not executed by any test) must all use the constant.
+    tree = ast.parse(IMPORT_SCRIPT.read_text(encoding="utf-8"))
+    uses = [node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == "RESULTS_FOLDER"
+            and isinstance(node.ctx, ast.Load)]
+
+    assert len(uses) == 3, uses

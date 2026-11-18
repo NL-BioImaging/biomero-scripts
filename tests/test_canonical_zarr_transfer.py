@@ -1371,7 +1371,7 @@ def test_snapshot_hashes_labels_already_in_canonical_zarr(
 def test_image_transfer_publishes_canonical_inputs_output():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
-    # Remove the old form once biomero-scripts#100 is merged.
+    # Defined locally, or taken from core's constants.results; never both.
     own_definition = 'CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"' in script
     from_core = "constants.results.CANONICAL_INPUTS_OUTPUT," in script
     assert own_definition != from_core

@@ -34,8 +34,9 @@ def _load_snapshot_functions():
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     namespace = {
+        # Source that defines the name locally reads this one; source that
+        # takes it from core reads constants.results.
         "CANONICAL_INPUTS_OUTPUT": CANONICAL_INPUTS_OUTPUT,
-        # Current source reads the name from biomero.constants.results.
         "constants": SimpleNamespace(results=SimpleNamespace(
             CANONICAL_INPUTS_OUTPUT=CANONICAL_INPUTS_OUTPUT)),
         "CanonicalInput": CanonicalInput,

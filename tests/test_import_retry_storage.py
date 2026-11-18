@@ -28,13 +28,16 @@ def load_find_existing_result_storage(base_path):
         "find_existing_result_storage",
         "has_result_retrieval_marker",
     }
+    # Module constants the functions read; RESULTS_FOLDER is only defined by
+    # source that has the result folder constant.
+    required_constants = {"RESULTS_RETRIEVED_MARKER", "RESULTS_FOLDER"}
     body = [
         node for node in tree.body
         if (
             isinstance(node, ast.Assign)
             and any(
                 isinstance(target, ast.Name)
-                and target.id == "RESULTS_RETRIEVED_MARKER"
+                and target.id in required_constants
                 for target in node.targets
             )
         ) or (
@@ -200,3 +203,33 @@ def test_import_retry_skips_slurm_retrieval_for_staged_results(tmp_path):
     assert result[2] == str(archive)
     assert result[3] == "490_out"
     assert "Reusing results already retrieved" in result[4]
+
+
+def staged_result(results_folder, workflow_id, slurm_job_id="490"):
+    """A complete staged result below ``results_folder``."""
+    staged = results_folder / workflow_id / "20260827_140415"
+    staged.mkdir(parents=True)
+    (staged / f"omero-{slurm_job_id}.log").write_text("log", encoding="utf-8")
+    (staged / ".biomero-results-retrieved.json").write_text(
+        json.dumps({
+            "schema": 1,
+            "status": "complete",
+            "workflowId": workflow_id,
+            "slurmJobId": slurm_job_id,
+        }),
+        encoding="utf-8",
+    )
+    return staged
+
+
+def test_import_retry_looks_only_in_the_results_folder(tmp_path):
+    workflow_id = "b4e4a5f8-a7a3-4a76-873b-daa164f0f3e7"
+    staged_result(tmp_path / "elsewhere", workflow_id)
+    find_existing = load_find_existing_result_storage(tmp_path)
+
+    assert find_existing("system", workflow_id, "490") == (None, None)
+
+    expected = staged_result(tmp_path / ".analyzed", workflow_id)
+
+    storage_path, _ = find_existing("system", workflow_id, "490")
+    assert storage_path == str(expected)
