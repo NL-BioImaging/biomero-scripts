@@ -42,8 +42,8 @@ custom deployment, follow the [scripts installation guide](https://nl-bioimaging
 and install the scripts on the OMERO server and detached worker.
 
 Deploy matching core and scripts releases together. This release requires core's
-`biomero.provenance` and `biomero.maintenance` APIs even when optional features
-are disabled. Prerelease tag counters can differ between repositories; use the
+`biomero.metadata_views` and `biomero.maintenance` APIs even when optional
+features are disabled. Prerelease tag counters can differ between repositories; use the
 component references supplied by the NL-BIOMERO release.
 
 Detached execution and shallow storage are opt-in for existing deployments:
@@ -98,10 +98,10 @@ attachments skip those directories and report the skipped count.
 ## Storage provenance and repair
 
 Shallow-result provenance uses the shared schema-2 manifest parser from
-`biomero-schema>=0.3.0b3,<0.4`. Lazy comparison metadata and source-linked
-decisions require `biomero-shallower>=0.1.0b9,<0.2` in the worker and matching
-importer environment. Use the matching published helper image for remote
-shallowing; NL-BIOMERO supplies the coordinated package and image versions.
+`biomero-schema`. Lazy comparison metadata and source-linked decisions need a
+`biomero-shallower` that supports them, in the worker and the matching importer
+environment. Use the matching published helper image for remote shallowing;
+NL-BIOMERO supplies the coordinated package and image versions.
 Plate annotations collect the source identities from the manifest's image
 bindings; Image annotations select their own image node. Both v2 and v3
 interchange profiles are read without converting the store. Unsupported

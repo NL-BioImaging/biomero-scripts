@@ -108,7 +108,8 @@ from omero_metadata.populate import ParsingContext
 import ezomero
 
 from biomero import SlurmClient, constants
-from biomero.provenance import render_workflow_metadata
+from biomero.metadata_views import (
+    format_large_field_reference, render_workflow_metadata)
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True
@@ -3542,16 +3543,34 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
     return add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
 
 
-def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
-                                   ns, across_groups=False):
+def post_provenance_map_annotation(
+    conn: BlitzGateway,
+    object_type: str,
+    object_id: int,
+    kv_dict: Dict[str, str],
+    ns: str,
+    across_groups: bool = False,
+) -> Tuple[Optional[int], str]:
     """Try the historical full view, reducing it only on an index-size error.
 
     Full values remain in the workflow CSV and event store. Keep this helper
     identical in both result scripts: OMERO downloads scripts independently.
+
+    Args:
+        conn (BlitzGateway): Open OMERO connection.
+        object_type (str): OMERO object type to annotate, such as "Image".
+        object_id (int): ID of the object to annotate.
+        kv_dict (Dict[str, str]): Key-value pairs of the full provenance view.
+        ns (str): Namespace of the MapAnnotation.
+        across_groups (bool): Whether to look for the object in all groups.
+
+    Returns:
+        Tuple[Optional[int], str]: The annotation ID (None when saving
+        failed) and the outcome ("complete", "reduced" or "failed").
     """
     import hashlib
 
-    def write(values):
+    def write(values: Dict[str, str]) -> int:
         annotation_id = ezomero.post_map_annotation(
             conn=conn, object_type=object_type, object_id=object_id,
             kv_dict=values, ns=ns, across_groups=across_groups)
@@ -3589,9 +3608,8 @@ def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
             safe_key = "Long_key_sha256_" + hashlib.sha256(raw_key).hexdigest()
             while safe_key in kv_dict or safe_key in reduced:
                 safe_key += "_"
-        reduced[safe_key] = (
-            "Large field; full value in {} (utf8_bytes={}; sha256={})".format(
-                reference, len(raw_value), hashlib.sha256(raw_value).hexdigest()))
+        reduced[safe_key] = format_large_field_reference(
+            reference, len(raw_value), hashlib.sha256(raw_value).hexdigest())
     if reduced == kv_dict:
         logger.warning("Index-size rejection for %s %s (%s); no large fields "
                        "could be reduced", object_type, object_id, ns)
@@ -5226,7 +5244,7 @@ def runScript() -> None:
             scripts.String(constants.results.ROI_COLOR,
                            optional=True,
                            grouping="09.95",
-                           description="Optional #RRGGBB ROI color override. Leave empty to derive a stable color from the workflow UUID.",
+                           description="Optional #RRGGBB ROI color. The workflow runner resolves it before starting this script; if left empty, the ROI script uses its own default color.",
                            default=""),
             scripts.Bool(constants.results.ROI_CLEAR_EXISTING,
                          optional=True,
@@ -5686,9 +5704,8 @@ def runScript() -> None:
                             or False),
                         roi_name_prefix=(unwrap(client.getInput(
                             constants.results.ROI_NAME_PREFIX)) or ""),
-                        roi_color=constants.resolve_workflow_color(
-                            unwrap(client.getInput(
-                                constants.results.ROI_COLOR)), wf_id),
+                        roi_color=(unwrap(client.getInput(
+                            constants.results.ROI_COLOR)) or ""),
                         clear_existing_rois=(unwrap(client.getInput(
                             constants.results.ROI_CLEAR_EXISTING)) or False),
                         clear_roi_filter=(unwrap(client.getInput(
