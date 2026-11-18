@@ -16,7 +16,7 @@ SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPTS = sorted(
-    path for folder in ("__workflows", "_data")
+    path for folder in ("__workflows", "_data", "admin")
     for path in (SOURCE_ROOT / folder).glob("*.py"))
 # Output name -> the biomero.constants.results constant that holds it.
 SHARED_OUTPUTS = {
@@ -31,10 +31,15 @@ UI_MESSAGES_NAME = "UI_messages"
 
 
 def uses_core_constants():
-    """Tell whether any script already reads a shared name from core."""
-    return any(f"constants.results.{constant}" in path.read_text(
-        encoding="utf-8") for path in SCRIPTS
-        for constant in SHARED_OUTPUTS.values())
+    """Tell whether the scripts take their output names from core.
+
+    Gated on ``URL_OUTPUT``, which only the production PR that converts the
+    scripts (biomero-scripts#101) reads from core: master and the PRs before
+    it use other core output names (for example ``RESULTS_PATH_OUTPUT``) and
+    must keep passing.
+    """
+    return any("constants.results.URL_OUTPUT" in path.read_text(
+        encoding="utf-8") for path in SCRIPTS)
 
 
 def is_allowed(node, parent):
@@ -115,14 +120,107 @@ def test_the_detector_allows_what_is_not_an_output_name():
 
 
 # Remove this gate once biomero-scripts#100 is merged and the harness no
-# longer has to test source revisions that predate it.
-@pytest.mark.skipif(
+# longer has to test source revisions that predate it (follow-up issue:
+# biomero-scripts#109).
+requires_core_constants = pytest.mark.skipif(
     SCRIPTS and not uses_core_constants(),
     reason="the scripts do not use the core output constants in this revision")
-@pytest.mark.parametrize("path", SCRIPTS, ids=lambda path: path.name)
+
+# Per script: how often it names each output other than ``Message`` through
+# core. A wrong constant (for example URL_OUTPUT where FILE_ANNOTATION_OUTPUT
+# is meant) changes these counts; ``Message`` is covered by the other checks
+# (existence in core, no literal, setOutput rooted at core).
+EXPECTED_OUTPUT_USES = {
+    "__workflows/SLURM_Run_Workflow.py": {
+        "CANONICAL_INPUTS_OUTPUT": 5, "FILE_ANNOTATION_OUTPUT": 3,
+        "RESULTS_PATH_OUTPUT": 3, "URL_OUTPUT": 4},
+    "__workflows/SLURM_Run_Workflow_Batched.py": {
+        "FILE_ANNOTATION_OUTPUT": 1},
+    "_data/SLURM_Get_Results.py": {
+        "FILE_ANNOTATION_OUTPUT": 2, "URL_OUTPUT": 1},
+    "_data/SLURM_Get_Update.py": {
+        "FILE_ANNOTATION_OUTPUT": 1, "URL_OUTPUT": 1},
+    "_data/SLURM_Import_Results.py": {
+        "FILE_ANNOTATION_OUTPUT": 2, "RESULTS_PATH_OUTPUT": 1,
+        "URL_OUTPUT": 1, "WORKFLOW_UUID_OUTPUT": 1},
+    "_data/SLURM_Remote_Conversion.py": {"URL_OUTPUT": 1},
+    "_data/_SLURM_Image_Transfer.py": {
+        "CANONICAL_INPUTS_OUTPUT": 1, "FILE_ANNOTATION_OUTPUT": 1},
+}
+# Output names the scripts still write as literals until core defines them.
+OUTPUTS_NOT_YET_IN_CORE = {"Job_Log", "Conversion_Log", "Slurm_Path"}
+
+
+def results_constants_used(source):
+    """Return every ``constants.results.<NAME>`` of the source, by name."""
+    tree = ast.parse(source)
+    return [node.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and ast.unparse(node.value) == "constants.results"]
+
+
+def set_output_names(source):
+    """Return the first argument of every ``setOutput`` call, as source text."""
+    tree = ast.parse(source)
+    return [ast.unparse(node.args[0]) for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setOutput" and node.args]
+
+
+def relative(path):
+    return path.relative_to(SOURCE_ROOT).as_posix()
+
+
+def test_the_detectors_read_a_source():
+    source = ("client.setOutput(constants.results.URL_OUTPUT, 1)\n"
+              "x = rv[constants.results.MESSAGE_OUTPUT]\n"
+              "client.setOutput('Job_Log', 2)\n")
+    assert results_constants_used(source) == ["URL_OUTPUT", "MESSAGE_OUTPUT"]
+    assert set_output_names(source) == [
+        "constants.results.URL_OUTPUT", "'Job_Log'"]
+
+
+@requires_core_constants
+@pytest.mark.parametrize("path", SCRIPTS, ids=relative)
 def test_shared_output_names_come_from_core_constants(path):
     offenders = [f"{path.name}:{line} uses {name!r}; use "
                  f"constants.results.{SHARED_OUTPUTS[name]}"
                  for line, name in output_literals(
                      path.read_text(encoding="utf-8"))]
     assert not offenders, "\n".join(offenders)
+
+
+@requires_core_constants
+@pytest.mark.parametrize("path", SCRIPTS, ids=relative)
+def test_every_constant_a_script_reads_exists_in_core(path):
+    from biomero.constants import results as core_results
+    unknown = sorted({name for name in results_constants_used(
+        path.read_text(encoding="utf-8")) if not hasattr(core_results, name)})
+    assert not unknown, f"{path.name} uses unknown core names {unknown}"
+
+
+@requires_core_constants
+@pytest.mark.parametrize("path", SCRIPTS, ids=relative)
+def test_every_set_output_is_named_by_a_core_constant(path):
+    names = set_output_names(path.read_text(encoding="utf-8"))
+    not_from_core = [
+        name for name in names
+        if not name.startswith("constants.results.")
+        and name.strip("'\"") not in OUTPUTS_NOT_YET_IN_CORE
+        # the batched runner's per-batch File_Annotation_<n> outputs
+        and not name.startswith("f'File_Annotation_")]
+    assert not not_from_core, (
+        f"{path.name} sets outputs {not_from_core} without a core constant")
+
+
+@requires_core_constants
+@pytest.mark.parametrize("path", SCRIPTS, ids=relative)
+def test_each_script_names_its_outputs_as_expected(path):
+    from collections import Counter
+    uses = Counter(name for name in results_constants_used(
+        path.read_text(encoding="utf-8"))
+        if name.endswith("_OUTPUT") and name != "MESSAGE_OUTPUT")
+    assert dict(uses) == EXPECTED_OUTPUT_USES.get(relative(path), {}), (
+        f"{path.name}: the core output constants it uses changed; if that is "
+        f"intended, update EXPECTED_OUTPUT_USES")

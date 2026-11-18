@@ -133,7 +133,8 @@ def test_regular_file_attachment_uses_a_permanent_source_path(
     assert ann.getFile().saved_name == (
         "cells.wf-123.ome.tif" if workflow_id else path.name)
     images[0].linkAnnotation.assert_called_once_with(ann)
-    client.setOutput.assert_called_once_with("File_Annotation", ann._obj)
+    client.setOutput.assert_called_once_with(
+        OUTPUT_NAMES.FILE_ANNOTATION_OUTPUT, ann._obj)
     if workflow_id:
         assert f"Workflow {workflow_id}" in kwargs["description"]
 

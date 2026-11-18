@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -292,6 +294,7 @@ def test_cownary_run_script_returns_the_cow_in_omero_web_message():
         "omscripts": SimpleNamespace(client=lambda *_args, **_kwargs: web_client),
         "re": __import__("re"),
         "rstring": lambda value: value,
+        "constants": biomero_constants,
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]),
                  str(SCRIPT_PATH), "exec"), namespace)

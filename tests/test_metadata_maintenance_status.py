@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 source = ROOT / 'admin' / 'SLURM_check_setup.py'
 tree = ast.parse(source.read_text(encoding='utf-8'))
@@ -17,7 +19,8 @@ if not nodes and not os.environ.get('BIOMERO_TEST_METADATA_DETACHED'):
 
 
 def test_check_setup_summarizes_maintenance_without_full_reports():
-    namespace = dict(logger=logging.getLogger(__name__), detached_mode_enabled=lambda: True)
+    namespace = dict(logger=logging.getLogger(__name__), detached_mode_enabled=lambda: True,
+                     constants=biomero_constants)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
     formatter = namespace['format_metadata_maintenance_status']
     requests = [{'request_id': 'chosen', 'status': 'RUNNING', 'report': {
@@ -31,7 +34,8 @@ def test_check_setup_summarizes_maintenance_without_full_reports():
 
 
 def test_failed_status_shows_reason_and_disabled_supervisor_warns():
-    namespace = dict(logger=logging.getLogger(__name__), detached_mode_enabled=lambda: False)
+    namespace = dict(logger=logging.getLogger(__name__), detached_mode_enabled=lambda: False,
+                     constants=biomero_constants)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
     requests = [{'request_id': 'failed', 'status': 'FAILED', 'report': {'counts': {'failed': 1}},
                  'created_on': 'start', 'modified_on': 'now', 'error': 'lost connection', 'options': {}},
@@ -52,6 +56,7 @@ def test_maintenance_only_check_never_opens_slurm_and_requires_admin():
     scripts.client.return_value = client
     tracker_context = Mock(__enter__=Mock(return_value=tracker), __exit__=Mock(return_value=False))
     namespace = dict(logger=logging.getLogger(__name__), scripts=scripts,
+                     constants=biomero_constants,
                      detached_mode_enabled=lambda: True, VERSION='2.9.0',
                      omero=SimpleNamespace(constants=SimpleNamespace(
                          namespaces=SimpleNamespace(NSDYNAMIC='dynamic'))),
