@@ -108,15 +108,8 @@ from omero_metadata.populate import ParsingContext
 import ezomero
 
 from biomero import SlurmClient, constants
-try:
-    from biomero.metadata_views import (
-        format_large_field_reference, render_workflow_metadata)
-except ImportError as error:
-    raise ImportError(
-        "These scripts need the biomero release that matches them, which "
-        "provides biomero.metadata_views (the module formerly named "
-        "biomero.provenance). Update biomero to the release matching these "
-        "scripts.") from error
+from biomero.metadata_views import (
+    format_large_field_reference, render_workflow_metadata)
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True

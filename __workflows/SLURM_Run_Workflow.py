@@ -58,6 +58,7 @@ import os
 from pathlib import Path
 import json
 import re
+from typing import Optional, Union
 from uuid import UUID, uuid4
 import omero
 from omero.grid import JobParams
@@ -513,16 +514,18 @@ def build_output_settings(client, selected_output) -> dict:
     return settings
 
 
-def resolve_workflow_color(color_override, workflow_id) -> str:
+def resolve_workflow_color(color_override: Optional[str],
+                           workflow_id: Union[str, UUID]) -> str:
     """Return the ROI color of a workflow.
 
     The result import scripts and Labels2Rois receive this resolved value, so
     the color is decided once, here.
 
     Args:
-        color_override: Optional ``#RRGGBB`` color chosen by the user.
-        workflow_id: UUID of the workflow, used to pick a palette color
-            deterministically when there is no override.
+        color_override (Optional[str]): Optional ``#RRGGBB`` color chosen by
+            the user.
+        workflow_id (Union[str, UUID]): UUID of the workflow, used to pick a
+            palette color deterministically when there is no override.
 
     Returns:
         The override in upper case, or the palette color of the workflow.
