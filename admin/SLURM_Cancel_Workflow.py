@@ -14,7 +14,6 @@ marks the workflow FAILED with the reason. Detached runs have no OMERO script
 process of their own to cancel, which is why this script exists.
 """
 
-from __future__ import print_function
 from uuid import UUID
 from omero.rtypes import rstring
 import omero.scripts as omscripts
@@ -24,7 +23,7 @@ import os
 import sys
 from omero.gateway import BlitzGateway
 import omero
-from biomero import WorkflowTracker
+from biomero import WorkflowTracker, constants
 
 _WORKFLOW_ID = "Workflow_ID"
 _REASON = "Reason"
@@ -86,8 +85,14 @@ def runScript() -> None:
     """Main entry point: cancel the workflow named in the inputs.
 
     Reads the workflow ID and reason from the script inputs and sets the
-    ``Message`` output to the outcome, or to the error that stopped the
-    request. Errors are reported to the user, not raised.
+    ``Message`` output to the outcome. When the request fails, the error is
+    set as the ``Message`` and raised again, so OMERO shows the script as
+    failed.
+
+    Raises:
+        Exception: Whatever stopped the request, such as a ``PermissionError``
+            for a workflow of another user or a ``ValueError`` for a workflow
+            ID that is not a UUID.
     """
     client = omscripts.client(
         "Cancel BIOMERO Workflow",
@@ -119,10 +124,13 @@ def runScript() -> None:
             message = request_cancel(
                 tracker, workflow_id, conn.getUserId(),
                 conn.getUser().isAdmin(), reason)
-        client.setOutput("Message", rstring(message))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(message))
     except Exception as e:
         logger.error(f"Could not cancel the workflow: {e}", exc_info=True)
-        client.setOutput("Message", rstring(f"Error: {e}"))
+        client.setOutput(constants.results.MESSAGE_OUTPUT,
+                         rstring(f"Error: {e}"))
+        # Show the red X in OMERO, as the other scripts do on failure.
+        raise
     finally:
         client.closeSession()
 
