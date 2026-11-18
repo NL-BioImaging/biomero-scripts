@@ -124,6 +124,10 @@ Treat every script's `VERSION` as locked to the `biomero` library version that
 the scripts require. Do not release the scripts with a different version from
 their required library release.
 
+Because of this lock, PR descriptions, the README and docs never state a
+minimum core version (such as `biomero>=X`). When a change needs an unreleased
+core change, name the core PR instead; that is what puts the scripts PR on hold.
+
 Git does not enforce this coupling yet. Before every release:
 
 1. determine the exact `biomero` release required by the script code;
