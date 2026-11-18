@@ -94,6 +94,7 @@ from biomero_schema.zarr import (
     ZarrLabelComponent,
 )
 import sys
+from typing import Any, Union
 
 logger = logging.getLogger(__name__)
 
@@ -1560,12 +1561,34 @@ def verified_plate_source(source, origin="canonical-bootstrap"):
     )})
 
 
-def upgrade_reused_canonical(conn, obj, source, source_path):
+def upgrade_reused_canonical(
+    conn: BlitzGateway,
+    obj: Any,
+    source: Union[CanonicalZarrSource, CanonicalPlateSource],
+    source_path: Path,
+) -> Union[CanonicalZarrSource, CanonicalPlateSource]:
     """Upgrade old records only when reusing the object's actual backing Zarr.
 
     A cached export is not authoritative merely because it is on managed disk.
     Require the existing import provenance to identify the same backing store.
     Update trust metadata in place without copying or rehashing pixel data.
+    A sidecar that cannot be read or written only costs the cache: the source
+    is then returned as it was.
+
+    Args:
+        conn (BlitzGateway): OMERO connection of the requesting user.
+        obj (Any): The OMERO Image or Plate wrapper that is reused.
+        source (Union[CanonicalZarrSource, CanonicalPlateSource]): The
+            canonical source registered for the object.
+        source_path (Path): The store the object reuses.
+
+    Returns:
+        Union[CanonicalZarrSource, CanonicalPlateSource]: The upgraded or
+            cached source, or ``source`` itself when it cannot be upgraded.
+
+    Raises:
+        ValueError: If the object has more than one canonical registration to
+            refresh.
     """
     is_plate = isinstance(source, CanonicalPlateSource)
     try:
@@ -1575,8 +1598,8 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
         # A corrupt, uncommitted or unreachable sidecar only costs the cache:
         # the workflow continues as if there were none.
         logger.warning(
-            "Ignoring the canonical sidecar of %s (%s); treating it as "
-            "absent and continuing", source_path, exc)
+            f"Ignoring the canonical sidecar of {source_path} ({exc}); "
+            f"treating it as absent and continuing")
         cached = None
     if cached is not None and type(cached) is type(source):
         old_sources = ([i.source for i in source.images] if is_plate else [source])
@@ -1613,9 +1636,9 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
         # stays as it was and the input is reused unverified, as when the
         # backing store cannot be confirmed above.
         logger.warning(
-            "Could not write the canonical sidecar for %s (%s); keeping the "
-            "existing registration unverified and continuing", source_path,
-            exc)
+            f"Could not write the canonical sidecar for {source_path} "
+            f"({exc}); keeping the existing registration unverified and "
+            f"continuing")
         return source
     if is_plate:
         attach_canonical_plate_source(conn, obj, upgraded)
