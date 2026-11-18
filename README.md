@@ -99,10 +99,10 @@ attachments skip those directories and report the skipped count.
 ## Storage provenance and repair
 
 Shallow-result provenance uses the shared schema-2 manifest parser from
-`biomero-schema>=0.3.0b3,<0.4`. Lazy comparison metadata and source-linked
-decisions require `biomero-shallower>=0.1.0b9,<0.2` in the worker and matching
-importer environment. Use the matching published helper image for remote
-shallowing; NL-BIOMERO supplies the coordinated package and image versions.
+`biomero-schema`. Lazy comparison metadata and source-linked decisions need a
+`biomero-shallower` that supports them, in the worker and the matching importer
+environment. Use the matching published helper image for remote shallowing;
+NL-BIOMERO supplies the coordinated package and image versions.
 Plate annotations collect the source identities from the manifest's image
 bindings; Image annotations select their own image node. Both v2 and v3
 interchange profiles are read without converting the store. Unsupported
@@ -220,7 +220,7 @@ Historical imports are inspected only when explicitly retried.
 This protects image registration; it does not make optional ROI creation and
 attachment postprocessing exactly-once operations.
 
-Use `biomero-importer>=1.5.0b14`: it keeps the canonical-source sidecars under
+Use a BIOMERO.importer that keeps the canonical-source sidecars under
 BIOMERO's own `.processed` folders, which the image transfer and the shallow
 storage migration read through the importer's helpers. It also checks database
 write acknowledgement and recovers interrupted shallow transactions before

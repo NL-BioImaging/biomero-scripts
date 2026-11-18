@@ -5,7 +5,7 @@
 #                                   & Open Microscopy Environment.
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
-# Use is subject to license terms supplied in LICENSE.txt
+# Licensed under the GNU General Public License version 2; see LICENSE.
 
 """
 BIOMERO CellPose Segmentation Workflow Script
