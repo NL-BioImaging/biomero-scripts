@@ -49,7 +49,7 @@ Authors:
     OMERO Team (University of Dundee)
 
 License:
-    GPL v2+ (see LICENSE.txt)
+    GNU GPL version 2 (see LICENSE)
 """
 
 from __future__ import print_function

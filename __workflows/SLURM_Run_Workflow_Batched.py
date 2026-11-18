@@ -37,7 +37,7 @@ by adding batch processing capabilities.
 
 Authors: Torec Luik, OMERO Team
 Institution: Amsterdam UMC, University of Dundee
-License: GPL v2+ (see LICENSE.txt)
+License: GNU GPL version 2 (see LICENSE)
 """
 
 from __future__ import print_function
