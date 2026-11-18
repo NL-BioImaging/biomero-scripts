@@ -901,9 +901,10 @@ def find_output_plates_for_batch(conn, input_plate_ids):
         join ma.details.creationEvent ev
         join ma.mapValue mvName
         join ma.mapValue mv
-        where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
+        where ma.ns = 'biomero/workflow/task/{constants.IMAGE_IMPORT_SCRIPT}'
           and mvName.name = 'Name'
-          and (mvName.value = 'SLURM_Get_Results.py' or mvName.value = 'SLURM_Import_Results.py')
+          and (mvName.value = '{constants.IMAGE_IMPORT_SCRIPT}'
+               or mvName.value = '{constants.IMPORT_RESULTS_SCRIPT}')
           and mv.name = 'Input_Data'
           and ev.time > :cutoff
           and ({like_clause})
@@ -969,9 +970,10 @@ def find_output_images_for_batch(conn, input_image_ids):
         join ma.details.creationEvent ev
         join ma.mapValue mvName
         join ma.mapValue mv
-        where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
+        where ma.ns = 'biomero/workflow/task/{constants.IMAGE_IMPORT_SCRIPT}'
           and mvName.name = 'Name'
-          and (mvName.value = 'SLURM_Get_Results.py' or mvName.value = 'SLURM_Import_Results.py')
+          and (mvName.value = '{constants.IMAGE_IMPORT_SCRIPT}'
+               or mvName.value = '{constants.IMPORT_RESULTS_SCRIPT}')
           and mv.name = 'Input_Data'
           and ev.time > :cutoff
           and ({like_clause})

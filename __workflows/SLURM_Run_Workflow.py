@@ -82,6 +82,7 @@ from typing import (Any, Callable, ContextManager, Dict, List, Optional,
 import logging
 import time as timesleep
 from paramiko import SSHException
+from biomero_schema.zarr import CanonicalInput
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ SHALLOW_ZARR_ENABLED = (
     os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
 )
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
-    from biomero_schema.zarr import CanonicalInput, TRANSFER_INPUT_MARKER
+    from biomero_schema.zarr import TRANSFER_INPUT_MARKER
 # The transfer writes input markers only when both are on.
 SHALLOW_ZARR_STORAGE_ENABLED = IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
 
