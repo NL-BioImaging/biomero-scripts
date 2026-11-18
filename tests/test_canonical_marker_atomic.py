@@ -18,15 +18,17 @@ SCRIPT = SOURCE_ROOT / "admin" / "BIOMERO_Migrate_Shallow_Storage.py"
 MARKER_NAME = ".biomero-canonical.json"
 
 
-def _uses_processed_folder(path):
-    """Whether the source keeps sidecars in BIOMERO folders.
+def _moves_sidecars_through_the_importer(path):
+    """Whether the source moves sidecars with the importer's helper.
 
-    Gates on the keyword the feature adds to the sidecar calls, not on log
-    text, so rewording a message fails the tests instead of skipping them.
+    Gates on the helper call the feature adds, not on log text or on keyword
+    arguments, so rewording a message fails the tests instead of skipping them.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     return any(
-        isinstance(node, ast.keyword) and node.arg == "processed_folder"
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "move_canonical_marker"
         for node in ast.walk(tree))
 
 
@@ -100,7 +102,7 @@ def test_failed_replacement_preserves_marker_and_cleans_temp_file(tmp_path):
 
 
 @pytest.mark.skipif(
-    not _uses_processed_folder(SCRIPT),
+    not _moves_sidecars_through_the_importer(SCRIPT),
     reason="sidecar location moved to BIOMERO folders in a later source",
 )
 def test_store_with_only_a_legacy_sidecar_is_rewritten_by_the_importer(tmp_path):
@@ -118,7 +120,7 @@ def test_store_with_only_a_legacy_sidecar_is_rewritten_by_the_importer(tmp_path)
     result = helpers["_write_canonical_marker"](store, source)
 
     assert result == tmp_path / "new-sidecar"
-    assert writes == [(store, source, {"processed_folder": ".processed"})]
+    assert writes == [(store, source, {})]
 
 
 def _move_store_function(move_marker):
