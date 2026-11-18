@@ -714,16 +714,34 @@ def to_5d(*arys, axes):
     return res[0] if len(res) == 1 else res
 
 
-def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
-                                   ns, across_groups=False):
+def post_provenance_map_annotation(
+    conn: BlitzGateway,
+    object_type: str,
+    object_id: int,
+    kv_dict: Dict[str, str],
+    ns: str,
+    across_groups: bool = False,
+) -> Tuple[Optional[int], str]:
     """Try the historical full view, reducing it only on an index-size error.
 
     Full values remain in the workflow CSV and event store. Keep this helper
     identical in both result scripts: OMERO downloads scripts independently.
+
+    Args:
+        conn (BlitzGateway): Open OMERO connection.
+        object_type (str): OMERO object type to annotate, such as "Image".
+        object_id (int): ID of the object to annotate.
+        kv_dict (Dict[str, str]): Key-value pairs of the full provenance view.
+        ns (str): Namespace of the MapAnnotation.
+        across_groups (bool): Whether to look for the object in all groups.
+
+    Returns:
+        Tuple[Optional[int], str]: The annotation ID (None when saving
+        failed) and the outcome ("complete", "reduced" or "failed").
     """
     import hashlib
 
-    def write(values):
+    def write(values: Dict[str, str]) -> int:
         annotation_id = ezomero.post_map_annotation(
             conn=conn, object_type=object_type, object_id=object_id,
             kv_dict=values, ns=ns, across_groups=across_groups)
@@ -2041,9 +2059,12 @@ def extract_workflow_uuid_from_log_file(
         return None
 
 
-def runScript():
-    """
-    The main entry point of the script
+def runScript() -> None:
+    """Main entry point of the script: build the UI and import the results.
+
+    Reads the script parameters from the OMERO client, retrieves the selected
+    completed job from Slurm and attaches its results to OMERO. The outcome is
+    reported through the ``Message`` output.
     """
     with SlurmClient.from_config() as slurmClient:
 

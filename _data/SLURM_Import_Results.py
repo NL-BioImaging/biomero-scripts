@@ -341,8 +341,22 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
 VERSION = "2.9.0b24"
 
 
-def load_canonical_input_snapshot(slurm_client, workflow_id):
-    """Resolve the exact workflow input snapshot from workflow tracking."""
+def load_canonical_input_snapshot(slurm_client: SlurmClient,
+                                  workflow_id: Union[str, UUID]
+                                  ) -> Optional[Any]:
+    """Resolve the exact workflow input snapshot from workflow tracking.
+
+    Args:
+        slurm_client (SlurmClient): Active SLURM client, whose tracker holds
+            the snapshot.
+        workflow_id (Union[str, UUID]): Workflow whose inputs to resolve.
+
+    Returns:
+        Optional[Any]: The workflow's ``CanonicalInputManifest``, with the
+        executed workflow's output policy when it is unambiguous; None when
+        tracking is disabled or the snapshot is missing, corrupt or
+        unreadable (the caller then matches on the returned pixel identity).
+    """
     workflow_id = UUID(str(workflow_id))
     if not slurm_client.track_workflows:
         logger.info(
@@ -3547,16 +3561,34 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
     return add_object_annotations(conn, slurmClient, "Image", object_id, job_id, wf_id)
 
 
-def post_provenance_map_annotation(conn, object_type, object_id, kv_dict,
-                                   ns, across_groups=False):
+def post_provenance_map_annotation(
+    conn: BlitzGateway,
+    object_type: str,
+    object_id: int,
+    kv_dict: Dict[str, str],
+    ns: str,
+    across_groups: bool = False,
+) -> Tuple[Optional[int], str]:
     """Try the historical full view, reducing it only on an index-size error.
 
     Full values remain in the workflow CSV and event store. Keep this helper
     identical in both result scripts: OMERO downloads scripts independently.
+
+    Args:
+        conn (BlitzGateway): Open OMERO connection.
+        object_type (str): OMERO object type to annotate, such as "Image".
+        object_id (int): ID of the object to annotate.
+        kv_dict (Dict[str, str]): Key-value pairs of the full provenance view.
+        ns (str): Namespace of the MapAnnotation.
+        across_groups (bool): Whether to look for the object in all groups.
+
+    Returns:
+        Tuple[Optional[int], str]: The annotation ID (None when saving
+        failed) and the outcome ("complete", "reduced" or "failed").
     """
     import hashlib
 
-    def write(values):
+    def write(values: Dict[str, str]) -> int:
         annotation_id = ezomero.post_map_annotation(
             conn=conn, object_type=object_type, object_id=object_id,
             kv_dict=values, ns=ns, across_groups=across_groups)

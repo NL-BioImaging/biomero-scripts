@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
-from typing import Any
+from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 import omero
@@ -37,7 +37,6 @@ from biomero_schema.zarr import (
 )
 from biomero_importer.utils.canonical_store import (
     CANONICAL_MARKER_NAME,
-    PROCESSED_DATA_FOLDER,
     external_canonical_marker_path,
     load_canonical_marker,
     move_canonical_marker,
@@ -306,9 +305,28 @@ def _bind_canonical_plate_source(source, index):
 
 
 def discover_canonical_registrations(
-    conn, storage_roots, *, object_type="All", object_ids=None,
-):
-    """Load every canonical registration and its authoritative marker."""
+    conn: BlitzGateway,
+    storage_roots: Dict[str, Path],
+    *,
+    object_type: str = "All",
+    object_ids: Optional[Iterable[int]] = None,
+) -> List[Dict[str, Any]]:
+    """Load every canonical registration and its authoritative marker.
+
+    Args:
+        conn (BlitzGateway): Connection of an OMERO administrator.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        object_type (str): "Image", "Plate" or "All".
+        object_ids (Optional[Iterable[int]]): Only these object IDs; all when
+            empty.
+
+    Returns:
+        List[Dict[str, Any]]: One record per registration annotation, with
+        its values, the sidecar's state and the decoded source.
+
+    Raises:
+        ValueError: If the connection is not an administrator's.
+    """
     if not conn.isAdmin():
         raise ValueError("Canonical consolidation requires an administrator")
     kinds = ("Image", "Plate") if object_type == "All" else (object_type,)
@@ -339,8 +357,7 @@ def discover_canonical_registrations(
                     index = CanonicalPlateIndex.from_annotation_values(values)
                     path = _resolve_store_path(index.to_annotation_values(),
                                                storage_roots)
-                    marker_source = load_canonical_marker(
-                        path, processed_folder=PROCESSED_DATA_FOLDER)
+                    marker_source = load_canonical_marker(path)
                     if not isinstance(marker_source, CanonicalPlateSource):
                         raise ValueError(
                             f"Plate {ident} canonical marker is missing or invalid"
@@ -361,8 +378,7 @@ def discover_canonical_registrations(
                         f"Canonical store does not exist for annotation "
                         f"{annotation.getId()}: {path}"
                     )
-                marker = load_canonical_marker(
-                    path, processed_folder=PROCESSED_DATA_FOLDER)
+                marker = load_canonical_marker(path)
                 # Early prerelease registrations did not consistently write
                 # a sidecar for reused managed Zarrs. Apply mode repairs that
                 # omission, but a different pixel identity remains fatal.
@@ -511,8 +527,7 @@ def _canonical_marker_path(path: Path) -> Path:
         ValueError: If the store does not have exactly one marker.
     """
     internal = path / CANONICAL_MARKER_NAME
-    external = external_canonical_marker_path(
-        path, processed_folder=PROCESSED_DATA_FOLDER)
+    external = external_canonical_marker_path(path)
     markers = [candidate for candidate in (internal, external)
                if candidate.is_file()]
     if len(markers) != 1:
@@ -543,19 +558,16 @@ def _write_canonical_marker(path: Path, source: Any) -> Path:
         marker_path = _canonical_marker_path(path)
     except ValueError:
         internal = path / CANONICAL_MARKER_NAME
-        external = external_canonical_marker_path(
-            path, processed_folder=PROCESSED_DATA_FOLDER)
+        external = external_canonical_marker_path(path)
         if internal.exists() or external.exists():
             raise
-        return write_indexed_canonical_marker(
-            path, source, processed_folder=PROCESSED_DATA_FOLDER)
+        return write_indexed_canonical_marker(path, source)
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     if marker.get("state") != "committed" or "markerSchema" not in marker:
         raise ValueError(f"Canonical marker is not committed: {marker_path}")
     marker["source"] = source.to_dict()
     _write_json(marker_path, marker)
-    if load_canonical_marker(
-            path, processed_folder=PROCESSED_DATA_FOLDER) != source:
+    if load_canonical_marker(path) != source:
         raise ValueError(f"Canonical marker update did not validate: {path}")
     return marker_path
 
@@ -582,8 +594,17 @@ def _move_canonical_store(source: Path, destination: Path) -> None:
     # The sidecar is keyed by the store's location in a BIOMERO folder (or, for
     # an older beta, sits next to the store); the importer moves either one.
     try:
-        move_canonical_marker(
-            source, destination, processed_folder=PROCESSED_DATA_FOLDER)
+        moved_sidecar = move_canonical_marker(source, destination)
+        if moved_sidecar is None:
+            # The importer returns None both without a sidecar to move and
+            # when the destination already has one, which it keeps (it logs
+            # which). The caller rewrites and validates the destination
+            # marker next.
+            logger.debug(f"No canonical sidecar moved for {source}; see the "
+                         f"importer log for the reason")
+        else:
+            logger.debug(f"Moved the canonical sidecar of {source} to "
+                         f"{moved_sidecar}")
     except OSError as exc:
         try:
             destination.rename(source)
@@ -699,9 +720,30 @@ def plan_canonical_consolidation(
 
 
 def _apply_canonical_consolidation(
-    conn, plans, replacements, storage_roots, directory,
-):
-    """Apply prevalidated consolidation, deleting duplicates only at the end."""
+    conn: BlitzGateway,
+    plans: List[Dict[str, Any]],
+    replacements: Dict[str, Any],
+    storage_roots: Dict[str, Path],
+    directory: Path,
+) -> List[Dict[str, Any]]:
+    """Apply prevalidated consolidation, deleting duplicates only at the end.
+
+    Moves each selected store to its stable destination with its sidecar,
+    rebinds shallow references and OMERO annotations, and only then removes
+    the generated ``gN`` stores together with their sidecars, so no empty
+    BIOMERO sidecar folder is left behind.
+
+    Args:
+        conn (BlitzGateway): Connection of an OMERO administrator.
+        plans (List[Dict[str, Any]]): The prevalidated consolidation plans.
+        replacements (Dict[str, Any]): Managed locators to their stable
+            replacements.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        directory (Path): Backup directory for this run.
+
+    Returns:
+        List[Dict[str, Any]]: One snapshot per consolidated registration.
+    """
     if not plans:
         return []
     relevant = set(replacements)
@@ -788,8 +830,7 @@ def _apply_canonical_consolidation(
                 continue
             if path.exists():
                 shutil.rmtree(path)
-            remove_external_canonical_markers(
-                path, processed_folder=PROCESSED_DATA_FOLDER)
+            remove_external_canonical_markers(path)
     return results
 
 

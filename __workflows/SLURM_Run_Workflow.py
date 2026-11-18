@@ -73,6 +73,7 @@ from biomero.detached import detached_mode_enabled
 from biomero.eventsourcing import (Task, WorkflowCancelled,
                                    WorkflowInterrupted, WorkflowTracker,
                                    is_launcher_task)
+from biomero.metadata_views import WF_FILE_PARAMS_PREFIX, WF_PARAMS_PREFIX
 from biomero.slurm_client import SlurmJob
 from dataclasses import dataclass
 from enum import Enum
@@ -131,7 +132,20 @@ QUALITATIVE_COLOR_SCHEME = (
     "#946638",  # sepia3
     "#7961DB",  # indigo3
 )
+# The runner validates the color before any work starts, so a bad value fails
+# early; Labels2Rois validates it again for standalone runs.
 ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
+# Keys of the launcher params that only this script writes
+# (``register_detached_launcher`` via ``runScript``) and reads back
+# (``resolve_pipeline_inputs``). The Slurm-task keys of the workflow parameters
+# are core's ``WF_PARAMS_PREFIX`` and ``WF_FILE_PARAMS_PREFIX``, which the
+# metadata views also read. The params are persisted, so the values must not
+# change.
+LAUNCHER_ZIPFILE = "zipfile"
+LAUNCHER_EMAIL = "email"
+LAUNCHER_USE_ZARR_FORMAT = "use_zarr_format"
+LAUNCHER_OME_ZARR_VERSION = "ome_zarr_version"
+LAUNCHER_ROI_LABEL_PATTERN = "roi_label_pattern"
 VERSION = "2.9.0b24"
 
 
@@ -437,7 +451,10 @@ def resolve_selected_output(client) -> dict:
     return selected_output
 
 
-def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
+def resolve_pipeline_inputs(client: Any,
+                            conn: BlitzGateway,
+                            slurmClient: SlurmClient,
+                            params: Dict[str, Any]) -> Dict[str, Any]:
     """Rebuild execute_workflow_pipeline()'s arguments from a launcher task.
 
     What the launching script recorded is used as-is. Anything missing is
@@ -445,13 +462,14 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     inherit only its parent's raw inputs.
 
     Args:
-        client: Stand-in client serving the launcher task's recorded inputs.
-        conn: OMERO BlitzGateway connection for the requesting user.
-        slurmClient: Active SLURM client.
-        params: The launcher task's params.
+        client (Any): Stand-in client serving the launcher task's recorded
+            inputs.
+        conn (BlitzGateway): OMERO connection for the requesting user.
+        slurmClient (SlurmClient): Active SLURM client.
+        params (Dict[str, Any]): The launcher task's params.
 
     Returns:
-        dict: Keyword arguments for execute_workflow_pipeline().
+        Dict[str, Any]: Keyword arguments for execute_workflow_pipeline().
     """
     workflows = list(params.get(constants.launcher_params.WORKFLOWS) or [])
     selected_output = params.get(constants.launcher_params.SELECTED_OUTPUT)
@@ -460,8 +478,8 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     workflow_params = {}
     workflow_file_params = {}
     for name in workflows:
-        recorded = params.get(f"wf_params_{name}")
-        recorded_files = params.get(f"wf_file_params_{name}")
+        recorded = params.get(f"{WF_PARAMS_PREFIX}{name}")
+        recorded_files = params.get(f"{WF_FILE_PARAMS_PREFIX}{name}")
         if recorded is None or recorded_files is None:
             all_params = slurmClient.get_workflow_parameters(name)
             recorded = {k: v for k, v in all_params.items()
@@ -470,7 +488,7 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
                               if v['file_attachment']}
         workflow_params[name] = recorded
         workflow_file_params[name] = recorded_files
-    roi_label_pattern = params.get("roi_label_pattern")
+    roi_label_pattern = params.get(LAUNCHER_ROI_LABEL_PATTERN)
     if roi_label_pattern is None:
         descriptors = [slurmClient.generic_descriptor_from_github(name)
                        for name in workflows]
@@ -478,12 +496,12 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
             client, conn, selected_output, descriptors)
         if roi_warning:
             logger.warning(roi_warning)
-    use_zarr_format = params.get("use_zarr_format")
+    use_zarr_format = params.get(LAUNCHER_USE_ZARR_FORMAT)
     if use_zarr_format is None:
         use_zarr_format = unwrap(client.getInput(
             constants.workflow.USE_ZARR_FORMAT))
     ome_zarr_version = (
-        params.get("ome_zarr_version")
+        params.get(LAUNCHER_OME_ZARR_VERSION)
         or unwrap(client.getInput(constants.transfer.OME_VERSION))
         or constants.transfer.OME_ZARR_VERSION_0_4
     ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
@@ -492,17 +510,17 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
         constants.launcher_params.SELECTED_OUTPUT: selected_output,
         "_workflow_params": workflow_params,
         "_workflow_file_params": workflow_file_params,
-        "email": params.get("email") or getOmeroEmail(client, conn),
+        LAUNCHER_EMAIL: params.get(LAUNCHER_EMAIL) or getOmeroEmail(client, conn),
         constants.launcher_params.GROUP: (
             params.get(constants.launcher_params.GROUP)
             or conn.getGroupFromContext().id),
-        "use_zarr_format": use_zarr_format,
-        "ome_zarr_version": ome_zarr_version,
-        "roi_label_pattern": roi_label_pattern or "",
+        LAUNCHER_USE_ZARR_FORMAT: use_zarr_format,
+        LAUNCHER_OME_ZARR_VERSION: ome_zarr_version,
+        LAUNCHER_ROI_LABEL_PATTERN: roi_label_pattern or "",
         constants.launcher_params.OUTPUT_SETTINGS: (
             params.get(constants.launcher_params.OUTPUT_SETTINGS)
             or build_output_settings(client, selected_output)),
-        "zipfile": params.get("zipfile"),
+        LAUNCHER_ZIPFILE: params.get(LAUNCHER_ZIPFILE),
     }
 
 
@@ -803,7 +821,7 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
                 "will be shallowed remotely on Slurm")
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for the SLURM workflow execution script.
 
     Orchestrates the complete workflow lifecycle including SLURM client setup,
@@ -1230,17 +1248,17 @@ def runScript():
                 register_detached_launcher(
                     client, slurmClient, wf_id, constants.RUN_WF_SCRIPT,
                     selected_workflow_names,
-                    {"zipfile": createFileName(client, conn, wf_id),
-                     "email": email,
+                    {LAUNCHER_ZIPFILE: createFileName(client, conn, wf_id),
+                     LAUNCHER_EMAIL: email,
                      constants.launcher_params.GROUP: group,
-                     "use_zarr_format": use_zarr_format,
-                     "ome_zarr_version": ome_zarr_version,
-                     "roi_label_pattern": roi_label_pattern,
+                     LAUNCHER_USE_ZARR_FORMAT: use_zarr_format,
+                     LAUNCHER_OME_ZARR_VERSION: ome_zarr_version,
+                     LAUNCHER_ROI_LABEL_PATTERN: roi_label_pattern,
                      constants.launcher_params.SELECTED_OUTPUT: selected_output,
                      constants.launcher_params.OUTPUT_SETTINGS: output_settings,
-                     **{f"wf_params_{name}": _workflow_params[name]
+                     **{f"{WF_PARAMS_PREFIX}{name}": _workflow_params[name]
                         for name in selected_workflow_names},
-                     **{f"wf_file_params_{name}": _workflow_file_params[name]
+                     **{f"{WF_FILE_PARAMS_PREFIX}{name}": _workflow_file_params[name]
                         for name in selected_workflow_names}})
                 UI_messages += (
                     "Your workflow is queued and runs in the background: you "
@@ -1482,8 +1500,10 @@ def cancel_workflow_run(slurmClient: SlurmClient,
     Every task of the workflow that did not finish is failed with the reason,
     whatever stage it belongs to; the Slurm jobs to cancel are the ones those
     tasks submitted. The launcher task is bookkeeping and is left alone. When
-    the jobs cannot be cancelled (or the tasks cannot be read) the workflow is
-    failed anyway, and the failure reason says which jobs to cancel by hand.
+    the jobs cannot be cancelled the workflow and its tasks are failed anyway,
+    and the failure reason says which jobs to cancel by hand. When the tasks
+    cannot be read, the workflow is failed and the reason says that its jobs
+    are unknown.
 
     Args:
         slurmClient (SlurmClient): Active SLURM client.
@@ -1496,17 +1516,26 @@ def cancel_workflow_run(slurmClient: SlurmClient,
         str: The UI messages, ending with the reason.
     """
     tracker = slurmClient.workflowTracker
-    open_tasks = []
-    slurm_job_ids = []
     try:
         open_tasks = [task for task in slurmClient.get_workflow_tasks(wf_id)
                       if not (task.completed or task.failed)
                       and not is_launcher_task(task)]
-        slurm_job_ids = [
-            job_id for task in open_tasks
-            for job_id in SlurmClient.positive_job_ids(task.job_ids)]
-        logger.info(f"{reason}; cancelling Slurm jobs {slurm_job_ids} and "
-                    f"{len(open_tasks)} open tasks")
+    except Exception as e:
+        # The workflow is failed anyway, but its open tasks and Slurm jobs
+        # are unknown: only the operator can look for them.
+        logger.error(f"Could not read the tasks of workflow {wf_id}: {e}",
+                     exc_info=True)
+        reason += (f" The tasks and Slurm jobs of workflow {wf_id} are "
+                   f"unknown because its tasks could not be read; check "
+                   f"Slurm for its jobs and cancel them manually.")
+        tracker.fail_workflow(wf_id, reason)
+        return f"{UI_messages}{reason}"
+    slurm_job_ids = [
+        job_id for task in open_tasks
+        for job_id in SlurmClient.positive_job_ids(task.job_ids)]
+    logger.info(f"{reason}; cancelling Slurm jobs {slurm_job_ids} and "
+                f"{len(open_tasks)} open tasks")
+    try:
         slurmClient.cancel_slurm_jobs(slurm_job_ids)
     except Exception as e:
         # The tasks and the workflow are failed anyway; the jobs may still be
@@ -2449,7 +2478,7 @@ def convertDataOnSLURM(client: omscripts.client,
                        zipfile: str,
                        source_format: str,
                        target_format: str,
-                       wf_id: UUID):
+                       wf_id: UUID) -> Tuple[Dict[str, Any], UUID]:
     """
     Convert data format on SLURM cluster using the remote conversion script.
 
@@ -2465,6 +2494,10 @@ def convertDataOnSLURM(client: omscripts.client,
         source_format: Input data format (e.g., 'zarr', 'tiff')
         target_format: Desired output format (e.g., 'zarr', 'tiff')
         wf_id: Workflow UUID for tracking
+
+    Returns:
+        tuple: (conversion_result_dict, task_id) containing script results
+        and the ID of the conversion task
 
     Raises:
         Exception: If conversion script not found or conversion fails
@@ -2623,7 +2656,8 @@ def exportImageToSLURM(client: omscripts.client,
                        zipfile: str,
                        wf_id: UUID,
                        ome_zarr_version: str,
-                       reconstruct_shallow_zarr: bool = True):
+                       reconstruct_shallow_zarr: bool = True
+                       ) -> Tuple[Dict[str, Any], UUID]:
     """
     Export selected OMERO data to SLURM cluster for processing.
 
