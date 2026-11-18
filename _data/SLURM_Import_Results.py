@@ -5,7 +5,7 @@
 #                                   & Open Microscopy Environment.
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
-# Use is subject to license terms supplied in LICENSE.txt
+# Licensed under the GNU General Public License version 2; see LICENSE.
 
 """
 BIOMERO SLURM Results Import Script
@@ -5229,7 +5229,7 @@ def runScript() -> None:
             scripts.String(constants.results.ROI_COLOR,
                            optional=True,
                            grouping="09.95",
-                           description="Optional #RRGGBB ROI color override. Leave empty to derive a stable color from the workflow UUID.",
+                           description="Optional #RRGGBB ROI color. The workflow runner resolves it before starting this script; if left empty, the ROI script uses its own default color.",
                            default=""),
             scripts.Bool(constants.results.ROI_CLEAR_EXISTING,
                          optional=True,

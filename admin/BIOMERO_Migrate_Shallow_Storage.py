@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # Copyright 2026 Torec Luik, Amsterdam UMC
-# Use is subject to license terms supplied in LICENSE.txt
+# Licensed under the GNU General Public License version 2; see LICENSE.
 #
 """Administratively migrate BIOMERO shallow-storage contracts."""
 
