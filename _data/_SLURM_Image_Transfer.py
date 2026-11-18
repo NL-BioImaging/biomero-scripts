@@ -48,7 +48,7 @@ Supported Formats:
 
 Authors: Torec Luik, William Moore, OME Team
 Institutions: Amsterdam UMC, University of Dundee
-License: GPL v2+ (see LICENSE.txt)
+License: GNU GPL version 2 (see LICENSE)
 """
 
 import shutil

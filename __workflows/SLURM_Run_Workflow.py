@@ -49,7 +49,7 @@ Authors:
     OMERO Team (University of Dundee)
 
 License:
-    GPL v2+ (see LICENSE.txt)
+    GNU GPL version 2 (see LICENSE)
 """
 
 from __future__ import print_function
@@ -391,7 +391,7 @@ def register_detached_launcher(client: Any,
     """
     launcher_params = {**(client.getInputs(unwrap=True) or {}),
                        **derived_params,
-                       "workflows": list(selected_workflow_names)}
+                       constants.launcher_params.WORKFLOWS: list(selected_workflow_names)}
     task_id = slurmClient.workflowTracker.add_launcher_task(
         wf_id, task_name, VERSION,
         launcher_params.get(constants.transfer.IDS), launcher_params)
@@ -453,8 +453,8 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     Returns:
         dict: Keyword arguments for execute_workflow_pipeline().
     """
-    workflows = list(params.get("workflows") or [])
-    selected_output = params.get("selected_output")
+    workflows = list(params.get(constants.launcher_params.WORKFLOWS) or [])
+    selected_output = params.get(constants.launcher_params.SELECTED_OUTPUT)
     if selected_output is None:
         selected_output = resolve_selected_output(client)
     workflow_params = {}
@@ -488,17 +488,20 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
         or constants.transfer.OME_ZARR_VERSION_0_4
     ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
     return {
-        "workflows": workflows,
-        "selected_output": selected_output,
+        constants.launcher_params.WORKFLOWS: workflows,
+        constants.launcher_params.SELECTED_OUTPUT: selected_output,
         "_workflow_params": workflow_params,
         "_workflow_file_params": workflow_file_params,
         "email": params.get("email") or getOmeroEmail(client, conn),
-        "group": params.get("group") or conn.getGroupFromContext().id,
+        constants.launcher_params.GROUP: (
+            params.get(constants.launcher_params.GROUP)
+            or conn.getGroupFromContext().id),
         "use_zarr_format": use_zarr_format,
         "ome_zarr_version": ome_zarr_version,
         "roi_label_pattern": roi_label_pattern or "",
-        "output_settings": params.get("output_settings")
-        or build_output_settings(client, selected_output),
+        constants.launcher_params.OUTPUT_SETTINGS: (
+            params.get(constants.launcher_params.OUTPUT_SETTINGS)
+            or build_output_settings(client, selected_output)),
         "zipfile": params.get("zipfile"),
     }
 
@@ -1229,12 +1232,12 @@ def runScript():
                     selected_workflow_names,
                     {"zipfile": createFileName(client, conn, wf_id),
                      "email": email,
-                     "group": group,
+                     constants.launcher_params.GROUP: group,
                      "use_zarr_format": use_zarr_format,
                      "ome_zarr_version": ome_zarr_version,
                      "roi_label_pattern": roi_label_pattern,
-                     "selected_output": selected_output,
-                     "output_settings": output_settings,
+                     constants.launcher_params.SELECTED_OUTPUT: selected_output,
+                     constants.launcher_params.OUTPUT_SETTINGS: output_settings,
                      **{f"wf_params_{name}": _workflow_params[name]
                         for name in selected_workflow_names},
                      **{f"wf_file_params_{name}": _workflow_file_params[name]

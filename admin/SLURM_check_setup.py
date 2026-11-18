@@ -43,7 +43,7 @@ and monitor the BIOMERO-SLURM integration setup.
 
 Authors: Torec Luik, OMERO Team
 Institution: Amsterdam UMC, University of Dundee
-License: GPL v2+ (see LICENSE.txt)
+License: GNU GPL version 2 (see LICENSE)
 """
 
 import omero
