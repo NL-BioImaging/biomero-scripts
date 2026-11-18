@@ -102,7 +102,8 @@ def test_batched_launcher_preserves_parameter_for_child_resolution():
     tree = ast.parse(path.read_text(encoding="utf-8"))
     base_inputs = next(value for node in ast.walk(tree) if isinstance(node, ast.Dict)
                        for key, value in zip(node.keys, node.values)
-                       if isinstance(key, ast.Constant) and key.value == "base_inputs")
+                       if ast.unparse(key) in ("'base_inputs'",
+                                               "constants.launcher_params.BASE_INPUTS"))
     raw = {"Skip_Original_Pixel_Comparison": SimpleNamespace(val=True)}
     recorded = eval(compile(ast.Expression(base_inputs), str(path), "eval"), {
         "inputs": raw, "unwrap": lambda value: value.val})
