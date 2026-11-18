@@ -123,6 +123,8 @@ QUALITATIVE_COLOR_SCHEME = (
     "#946638",  # sepia3
     "#7961DB",  # indigo3
 )
+# The runner validates the color before any work starts, so a bad value fails
+# early; Labels2Rois validates it again for standalone runs.
 ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
 VERSION = "2.9.0b24"
 
