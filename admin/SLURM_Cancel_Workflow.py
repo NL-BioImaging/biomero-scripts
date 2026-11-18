@@ -6,7 +6,8 @@
 #
 """Ask a running BIOMERO workflow to cancel.
 
-Records a cancel request on the workflow (``WorkflowTracker.request_workflow_cancel``).
+Records a cancel request on the workflow
+(``WorkflowTracker.request_workflow_cancel``).
 Whoever executes the workflow, the detached supervisor or the inline script,
 sees the request at its next step, cancels the Slurm jobs of the workflow and
 marks the workflow FAILED with the reason. Detached runs have no OMERO script
@@ -36,11 +37,15 @@ VERSION = "2.9.0b24"
 logger = logging.getLogger(__name__)
 
 
-def request_cancel(tracker, workflow_id, requester_id, is_admin, reason):
+def request_cancel(tracker: WorkflowTracker,
+                   workflow_id: UUID,
+                   requester_id: int,
+                   is_admin: bool,
+                   reason: str) -> str:
     """Record a cancel request, if the requester may cancel this workflow.
 
     Args:
-        tracker: WorkflowTracker holding the workflow.
+        tracker (WorkflowTracker): Tracker holding the workflow.
         workflow_id (UUID): The workflow to cancel.
         requester_id (int): OMERO user ID of whoever asks.
         is_admin (bool): Whether that user is an OMERO administrator.
@@ -77,16 +82,21 @@ def request_cancel(tracker, workflow_id, requester_id, is_admin, reason):
             f"workflows that run inline, not detached, do not honour cancel.)")
 
 
-def runScript():
-    """Main entry point: cancel the workflow named in the inputs."""
+def runScript() -> None:
+    """Main entry point: cancel the workflow named in the inputs.
+
+    Reads the workflow ID and reason from the script inputs and sets the
+    ``Message`` output to the outcome, or to the error that stopped the
+    request. Errors are reported to the user, not raised.
+    """
     client = omscripts.client(
-        'Cancel BIOMERO Workflow',
-        '''Cancels a running BIOMERO workflow, including detached ones.
+        "Cancel BIOMERO Workflow",
+        """Cancels a running BIOMERO workflow, including detached ones.
 
         The workflow stops at its next step, its Slurm jobs are cancelled and
         it is marked FAILED with the reason. Only the workflow's owner or an
         OMERO administrator can cancel it.
-        ''',
+        """,
         omscripts.String(_WORKFLOW_ID, grouping="01", optional=False,
                          description="UUID of the workflow, as shown in the "
                                      "BIOMERO workflow overview."),
@@ -97,7 +107,7 @@ def runScript():
         version=VERSION,
         authors=["Torec Luik"],
         institutions=["Amsterdam UMC"],
-        contact='t.t.luik@amsterdamumc.nl',
+        contact="t.t.luik@amsterdamumc.nl",
         authorsInstitutions=[[1]]
     )
     try:
@@ -117,9 +127,9 @@ def runScript():
         client.closeSession()
 
 
-if __name__ == '__main__':
-    OMERODIR = os.environ.get('OMERODIR', '/opt/omero/server/OMERO.server')
-    LOGDIR = os.path.join(OMERODIR, 'var', 'log')
+if __name__ == "__main__":
+    OMERODIR = os.environ.get("OMERODIR", "/opt/omero/server/OMERO.server")
+    LOGDIR = os.path.join(OMERODIR, "var", "log")
     LOGFORMAT = "%(asctime)s %(levelname)-5.5s [%(name)40s] " \
                 "[%(process)d] (%(threadName)-10s) %(message)s"
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -129,7 +139,7 @@ if __name__ == '__main__':
                         handlers=[
                             stream_handler,
                             logging.handlers.RotatingFileHandler(
-                                os.path.join(LOGDIR, 'biomero.log'),
+                                os.path.join(LOGDIR, "biomero.log"),
                                 maxBytes=500000000, backupCount=9)
                         ])
     runScript()
