@@ -58,7 +58,6 @@ import os
 from pathlib import Path
 import json
 import re
-from typing import Any, Callable, ContextManager, Optional, Union
 from uuid import UUID, uuid4
 import omero
 from omero.grid import JobParams
@@ -70,6 +69,16 @@ import omero.scripts as omscripts
 import datetime
 import inspect
 from biomero import SlurmClient, constants, ssh_recovery
+from biomero.detached import detached_mode_enabled
+from biomero.eventsourcing import (Task, WorkflowCancelled,
+                                   WorkflowInterrupted, WorkflowTracker,
+                                   is_launcher_task)
+from biomero.metadata_views import WF_FILE_PARAMS_PREFIX, WF_PARAMS_PREFIX
+from biomero.slurm_client import SlurmJob
+from dataclasses import dataclass
+from enum import Enum
+from typing import (Any, Callable, ContextManager, Dict, List, Optional,
+                    Tuple, Union)
 import logging
 import time as timesleep
 from paramiko import SSHException
@@ -126,6 +135,17 @@ QUALITATIVE_COLOR_SCHEME = (
 # The runner validates the color before any work starts, so a bad value fails
 # early; Labels2Rois validates it again for standalone runs.
 ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
+# Keys of the launcher params that only this script writes
+# (``register_detached_launcher`` via ``runScript``) and reads back
+# (``resolve_pipeline_inputs``). The Slurm-task keys of the workflow parameters
+# are core's ``WF_PARAMS_PREFIX`` and ``WF_FILE_PARAMS_PREFIX``, which the
+# metadata views also read. The params are persisted, so the values must not
+# change.
+LAUNCHER_ZIPFILE = "zipfile"
+LAUNCHER_EMAIL = "email"
+LAUNCHER_USE_ZARR_FORMAT = "use_zarr_format"
+LAUNCHER_OME_ZARR_VERSION = "ome_zarr_version"
+LAUNCHER_ROI_LABEL_PATTERN = "roi_label_pattern"
 VERSION = "2.9.0b24"
 
 
@@ -334,19 +354,9 @@ def record_canonical_input_snapshot(
 #
 # Detached mode is opt-in because it needs that supervisor to be present: on a
 # deployment with a stock processor the launcher task would never be executed.
-# Detached mode needs a biomero that ships the launcher contract; without it
-# this script simply runs the workflow inline, as it always did.
-try:
-    from biomero import detached
-except ImportError:  # pragma: no cover - older biomero release
-    detached = None
-    logger.info("Installed biomero has no detached support; "
-                "workflows run inside the calling session.")
-
-
-def detached_mode_enabled() -> bool:
-    """Whether to queue this run for the supervisor instead of running it."""
-    return detached is not None and detached.detached_mode_enabled()
+# Core provides the mechanisms (the launcher marker, the atomic claim, the
+# cancel request); what a launcher records and how a run resumes is decided
+# here, in this script.
 
 
 # The detached runner cannot use omero.scripts.ProcessCallbackI: it has no
@@ -360,6 +370,46 @@ def run_omero_script(client, svc, script_id, inputs, **kwargs):
     """Run a sub-script through the runner this process was given."""
     runner = SCRIPT_RUNNER or runOMEROScript
     return runner(client, svc, script_id, inputs, **kwargs)
+
+
+def register_detached_launcher(client: Any,
+                               slurmClient: SlurmClient,
+                               wf_id: UUID,
+                               task_name: str,
+                               selected_workflow_names: List[str],
+                               derived_params: Dict[str, Any]) -> UUID:
+    """Record everything a detached run needs, as a launcher task.
+
+    The task's params are the hand-over to the supervisor: every input of this
+    script (so the pipeline can read them back through a stand-in client) plus
+    the values the script derived from them. They stay in the event store with
+    the workflow, which anyone who can read the event store can read anyway.
+
+    Args:
+        client (Any): OMERO script client (or a stand-in) whose inputs are
+            recorded.
+        slurmClient (SlurmClient): Active SLURM client, whose tracker records
+            the task.
+        wf_id (UUID): Workflow the launcher belongs to.
+        task_name (str): Name of the launching script, from
+            constants.LAUNCHER_TASK_NAMES.
+        selected_workflow_names (List[str]): Workflows the user actually
+            chose.
+        derived_params (Dict[str, Any]): Derived values the pipeline needs
+            (zipfile, group, ...).
+
+    Returns:
+        UUID: The launcher task ID.
+    """
+    launcher_params = {**(client.getInputs(unwrap=True) or {}),
+                       **derived_params,
+                       constants.launcher_params.WORKFLOWS: list(selected_workflow_names)}
+    task_id = slurmClient.workflowTracker.add_launcher_task(
+        wf_id, task_name, VERSION,
+        launcher_params.get(constants.transfer.IDS), launcher_params)
+    logger.info(f"Queued detached workflow {wf_id} (launcher task {task_id}) "
+                f"for {list(selected_workflow_names)}")
+    return task_id
 
 
 def resolve_selected_output(client) -> dict:
@@ -399,7 +449,10 @@ def resolve_selected_output(client) -> dict:
     return selected_output
 
 
-def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
+def resolve_pipeline_inputs(client: Any,
+                            conn: BlitzGateway,
+                            slurmClient: SlurmClient,
+                            params: Dict[str, Any]) -> Dict[str, Any]:
     """Rebuild execute_workflow_pipeline()'s arguments from a launcher task.
 
     What the launching script recorded is used as-is. Anything missing is
@@ -407,23 +460,24 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
     inherit only its parent's raw inputs.
 
     Args:
-        client: Stand-in client serving the launcher task's recorded inputs.
-        conn: OMERO BlitzGateway connection for the requesting user.
-        slurmClient: Active SLURM client.
-        params: The launcher task's params.
+        client (Any): Stand-in client serving the launcher task's recorded
+            inputs.
+        conn (BlitzGateway): OMERO connection for the requesting user.
+        slurmClient (SlurmClient): Active SLURM client.
+        params (Dict[str, Any]): The launcher task's params.
 
     Returns:
-        dict: Keyword arguments for execute_workflow_pipeline().
+        Dict[str, Any]: Keyword arguments for execute_workflow_pipeline().
     """
-    workflows = list(params.get("workflows") or [])
-    selected_output = params.get("selected_output")
+    workflows = list(params.get(constants.launcher_params.WORKFLOWS) or [])
+    selected_output = params.get(constants.launcher_params.SELECTED_OUTPUT)
     if selected_output is None:
         selected_output = resolve_selected_output(client)
     workflow_params = {}
     workflow_file_params = {}
     for name in workflows:
-        recorded = params.get(f"wf_params_{name}")
-        recorded_files = params.get(f"wf_file_params_{name}")
+        recorded = params.get(f"{WF_PARAMS_PREFIX}{name}")
+        recorded_files = params.get(f"{WF_FILE_PARAMS_PREFIX}{name}")
         if recorded is None or recorded_files is None:
             all_params = slurmClient.get_workflow_parameters(name)
             recorded = {k: v for k, v in all_params.items()
@@ -432,7 +486,7 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
                               if v['file_attachment']}
         workflow_params[name] = recorded
         workflow_file_params[name] = recorded_files
-    roi_label_pattern = params.get("roi_label_pattern")
+    roi_label_pattern = params.get(LAUNCHER_ROI_LABEL_PATTERN)
     if roi_label_pattern is None:
         descriptors = [slurmClient.generic_descriptor_from_github(name)
                        for name in workflows]
@@ -440,28 +494,31 @@ def resolve_pipeline_inputs(client, conn, slurmClient, params) -> dict:
             client, conn, selected_output, descriptors)
         if roi_warning:
             logger.warning(roi_warning)
-    use_zarr_format = params.get("use_zarr_format")
+    use_zarr_format = params.get(LAUNCHER_USE_ZARR_FORMAT)
     if use_zarr_format is None:
         use_zarr_format = unwrap(client.getInput(
             constants.workflow.USE_ZARR_FORMAT))
     ome_zarr_version = (
-        params.get("ome_zarr_version")
+        params.get(LAUNCHER_OME_ZARR_VERSION)
         or unwrap(client.getInput(constants.transfer.OME_VERSION))
         or constants.transfer.OME_ZARR_VERSION_0_4
     ) if use_zarr_format else constants.transfer.OME_ZARR_VERSION_0_4
     return {
-        "workflows": workflows,
-        "selected_output": selected_output,
+        constants.launcher_params.WORKFLOWS: workflows,
+        constants.launcher_params.SELECTED_OUTPUT: selected_output,
         "_workflow_params": workflow_params,
         "_workflow_file_params": workflow_file_params,
-        "email": params.get("email") or getOmeroEmail(client, conn),
-        "group": params.get("group") or conn.getGroupFromContext().id,
-        "use_zarr_format": use_zarr_format,
-        "ome_zarr_version": ome_zarr_version,
-        "roi_label_pattern": roi_label_pattern or "",
-        "output_settings": params.get("output_settings")
-        or build_output_settings(client, selected_output),
-        "zipfile": params.get("zipfile"),
+        LAUNCHER_EMAIL: params.get(LAUNCHER_EMAIL) or getOmeroEmail(client, conn),
+        constants.launcher_params.GROUP: (
+            params.get(constants.launcher_params.GROUP)
+            or conn.getGroupFromContext().id),
+        LAUNCHER_USE_ZARR_FORMAT: use_zarr_format,
+        LAUNCHER_OME_ZARR_VERSION: ome_zarr_version,
+        LAUNCHER_ROI_LABEL_PATTERN: roi_label_pattern or "",
+        constants.launcher_params.OUTPUT_SETTINGS: (
+            params.get(constants.launcher_params.OUTPUT_SETTINGS)
+            or build_output_settings(client, selected_output)),
+        LAUNCHER_ZIPFILE: params.get(LAUNCHER_ZIPFILE),
     }
 
 
@@ -762,7 +819,7 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
                 "will be shallowed remotely on Slurm")
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for the SLURM workflow execution script.
 
     Orchestrates the complete workflow lifecycle including SLURM client setup,
@@ -1184,20 +1241,20 @@ def runScript():
             if detached_mode_enabled():
                 # Record the run and hand it to the supervisor, so the user is
                 # not kept waiting on transfer, Slurm and import.
-                detached.register_detached_launcher(
-                    client, slurmClient.workflowTracker, wf_id,
-                    constants.RUN_WF_SCRIPT, VERSION, selected_workflow_names,
-                    {"zipfile": createFileName(client, conn, wf_id),
-                     "email": email,
-                     "group": group,
-                     "use_zarr_format": use_zarr_format,
-                     "ome_zarr_version": ome_zarr_version,
-                     "roi_label_pattern": roi_label_pattern,
-                     "selected_output": selected_output,
-                     "output_settings": output_settings,
-                     **{f"wf_params_{name}": _workflow_params[name]
+                register_detached_launcher(
+                    client, slurmClient, wf_id, constants.RUN_WF_SCRIPT,
+                    selected_workflow_names,
+                    {LAUNCHER_ZIPFILE: createFileName(client, conn, wf_id),
+                     LAUNCHER_EMAIL: email,
+                     constants.launcher_params.GROUP: group,
+                     LAUNCHER_USE_ZARR_FORMAT: use_zarr_format,
+                     LAUNCHER_OME_ZARR_VERSION: ome_zarr_version,
+                     LAUNCHER_ROI_LABEL_PATTERN: roi_label_pattern,
+                     constants.launcher_params.SELECTED_OUTPUT: selected_output,
+                     constants.launcher_params.OUTPUT_SETTINGS: output_settings,
+                     **{f"{WF_PARAMS_PREFIX}{name}": _workflow_params[name]
                         for name in selected_workflow_names},
-                     **{f"wf_file_params_{name}": _workflow_file_params[name]
+                     **{f"{WF_FILE_PARAMS_PREFIX}{name}": _workflow_file_params[name]
                         for name in selected_workflow_names}})
                 UI_messages += (
                     "Your workflow is queued and runs in the background: you "
@@ -1272,12 +1329,241 @@ def poll_slurm_jobs(slurm_client, job_ids):
         return {}
 
 
-def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
-                              selected_output, _workflow_params,
-                              _workflow_file_params, email, group,
-                              use_zarr_format, ome_zarr_version,
-                              roi_label_pattern="", output_settings=None,
-                              UI_messages="", zipfile=None, resume=False):
+# ---------------------------------------------------------------------------
+# Resuming an interrupted run
+# ---------------------------------------------------------------------------
+# A detached run that was interrupted (worker crash, container restart) is
+# picked up again by the supervisor, with resume=True. The history of the
+# workflow's tasks tells what already happened, so that the data is neither
+# transferred again nor a second Slurm job submitted for work that is already
+# on the cluster. Everything is read from the task aggregates, which say
+# themselves whether they completed or failed.
+
+class WorkflowResume(Enum):
+    """What to do with one workflow when an interrupted run is picked up."""
+    SUBMIT = "submit"  # nothing usable on Slurm yet
+    MONITOR = "monitor"  # a Slurm job of an earlier attempt is still good
+    ALREADY_IMPORTED = "already imported"  # its results are in OMERO
+
+
+@dataclass
+class ResumeDecision:
+    """The resume decision for one workflow, with the job to monitor.
+
+    Attributes:
+        action (WorkflowResume): What to do with the workflow.
+        slurm_job_id (Optional[int]): The Slurm job to monitor, or whose
+            results were already imported; None when submitting.
+        task_id (Optional[UUID]): The task that submitted that job; None when
+            submitting.
+    """
+    action: WorkflowResume
+    slurm_job_id: Optional[int] = None
+    task_id: Optional[UUID] = None
+
+
+def load_task_history(slurmClient: SlurmClient, wf_id: UUID) -> List[Task]:
+    """Read the tasks of a workflow to resume it.
+
+    An unreadable history is not an empty one: starting over could submit the
+    workflow's Slurm jobs a second time, so a read error fails the resume.
+
+    Args:
+        slurmClient (SlurmClient): Active SLURM client.
+        wf_id (UUID): Workflow whose tasks to read.
+
+    Returns:
+        List[Task]: The workflow's Task aggregates, in the order they were
+            added.
+
+    Raises:
+        RuntimeError: If the history cannot be read.
+    """
+    try:
+        return slurmClient.get_workflow_tasks(wf_id)
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot resume workflow {wf_id}: its task history could not be "
+            f"read, and starting over could submit its Slurm jobs again: "
+            f"{e}") from e
+
+
+def task_completed(history: List[Task], task_names: List[str]) -> bool:
+    """Whether one of the named tasks already completed in this history.
+
+    Args:
+        history (List[Task]): Task history from load_task_history().
+        task_names (List[str]): Names of the scripts that count.
+
+    Returns:
+        bool: True if a task with one of these names completed.
+    """
+    return any(task.completed and task.task_name in task_names
+               for task in history)
+
+
+def slurm_job_failed(task: Task) -> bool:
+    """Whether the Slurm job of a workflow task ended without success.
+
+    The task records the last Slurm state it saw, and is failed when the run
+    saw the job FAILED, CANCELLED or TIMEOUT. Core says which states ended
+    without success (``SlurmJob.ended_without_success``).
+
+    Args:
+        task (Task): A workflow task that submitted a Slurm job.
+
+    Returns:
+        bool: True if the task failed or its job ended without success.
+    """
+    return task.failed or SlurmJob.ended_without_success(task.status)
+
+
+def results_imported(history: List[Task],
+                     slurm_job_id: int,
+                     import_task_names: List[str]) -> bool:
+    """Whether the results of a Slurm job were already imported into OMERO.
+
+    Args:
+        history (List[Task]): Task history from load_task_history().
+        slurm_job_id (int): The Slurm job whose results are looked for.
+        import_task_names (List[str]): Names of the result-import scripts.
+
+    Returns:
+        bool: True if a completed import task recorded this job.
+    """
+    for task in history:
+        if not (task.completed and task.task_name in import_task_names):
+            continue
+        imported_job_ids = SlurmClient.positive_job_ids(
+            [(task.params or {}).get(constants.results.OUTPUT_SLURM_JOB_ID)])
+        if slurm_job_id in imported_job_ids:
+            return True
+    return False
+
+
+def decide_workflow_resume(history: List[Task],
+                           wf_name: str,
+                           import_task_names: List[str] = IMPORT_SCRIPTS
+                           ) -> ResumeDecision:
+    """Decide how to pick a workflow up again: monitor, skip or submit.
+
+    A Slurm job that FAILED, was CANCELLED or timed out is never picked up
+    again; the workflow is submitted anew.
+
+    Args:
+        history (List[Task]): Task history from load_task_history().
+        wf_name (str): Workflow whose Slurm job is wanted.
+        import_task_names (List[str]): Names of the result-import scripts.
+
+    Returns:
+        ResumeDecision: SUBMIT when no earlier attempt is still good; else
+            MONITOR with the newest good attempt's job and task, or
+            ALREADY_IMPORTED when that job's results are already in OMERO.
+    """
+    if not history:
+        logger.debug(f"Fresh run: submitting {wf_name}.")
+        return ResumeDecision(WorkflowResume.SUBMIT)
+    submitted_attempts = [task for task in history
+                          if task.task_name == wf_name
+                          and SlurmClient.positive_job_ids(task.job_ids)]
+    good_attempts = [task for task in submitted_attempts
+                     if not slurm_job_failed(task)]
+    if not good_attempts:
+        logger.info(f"Resume: {wf_name} has no usable Slurm job "
+                    f"({len(submitted_attempts)} failed earlier attempts); "
+                    f"submitting it.")
+        return ResumeDecision(WorkflowResume.SUBMIT)
+    newest_attempt = good_attempts[-1]
+    slurm_job_id = SlurmClient.positive_job_ids(newest_attempt.job_ids)[-1]
+    if results_imported(history, slurm_job_id, import_task_names):
+        logger.info(f"Resume: results of Slurm job {slurm_job_id} were "
+                    f"already imported; nothing left to do for {wf_name}.")
+        return ResumeDecision(WorkflowResume.ALREADY_IMPORTED, slurm_job_id,
+                              newest_attempt.id)
+    logger.info(f"Resume: {wf_name} is Slurm job {slurm_job_id}; "
+                f"monitoring it.")
+    return ResumeDecision(WorkflowResume.MONITOR, slurm_job_id,
+                          newest_attempt.id)
+
+
+def cancel_workflow_run(slurmClient: SlurmClient,
+                        wf_id: UUID,
+                        reason: str,
+                        UI_messages: str) -> str:
+    """Stop a cancelled run: cancel its Slurm jobs, close its tasks, fail it.
+
+    Every task of the workflow that did not finish is failed with the reason,
+    whatever stage it belongs to; the Slurm jobs to cancel are the ones those
+    tasks submitted. The launcher task is bookkeeping and is left alone. When
+    the jobs cannot be cancelled the workflow and its tasks are failed anyway,
+    and the failure reason says which jobs to cancel by hand. When the tasks
+    cannot be read, the workflow is failed and the reason says that its jobs
+    are unknown.
+
+    Args:
+        slurmClient (SlurmClient): Active SLURM client.
+        wf_id (UUID): The cancelled workflow.
+        reason (str): Why the run stopped, from the WorkflowCancelled
+            exception.
+        UI_messages (str): Messages accumulated by the run so far.
+
+    Returns:
+        str: The UI messages, ending with the reason.
+    """
+    tracker = slurmClient.workflowTracker
+    try:
+        open_tasks = [task for task in slurmClient.get_workflow_tasks(wf_id)
+                      if not (task.completed or task.failed)
+                      and not is_launcher_task(task)]
+    except Exception as e:
+        # The workflow is failed anyway, but its open tasks and Slurm jobs
+        # are unknown: only the operator can look for them.
+        logger.error(f"Could not read the tasks of workflow {wf_id}: {e}",
+                     exc_info=True)
+        reason += (f" The tasks and Slurm jobs of workflow {wf_id} are "
+                   f"unknown because its tasks could not be read; check "
+                   f"Slurm for its jobs and cancel them manually.")
+        tracker.fail_workflow(wf_id, reason)
+        return f"{UI_messages}{reason}"
+    slurm_job_ids = [
+        job_id for task in open_tasks
+        for job_id in SlurmClient.positive_job_ids(task.job_ids)]
+    logger.info(f"{reason}; cancelling Slurm jobs {slurm_job_ids} and "
+                f"{len(open_tasks)} open tasks")
+    try:
+        slurmClient.cancel_slurm_jobs(slurm_job_ids)
+    except Exception as e:
+        # The tasks and the workflow are failed anyway; the jobs may still be
+        # running on Slurm.
+        logger.error(f"Could not cancel Slurm jobs {slurm_job_ids} of "
+                     f"workflow {wf_id}: {e}", exc_info=True)
+        reason += (f" Slurm jobs {slurm_job_ids} could not be cancelled; "
+                   f"cancel them manually.")
+    for task in open_tasks:
+        tracker.fail_task(task.id, reason)
+    tracker.fail_workflow(wf_id, reason)
+    return f"{UI_messages}{reason}"
+
+
+def execute_workflow_pipeline(client: Any,
+                              conn: BlitzGateway,
+                              slurmClient: SlurmClient,
+                              wf_id: UUID,
+                              workflows: List[str],
+                              selected_output: Dict[str, Any],
+                              _workflow_params: Dict[str, Any],
+                              _workflow_file_params: Dict[str, Any],
+                              email: str,
+                              group: int,
+                              use_zarr_format: bool,
+                              ome_zarr_version: str,
+                              roi_label_pattern: str = "",
+                              output_settings: Optional[Dict[str, Any]] = None,
+                              UI_messages: str = "",
+                              zipfile: Optional[str] = None,
+                              resume: bool = False,
+                              stop_check: Optional[Callable[[], None]] = None
+                              ) -> str:
     """Run one workflow request end to end: transfer, convert, submit, import.
 
     This is the whole of the work that used to sit inline in runScript(). It is
@@ -1285,79 +1571,281 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
     the supervisor's background thread (see the detached execution notes at the
     top of this module), with a stand-in client serving the recorded inputs.
 
-    Marks the workflow DONE or FAILED in the tracker before returning.
+    Marks the workflow DONE or FAILED in the tracker before returning. When a
+    cancel was requested for the workflow
+    (WorkflowTracker.request_workflow_cancel), the run stops at the next step,
+    cancels the Slurm jobs it submitted and marks the workflow FAILED with the
+    reason.
 
     Args:
-        client: OMERO script client, or a stand-in serving recorded inputs.
-        conn: OMERO BlitzGateway connection for the requesting user.
-        slurmClient: Active SLURM client.
-        wf_id: Workflow UUID to run under (already initiated by the caller).
-        workflows: Workflow names to consider; each is run when its input is
-            set, so this may be the full configured list or just the selection.
-        selected_output: Resolved output options, as computed by runScript.
-        _workflow_params: Per-workflow parameter metadata, keyed by name.
-        _workflow_file_params: Per-workflow file-attachment params, by name.
-        email: User email for Slurm job notifications.
-        group: Caller's active concrete OMERO group ID.
-        use_zarr_format: Whether to keep data as ZARR instead of TIFF.
-        ome_zarr_version: OME-ZARR version to export.
-        roi_label_pattern: Glob for label results, from ROI validation.
-        output_settings: Resolved output choices, recorded on the Slurm task.
-        UI_messages: Messages accumulated by the caller so far.
-        zipfile: Input folder name on SLURM; generated when not given.
-        resume: Whether to pick up an interrupted run instead of starting over.
+        client (Any): OMERO script client, or a stand-in serving recorded
+            inputs.
+        conn (BlitzGateway): OMERO connection for the requesting user.
+        slurmClient (SlurmClient): Active SLURM client.
+        wf_id (UUID): Workflow UUID to run under (already initiated by the
+            caller).
+        workflows (List[str]): Workflow names to consider; each is run when
+            its input is set, so this may be the full configured list or just
+            the selection.
+        selected_output (Dict[str, Any]): Resolved output options, as computed
+            by runScript.
+        _workflow_params (Dict[str, Any]): Per-workflow parameter metadata,
+            keyed by name.
+        _workflow_file_params (Dict[str, Any]): Per-workflow file-attachment
+            params, by name.
+        email (str): User email for Slurm job notifications.
+        group (int): Caller's active concrete OMERO group ID.
+        use_zarr_format (bool): Whether to keep data as ZARR instead of TIFF.
+        ome_zarr_version (str): OME-ZARR version to export.
+        roi_label_pattern (str): Glob for label results, from ROI validation.
+        output_settings (Optional[Dict[str, Any]]): Resolved output choices,
+            recorded on the Slurm task.
+        UI_messages (str): Messages accumulated by the caller so far.
+        zipfile (Optional[str]): Input folder name on SLURM; generated when
+            not given.
+        resume (bool): Whether to pick up an interrupted run instead of
+            starting over.
+        stop_check (Optional[Callable[[], None]]): Callable that raises a
+            WorkflowInterrupted when this run must stop for a reason of the
+            caller's (for example a detached worker that lost its claim).
+            Called between the steps, next to the cancel check. Such an
+            interruption leaves the workflow and its tasks as they are and
+            propagates to the caller.
 
     Returns:
         str: The accumulated UI messages, for the script output.
-    """
-    wf_failed = False  # wf state
 
-    # A detached run that was interrupted (worker crash, container restart) is
-    # picked up again by the supervisor. Read back what already happened so we
-    # neither re-transfer the data nor submit a second Slurm job for work that
-    # is already on the cluster.
-    history = (detached.load_task_history(slurmClient.workflowTracker, wf_id)
-               if resume and detached else [])
-    logger.info('''
-    # --------------------------------------------
-    # :: 1. Push selected data to Slurm ::
-    # --------------------------------------------
-    ''')
+    Raises:
+        RuntimeError: When resuming and the task history cannot be read.
+        WorkflowInterrupted: When ``stop_check`` stops the run.
+    """
+    pipeline = PipelineRun(client, conn, slurmClient, wf_id, stop_check)
+    try:
+        return run_pipeline_stages(
+            pipeline, workflows, selected_output,
+            _workflow_params, _workflow_file_params, email, group,
+            use_zarr_format, ome_zarr_version,
+            roi_label_pattern=roi_label_pattern,
+            output_settings=output_settings, UI_messages=UI_messages,
+            zipfile=zipfile, resume=resume)
+    except WorkflowCancelled as cancelled:
+        return cancel_workflow_run(slurmClient, wf_id, str(cancelled),
+                                   UI_messages)
+
+
+@dataclass
+class PipelineRun:
+    """What every stage of one pipeline run needs, in one place.
+
+    ``stop_check`` is an optional callable of the caller that runs the
+    pipeline (the detached worker passes one): it raises a
+    ``WorkflowInterrupted`` when this run must stop, for a reason of its own,
+    such as having lost its claim on the workflow.
+
+    Attributes:
+        client (Any): OMERO script client, or a stand-in serving recorded
+            inputs.
+        conn (BlitzGateway): OMERO connection for the requesting user.
+        slurmClient (SlurmClient): Active SLURM client.
+        wf_id (UUID): Workflow UUID the run executes under.
+        stop_check (Optional[Callable[[], None]]): The caller's own check;
+            None when the caller has none.
+    """
+    client: Any
+    conn: BlitzGateway
+    slurmClient: SlurmClient
+    wf_id: UUID
+    stop_check: Optional[Callable[[], None]] = None
+
+    @property
+    def tracker(self) -> WorkflowTracker:
+        """The workflow tracker of the Slurm client."""
+        return self.slurmClient.workflowTracker
+
+    def raise_if_claim_lost(self) -> None:
+        """Stop when the caller's own check says so (a lost claim).
+
+        Used before writes that only the owner of the run may make; a cancel
+        that arrives that late does not stop them (the run completes).
+        """
+        if self.stop_check is not None:
+            self.stop_check()
+
+    def raise_if_stopped(self) -> None:
+        """Stop between steps: on the caller's own check, or on a cancel."""
+        self.raise_if_claim_lost()
+        self.tracker.raise_if_cancel_requested(self.wf_id)
+
+
+@dataclass
+class JobUpdate:
+    """What one poll of a Slurm job meant for the run.
+
+    Attributes:
+        finished (bool): Whether the job is done being tracked.
+        failed (bool): Whether the job (or its import) failed.
+        message (str): The message for the user.
+    """
+    finished: bool = False
+    failed: bool = False
+    message: str = ""
+
+
+def run_pipeline_stages(pipeline: PipelineRun,
+                        workflows: List[str],
+                        selected_output: Dict[str, Any],
+                        _workflow_params: Dict[str, Any],
+                        _workflow_file_params: Dict[str, Any],
+                        email: str,
+                        group: int,
+                        use_zarr_format: bool,
+                        ome_zarr_version: str,
+                        roi_label_pattern: str = "",
+                        output_settings: Optional[Dict[str, Any]] = None,
+                        UI_messages: str = "",
+                        zipfile: Optional[str] = None,
+                        resume: bool = False) -> str:
+    """The stages of execute_workflow_pipeline(), without the cancel handling.
+
+    Calls ``pipeline.raise_if_stopped`` between the stages and between polls;
+    the caller handles the resulting WorkflowCancelled. Takes the arguments of
+    execute_workflow_pipeline(), with its client, connection, Slurm client,
+    workflow ID and stop check grouped in ``pipeline``.
+
+    Args:
+        pipeline (PipelineRun): The client, connection, Slurm client, workflow
+            ID and stop check of this run.
+        workflows (List[str]): Workflow names to consider.
+        selected_output (Dict[str, Any]): Resolved output options.
+        _workflow_params (Dict[str, Any]): Per-workflow parameter metadata,
+            keyed by name.
+        _workflow_file_params (Dict[str, Any]): Per-workflow file-attachment
+            params, by name.
+        email (str): User email for Slurm job notifications.
+        group (int): Caller's active concrete OMERO group ID.
+        use_zarr_format (bool): Whether to keep data as ZARR instead of TIFF.
+        ome_zarr_version (str): OME-ZARR version to export.
+        roi_label_pattern (str): Glob for label results, from ROI validation.
+        output_settings (Optional[Dict[str, Any]]): Resolved output choices,
+            recorded on the Slurm task.
+        UI_messages (str): Messages accumulated by the caller so far.
+        zipfile (Optional[str]): Input folder name on SLURM; generated when
+            not given.
+        resume (bool): Whether to pick up an interrupted run.
+
+    Returns:
+        str: The accumulated UI messages, for the script output.
+
+    Raises:
+        RuntimeError: When resuming and the task history cannot be read.
+        WorkflowCancelled: When a cancel was requested for the workflow.
+        WorkflowInterrupted: When the caller's stop check stops the run.
+    """
+    # Read back what an interrupted attempt already did (see "Resuming an
+    # interrupted run" above); a read error fails the resume, never starts
+    # over.
+    history = (load_task_history(pipeline.slurmClient, pipeline.wf_id)
+               if resume else [])
+    pipeline.raise_if_stopped()
     # Generate a filename for the input data. A resumed run reuses the name
     # recorded at launch time, so it points at the same folder on Slurm.
     if not zipfile:
-        zipfile = createFileName(client, conn, wf_id)
-    if history and detached.task_completed(history, EXPORT_SCRIPTS):
-        logger.info("Resuming: data was already exported to Slurm, skipping.")
-        UI_messages += "Data was already exported to Slurm. "
-    else:
-        # Send data to Slurm, zipped, over SSH
-        # Uses _SLURM_Image_Transfer script from Omero
-        rv, task_id = exportImageToSLURM(
-            client,
-            conn,
-            slurmClient,
-            zipfile,
-            wf_id,
-            ome_zarr_version,
-            reconstruct_shallow_zarr=use_zarr_format,
-        )
-        logger.debug(f"Ran data export: {rv.keys()}, {rv}")
-        if 'Message' in rv:
-            logger.info(rv['Message'].getValue())  # log
-        UI_messages += "Exported data to Slurm. "
+        zipfile = createFileName(pipeline.client, pipeline.conn,
+                                 pipeline.wf_id)
+    UI_messages = export_data_stage(
+        pipeline, history, zipfile, ome_zarr_version, use_zarr_format,
+        UI_messages)
+    pipeline.raise_if_stopped()
+    UI_messages = convert_data_stage(
+        pipeline, history, zipfile, use_zarr_format, UI_messages)
+    pipeline.raise_if_stopped()
+    UI_messages, slurm_job_ids, task_ids = submit_workflow_jobs(
+        pipeline, history, workflows, _workflow_params, _workflow_file_params,
+        email, zipfile, output_settings, UI_messages)
+    wf_failed, UI_messages = monitor_slurm_jobs(
+        pipeline, slurm_job_ids, task_ids, selected_output, roi_label_pattern,
+        group, UI_messages)
 
-    logger.info('''
+    # 7. Script output: only the owner of the run writes its outcome.
+    pipeline.raise_if_claim_lost()
+    if wf_failed:
+        pipeline.tracker.fail_workflow(pipeline.wf_id,
+                                       "Workflow execution failed")
+    else:
+        pipeline.tracker.complete_workflow(pipeline.wf_id)
+    return UI_messages
+
+
+def export_data_stage(pipeline: PipelineRun,
+                      history: List[Task],
+                      zipfile: str,
+                      ome_zarr_version: str,
+                      use_zarr_format: bool,
+                      UI_messages: str) -> str:
+    """Stage 1: push the selected data to Slurm, unless a resume found it done.
+
+    Args:
+        pipeline (PipelineRun): The run this stage belongs to.
+        history (List[Task]): Task history of a resumed run; empty otherwise.
+        zipfile (str): Input folder name on SLURM.
+        ome_zarr_version (str): OME-ZARR version to export.
+        use_zarr_format (bool): Whether to keep data as ZARR instead of TIFF.
+        UI_messages (str): Messages accumulated so far.
+
+    Returns:
+        str: The UI messages, extended.
+    """
+    logger.info("""
+    # --------------------------------------------
+    # :: 1. Push selected data to Slurm ::
+    # --------------------------------------------
+    """)
+    if task_completed(history, EXPORT_SCRIPTS):
+        logger.info("Resuming: data was already exported to Slurm, skipping.")
+        return UI_messages + "Data was already exported to Slurm. "
+    # Send data to Slurm, zipped, over SSH
+    # Uses _SLURM_Image_Transfer script from Omero
+    rv, _ = exportImageToSLURM(
+        pipeline.client,
+        pipeline.conn,
+        pipeline.slurmClient,
+        zipfile,
+        pipeline.wf_id,
+        ome_zarr_version,
+        reconstruct_shallow_zarr=use_zarr_format,
+    )
+    logger.debug(f"Ran data export: {rv.keys()}, {rv}")
+    if "Message" in rv:
+        logger.info(rv["Message"].getValue())  # log
+    return UI_messages + "Exported data to Slurm. "
+
+
+def convert_data_stage(pipeline: PipelineRun,
+                       history: List[Task],
+                       zipfile: str,
+                       use_zarr_format: bool,
+                       UI_messages: str) -> str:
+    """Stage 2: convert the data on Slurm, unless a resume found it done.
+
+    Args:
+        pipeline (PipelineRun): The run this stage belongs to.
+        history (List[Task]): Task history of a resumed run; empty otherwise.
+        zipfile (str): Input folder name on SLURM.
+        use_zarr_format (bool): Whether to keep data as ZARR instead of TIFF.
+        UI_messages (str): Messages accumulated so far.
+
+    Returns:
+        str: The UI messages, extended.
+    """
+    logger.info("""
     # --------------------------------------------
     # :: 2. Convert data on Slurm ::
     # --------------------------------------------
-    ''')
+    """)
     # Note: Moved unzipping data to transfer script, removed from here
-    slurm_job_ids = {}
-    task_ids = {}
     # Quick git pull on Slurm for latest version of job scripts
-    with hpc_recovery_scope(slurmClient, conn.keepAlive):
-        update_result = slurmClient.update_slurm_scripts()
+    with hpc_recovery_scope(pipeline.slurmClient, pipeline.conn.keepAlive):
+        update_result = pipeline.slurmClient.update_slurm_scripts()
     logger.debug(update_result.__dict__)
 
     # Determine conversion format based on ZARR preference
@@ -1373,202 +1861,300 @@ def execute_workflow_pipeline(client, conn, slurmClient, wf_id, workflows,
         UI_messages += "Converting ZARR to TIFF. "
 
     # Run conversion using the SLURM_Remote_Conversion script
-    if history and detached.task_completed(history, CONVERSION_SCRIPTS):
+    if task_completed(history, CONVERSION_SCRIPTS):
         logger.info("Resuming: data was already converted on Slurm, skipping.")
-        UI_messages += "Data was already converted on Slurm. "
-    else:
-        rv_conv, task_id = convertDataOnSLURM(
-            client, conn, slurmClient, zipfile, source_format,
-            target_format, wf_id)
-        logger.debug(f"Ran data conversion: {rv_conv.keys()}, {rv_conv}")
-        if 'Message' in rv_conv:
-            logger.info(rv_conv['Message'].getValue())  # log
-            UI_messages += rv_conv['Message'].getValue() + " "
+        return UI_messages + "Data was already converted on Slurm. "
+    rv_conv, _ = convertDataOnSLURM(
+        pipeline.client, pipeline.conn, pipeline.slurmClient, zipfile,
+        source_format, target_format, pipeline.wf_id)
+    logger.debug(f"Ran data conversion: {rv_conv.keys()}, {rv_conv}")
+    if "Message" in rv_conv:
+        logger.info(rv_conv["Message"].getValue())  # log
+        UI_messages += rv_conv["Message"].getValue() + " "
+    return UI_messages
 
+
+def submit_workflow_jobs(pipeline: PipelineRun,
+                         history: List[Task],
+                         workflows: List[str],
+                         _workflow_params: Dict[str, Any],
+                         _workflow_file_params: Dict[str, Any],
+                         email: str,
+                         zipfile: str,
+                         output_settings: Optional[Dict[str, Any]],
+                         UI_messages: str
+                         ) -> Tuple[str, Dict[str, int], Dict[int, UUID]]:
+    """Stage 3: submit each selected workflow, or pick up an earlier job.
+
+    Args:
+        pipeline (PipelineRun): The run this stage belongs to.
+        history (List[Task]): Task history of a resumed run; empty otherwise.
+        workflows (List[str]): Workflow names to consider; each is submitted
+            when its input is set.
+        _workflow_params (Dict[str, Any]): Per-workflow parameter metadata,
+            keyed by name.
+        _workflow_file_params (Dict[str, Any]): Per-workflow file-attachment
+            params, by name.
+        email (str): User email for Slurm job notifications.
+        zipfile (str): Input folder name on SLURM.
+        output_settings (Optional[Dict[str, Any]]): Resolved output choices,
+            recorded on the Slurm task.
+        UI_messages (str): Messages accumulated so far.
+
+    Returns:
+        Tuple[str, Dict[str, int], Dict[int, UUID]]: The UI messages, the
+            Slurm job ID per workflow name, and the task ID per Slurm job ID.
+
+    Raises:
+        WorkflowCancelled: When a cancel was requested for the workflow.
+        WorkflowInterrupted: When the caller's stop check stops the run.
+    """
+    logger.info("""
+    # --------------------------------------------
+    # :: 3. Create Slurm jobs for all workflows ::
+    # --------------------------------------------
+    """)
     slurm_job_ids = {}
     task_ids = {}
+    for wf_name in workflows:
+        if not unwrap(pipeline.client.getInput(wf_name)):
+            continue
+        pipeline.raise_if_stopped()
+        resume_decision = decide_workflow_resume(history, wf_name)
+        if resume_decision.action == WorkflowResume.ALREADY_IMPORTED:
+            UI_messages += (f"Results of Slurm job "
+                            f"{resume_decision.slurm_job_id} were "
+                            f"already imported. ")
+            continue
+        if resume_decision.action == WorkflowResume.MONITOR:
+            # Already on Slurm from the interrupted attempt: pick the
+            # job back up instead of submitting it twice.
+            slurm_job_id = resume_decision.slurm_job_id
+            task_id = resume_decision.task_id
+            UI_messages += (f"Resumed monitoring of Slurm job "
+                            f"{slurm_job_id}. ")
+        else:
+            UI_messages, slurm_job_id, _, task_id = run_workflow(
+                pipeline.slurmClient,
+                _workflow_params[wf_name],
+                _workflow_file_params[wf_name],
+                pipeline.client,
+                pipeline.conn,
+                UI_messages,
+                zipfile,
+                email,
+                wf_name,
+                pipeline.wf_id,
+                output_settings=output_settings)
+        slurm_job_ids[wf_name] = slurm_job_id
+        task_ids[slurm_job_id] = task_id
+    return UI_messages, slurm_job_ids, task_ids
 
-    if not wf_failed:
-        logger.info('''
-        # --------------------------------------------
-        # :: 3. Create Slurm jobs for all workflows ::
-        # --------------------------------------------
-        ''')
-        for wf_name in workflows:
-            if unwrap(client.getInput(wf_name)):
-                submitted = detached.submitted_job(
-                    history, wf_name, IMPORT_SCRIPTS) if history else None
-                if submitted:
-                    # Already on Slurm from the interrupted attempt: pick the
-                    # job back up instead of submitting it twice.
-                    slurm_job_id, task_id = submitted
-                    logger.info(f"Resuming: workflow {wf_name} is already "
-                                f"Slurm job {slurm_job_id}, monitoring it.")
-                    UI_messages += (f"Resumed monitoring of Slurm job "
-                                    f"{slurm_job_id}. ")
-                else:
-                    UI_messages, slurm_job_id, wf_id, task_id = run_workflow(
-                        slurmClient,
-                        _workflow_params[wf_name],
-                        _workflow_file_params[wf_name],
-                        client,
-                        conn,
-                        UI_messages,
-                        zipfile,
-                        email,
-                        wf_name,
-                        wf_id,
-                        output_settings=output_settings)
-                slurm_job_ids[wf_name] = slurm_job_id
-                task_ids[slurm_job_id] = task_id
 
-        # 4. Poll SLURM results
-        slurm_job_id_list = [
-            x for x in slurm_job_ids.values() if x >= 0]
+def monitor_slurm_jobs(pipeline: PipelineRun,
+                       slurm_job_ids: Dict[str, int],
+                       task_ids: Dict[int, UUID],
+                       selected_output: Dict[str, Any],
+                       roi_label_pattern: str,
+                       group: int,
+                       UI_messages: str) -> Tuple[bool, str]:
+    """Stage 4-6: poll the Slurm jobs and import the results of finished ones.
 
-        while slurm_job_id_list:
-            # Query all jobids we care about
-            with hpc_recovery_scope(slurmClient, conn.keepAlive):
-                job_status_dict = poll_slurm_jobs(slurmClient, slurm_job_id_list)
+    Checks whether the run must stop before every poll.
 
-            for slurm_job_id, job_state in job_status_dict.items():
-                logger.debug(f"Job {slurm_job_id} is {job_state}.")
-                with hpc_recovery_scope(slurmClient, conn.keepAlive):
-                    progress = slurmClient.get_active_job_progress(
-                        slurm_job_id)
-                task_id = task_ids[slurm_job_id]
-                try:
-                    slurmClient.workflowTracker.update_task_status(
-                        task_id,
-                        job_state)
-                    slurmClient.workflowTracker.update_task_progress(
-                        task_id,
-                        progress)
-                except Exception as db_e:
-                    logger.error(
-                        f"Database error updating task {task_id}: {db_e}")
-                    raise
-                if job_state == "TIMEOUT":
-                    log_msg = f"Job {slurm_job_id} is TIMEOUT."
-                    UI_messages += log_msg
-                    # TODO resubmit with longer timeout? add an option?
-                    # new_job_id = slurmClient.resubmit_job(
-                    #     slurm_job_id)
-                    # log_msg = f"Job {slurm_job_id} has been
-                    # resubmitted ({new_job_id})."
-                    logger.warning(log_msg)
-                    # log_string += log_msg
-                    slurm_job_id_list.remove(slurm_job_id)
-                    slurmClient.workflowTracker.fail_task(task_id,
-                                                          f"Slurm job state {job_state}")
-                    wf_failed = True
-                    # Upload the job log so the user can see why it
-                    # timed out (import step is skipped on failure).
-                    UI_messages += upload_job_log_to_omero(
-                        client, conn, slurmClient, slurm_job_id, wf_id,
-                        group)
-                    # slurm_job_id_list.append(new_job_id)
-                elif job_state == "COMPLETED":
-                    # 5. Retrieve SLURM images
-                    # 6. Store results in OMERO
-                    log_msg = f"Job {slurm_job_id} is COMPLETED."
-                    slurmClient.workflowTracker.complete_task(task_id,
-                                                              log_msg)
-                    completed_workflow_name = next(
-                        name for name, job_id
-                        in slurm_job_ids.items()
-                        if job_id == slurm_job_id)
-                    rv_imp = importResultsToOmero(
-                        client, conn, slurmClient,
-                        slurm_job_id, selected_output,
-                        wf_id,
-                        roi_label_pattern=roi_label_pattern,
-                        workflow_name=completed_workflow_name)
+    Args:
+        pipeline (PipelineRun): The run this stage belongs to.
+        slurm_job_ids (Dict[str, int]): Slurm job ID per workflow name.
+        task_ids (Dict[int, UUID]): Task ID per Slurm job ID.
+        selected_output (Dict[str, Any]): Resolved output options.
+        roi_label_pattern (str): Glob for label results, from ROI validation.
+        group (int): Caller's active concrete OMERO group ID.
+        UI_messages (str): Messages accumulated so far.
 
-                    if rv_imp:
-                        try:
-                            if rv_imp['Message']:
-                                log_msg = f"{rv_imp['Message'].getValue()}"
-                        except KeyError:
-                            log_msg += "Data import status unknown."
-                        # Guard: importResultsToOmero may have
-                        # returned without raising (e.g. due to an
-                        # isinstance type mismatch on the FAILED:
-                        # check).  Catch that here so the workflow
-                        # is never marked DONE when import failed.
-                        if log_msg.startswith("FAILED:"):
-                            wf_failed = True
-                            logger.error(
-                                f"Import returned failure message "
-                                f"(workflow will be marked failed): "
-                                f"{log_msg}"
-                            )
-                        try:
-                            if rv_imp['URL']:
-                                client.setOutput(
-                                    "URL", rv_imp['URL'])
-                        except KeyError:
-                            log_msg += "|No URL|"
-                        try:
-                            if rv_imp["File_Annotation"]:
-                                client.setOutput("File_Annotation",
-                                                 rv_imp[
-                                                     "File_Annotation"])
-                        except KeyError:
-                            log_msg += "|No Annotation|"
-                    else:
-                        log_msg = "Attempted to import images to\
-                            Omero."
-                    logger.info(log_msg)
-                    UI_messages += log_msg
-                    slurm_job_id_list.remove(slurm_job_id)
-                elif (job_state.startswith("CANCELLED")
-                        or job_state == "FAILED"):
-                    # Remove from future checks
-                    log_msg = f"Job {slurm_job_id} is {job_state}."
-                    log_msg += f"You can get the logfile using `Slurm Get Update` on job {slurm_job_id}"
-                    logger.warning(log_msg)
-                    UI_messages += log_msg
-                    slurm_job_id_list.remove(slurm_job_id)
-                    slurmClient.workflowTracker.fail_task(task_id,
-                                                          f"Slurm job state {job_state}")
-                    wf_failed = True
-                    # Upload the job log so the failure is visible in
-                    # OMERO even though the import step is skipped.
-                    UI_messages += upload_job_log_to_omero(
-                        client, conn, slurmClient, slurm_job_id, wf_id,
-                        group)
-                elif (job_state == "PENDING"
-                        or job_state == "RUNNING"):
-                    # expected
-                    log_msg = f"Job {slurm_job_id} is busy..."
-                    logger.debug(log_msg)
-                    continue
-                else:
-                    log_msg = f"Oops! State of job {slurm_job_id}\
-                        is unknown: {job_state}. Stop tracking."
-                    logger.warning(log_msg)
-                    UI_messages += log_msg
-                    slurm_job_id_list.remove(slurm_job_id)
-                    slurmClient.workflowTracker.fail_task(task_id,
-                                                          f"Slurm job state {job_state}")
-                    wf_failed = True
-                    # Upload the job log for visibility on unknown
-                    # terminal states too.
-                    UI_messages += upload_job_log_to_omero(
-                        client, conn, slurmClient, slurm_job_id, wf_id,
-                        group)
-            if slurm_job_id_list:
-                conn.keepAlive()  # keep the connection alive between polls
-                timesleep.sleep(10)
+    Returns:
+        Tuple[bool, str]: Whether the workflow failed, and the UI messages.
 
-    # 7. Script output
-    if wf_failed:
-        slurmClient.workflowTracker.fail_workflow(
-            wf_id, "Workflow execution failed")
+    Raises:
+        WorkflowCancelled: When a cancel was requested for the workflow.
+        WorkflowInterrupted: When the caller's stop check stops the run.
+    """
+    wf_failed = False  # wf state
+    # 4. Poll SLURM results
+    pending_job_ids = [
+        x for x in slurm_job_ids.values() if x >= 0]
+
+    while pending_job_ids:
+        pipeline.raise_if_stopped()
+        # Query all jobids we care about
+        with hpc_recovery_scope(pipeline.slurmClient, pipeline.conn.keepAlive):
+            job_status_dict = poll_slurm_jobs(pipeline.slurmClient,
+                                              pending_job_ids)
+
+        for slurm_job_id, job_state in job_status_dict.items():
+            update = process_job_state(
+                pipeline, slurm_job_id, job_state, task_ids[slurm_job_id],
+                slurm_job_ids, selected_output, roi_label_pattern, group)
+            UI_messages += update.message
+            wf_failed = wf_failed or update.failed
+            if update.finished:
+                pending_job_ids.remove(slurm_job_id)
+        if pending_job_ids:
+            # Keep the connection alive between polls.
+            pipeline.conn.keepAlive()
+            timesleep.sleep(10)
+    return wf_failed, UI_messages
+
+
+def process_job_state(pipeline: PipelineRun,
+                      slurm_job_id: int,
+                      job_state: str,
+                      task_id: UUID,
+                      slurm_job_ids: Dict[str, int],
+                      selected_output: Dict[str, Any],
+                      roi_label_pattern: str,
+                      group: int) -> JobUpdate:
+    """Record one polled Slurm state and act on it.
+
+    Args:
+        pipeline (PipelineRun): The run this job belongs to.
+        slurm_job_id (int): The polled Slurm job.
+        job_state (str): The Slurm state it was seen in.
+        task_id (UUID): The task that tracks the job.
+        slurm_job_ids (Dict[str, int]): Slurm job ID per workflow name.
+        selected_output (Dict[str, Any]): Resolved output options.
+        roi_label_pattern (str): Glob for label results, from ROI validation.
+        group (int): Caller's active concrete OMERO group ID.
+
+    Returns:
+        JobUpdate: Whether the job is done being tracked, whether it failed,
+            and the message for the user.
+
+    Raises:
+        Exception: Whatever the tracker raises when the task status or
+            progress cannot be recorded (a database error); it propagates to
+            the caller, which reports it.
+        WorkflowInterrupted: When the caller's stop check stops the run.
+    """
+    logger.debug(f"Job {slurm_job_id} is {job_state}.")
+    with hpc_recovery_scope(pipeline.slurmClient, pipeline.conn.keepAlive):
+        progress = pipeline.slurmClient.get_active_job_progress(slurm_job_id)
+    # Nothing below may be written by a run that lost its claim during the
+    # poll.
+    pipeline.raise_if_claim_lost()
+    pipeline.tracker.update_task_status(task_id, job_state)
+    pipeline.tracker.update_task_progress(task_id, progress)
+    if job_state == "COMPLETED":
+        workflow_name = next(name for name, job_id in slurm_job_ids.items()
+                             if job_id == slurm_job_id)
+        return import_completed_job(
+            pipeline, slurm_job_id, task_id, workflow_name, selected_output,
+            roi_label_pattern)
+    if job_state in ("PENDING", "RUNNING"):
+        logger.debug(f"Job {slurm_job_id} is busy...")
+        return JobUpdate()
+    if job_state == "TIMEOUT":
+        # TODO resubmit with longer timeout? add an option?
+        return end_failed_job(
+            pipeline, slurm_job_id, task_id, job_state, group,
+            f"Job {slurm_job_id} is TIMEOUT.")
+    if job_state.startswith("CANCELLED") or job_state == "FAILED":
+        return end_failed_job(
+            pipeline, slurm_job_id, task_id, job_state, group,
+            f"Job {slurm_job_id} is {job_state}."
+            f"You can get the logfile using `Slurm Get Update` on job "
+            f"{slurm_job_id}")
+    return end_failed_job(
+        pipeline, slurm_job_id, task_id, job_state, group,
+        f"Oops! State of job {slurm_job_id} is unknown: {job_state}. "
+        f"Stop tracking.")
+
+
+def end_failed_job(pipeline: PipelineRun,
+                   slurm_job_id: int,
+                   task_id: UUID,
+                   job_state: str,
+                   group: int,
+                   message: str) -> JobUpdate:
+    """Stop tracking a job that did not succeed: fail its task, keep its log.
+
+    The job log is uploaded so the user can see why it ended, even though the
+    import step is skipped on failure.
+
+    Args:
+        pipeline (PipelineRun): The run this job belongs to.
+        slurm_job_id (int): The Slurm job that did not succeed.
+        task_id (UUID): The task that tracks the job.
+        job_state (str): The Slurm state the job ended in.
+        group (int): Caller's active concrete OMERO group ID.
+        message (str): Why tracking stops, for the user.
+
+    Returns:
+        JobUpdate: Finished and failed, with the message and the outcome of
+            the log upload.
+    """
+    logger.warning(message)
+    pipeline.tracker.fail_task(task_id, f"Slurm job state {job_state}")
+    log_upload_message = upload_job_log_to_omero(
+        pipeline.client, pipeline.conn, pipeline.slurmClient, slurm_job_id,
+        pipeline.wf_id, group)
+    return JobUpdate(finished=True, failed=True,
+                     message=message + log_upload_message)
+
+
+def import_completed_job(pipeline: PipelineRun,
+                         slurm_job_id: int,
+                         task_id: UUID,
+                         workflow_name: str,
+                         selected_output: Dict[str, Any],
+                         roi_label_pattern: str) -> JobUpdate:
+    """Stage 5-6: retrieve the results of a COMPLETED job and store them.
+
+    Args:
+        pipeline (PipelineRun): The run this job belongs to.
+        slurm_job_id (int): The COMPLETED Slurm job.
+        task_id (UUID): The task that tracks the job.
+        workflow_name (str): Workflow the job ran.
+        selected_output (Dict[str, Any]): Resolved output options.
+        roi_label_pattern (str): Glob for label results, from ROI validation.
+
+    Returns:
+        JobUpdate: Finished; failed when the import reported a failure.
+    """
+    log_msg = f"Job {slurm_job_id} is COMPLETED."
+    pipeline.tracker.complete_task(task_id, log_msg)
+    rv_imp = importResultsToOmero(
+        pipeline.client, pipeline.conn, pipeline.slurmClient, slurm_job_id,
+        selected_output, pipeline.wf_id, roi_label_pattern=roi_label_pattern,
+        workflow_name=workflow_name)
+    import_failed = False
+    if rv_imp:
+        try:
+            if rv_imp["Message"]:
+                log_msg = rv_imp["Message"].getValue()
+        except KeyError:
+            log_msg += "Data import status unknown."
+        # Guard: importResultsToOmero may have returned without raising (e.g.
+        # due to an isinstance type mismatch on the FAILED: check). Catch that
+        # here so the workflow is never marked DONE when import failed.
+        if log_msg.startswith("FAILED:"):
+            import_failed = True
+            logger.error(f"Import returned failure message (workflow will "
+                         f"be marked failed): {log_msg}")
+        try:
+            if rv_imp["URL"]:
+                pipeline.client.setOutput("URL", rv_imp["URL"])
+        except KeyError:
+            log_msg += "|No URL|"
+        try:
+            if rv_imp["File_Annotation"]:
+                pipeline.client.setOutput("File_Annotation",
+                                          rv_imp["File_Annotation"])
+        except KeyError:
+            log_msg += "|No Annotation|"
     else:
-        slurmClient.workflowTracker.complete_workflow(wf_id)
-    return UI_messages
+        log_msg = "Attempted to import images to Omero."
+    logger.info(log_msg)
+    return JobUpdate(finished=True, failed=import_failed, message=log_msg)
 
 
 def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id,
@@ -1878,7 +2464,7 @@ def convertDataOnSLURM(client: omscripts.client,
                        zipfile: str,
                        source_format: str,
                        target_format: str,
-                       wf_id: UUID):
+                       wf_id: UUID) -> Tuple[Dict[str, Any], UUID]:
     """
     Convert data format on SLURM cluster using the remote conversion script.
 
@@ -1894,6 +2480,10 @@ def convertDataOnSLURM(client: omscripts.client,
         source_format: Input data format (e.g., 'zarr', 'tiff')
         target_format: Desired output format (e.g., 'zarr', 'tiff')
         wf_id: Workflow UUID for tracking
+
+    Returns:
+        tuple: (conversion_result_dict, task_id) containing script results
+        and the ID of the conversion task
 
     Raises:
         Exception: If conversion script not found or conversion fails
@@ -2031,6 +2621,8 @@ def convertDataOnSLURM(client: omscripts.client,
                 raise
             raise Exception(f"Conversion script failed: {msg}")
 
+    except WorkflowInterrupted:
+        raise  # not a failure of this task: the run decides what to do
     except Exception as script_e:
         # Script execution failed entirely
         error_msg = f"Conversion script execution failed: {script_e}"
@@ -2049,7 +2641,8 @@ def exportImageToSLURM(client: omscripts.client,
                        zipfile: str,
                        wf_id: UUID,
                        ome_zarr_version: str,
-                       reconstruct_shallow_zarr: bool = True):
+                       reconstruct_shallow_zarr: bool = True
+                       ) -> Tuple[Dict[str, Any], UUID]:
     """
     Export selected OMERO data to SLURM cluster for processing.
 
@@ -2206,6 +2799,8 @@ def exportImageToSLURM(client: omscripts.client,
             logger.error(
                 f"Database error completing export task {task_id}: {db_e}")
             raise
+    except WorkflowInterrupted:
+        raise  # not a failure of this task: the run decides what to do
     except Exception as export_error:
         error_msg = f"Export script execution failed: {export_error}"
         try:

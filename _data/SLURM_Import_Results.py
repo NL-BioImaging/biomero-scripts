@@ -340,8 +340,22 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
 VERSION = "2.9.0b24"
 
 
-def load_canonical_input_snapshot(slurm_client, workflow_id):
-    """Resolve the exact workflow input snapshot from workflow tracking."""
+def load_canonical_input_snapshot(slurm_client: SlurmClient,
+                                  workflow_id: Union[str, UUID]
+                                  ) -> Optional[Any]:
+    """Resolve the exact workflow input snapshot from workflow tracking.
+
+    Args:
+        slurm_client (SlurmClient): Active SLURM client, whose tracker holds
+            the snapshot.
+        workflow_id (Union[str, UUID]): Workflow whose inputs to resolve.
+
+    Returns:
+        Optional[Any]: The workflow's ``CanonicalInputManifest``, with the
+        executed workflow's output policy when it is unambiguous; None when
+        tracking is disabled or the snapshot is missing, corrupt or
+        unreadable (the caller then matches on the returned pixel identity).
+    """
     workflow_id = UUID(str(workflow_id))
     if not slurm_client.track_workflows:
         logger.info(
@@ -384,10 +398,11 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         tasks = [tracker.repository.get(task_id) for task_id in workflow.tasks]
         analyses = [task for task in tasks
                     if task.job_ids and isinstance(
-                        task.params.get("output_settings"), dict)]
+                        task.params.get(constants.launcher_params.OUTPUT_SETTINGS),
+                        dict)]
         if len(analyses) == 1:
             task = analyses[0]
-            settings = task.params["output_settings"]
+            settings = task.params[constants.launcher_params.OUTPUT_SETTINGS]
             return manifest.model_copy(update={
                 "original_pixels_not_required": (
                     settings.get("original_pixels_not_required") is True),

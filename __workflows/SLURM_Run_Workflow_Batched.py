@@ -51,8 +51,11 @@ from omero.gateway import BlitzGateway
 import omero.util.script_utils as script_utils
 import omero.scripts as omscripts
 from biomero import SlurmClient, constants
+from biomero.detached import detached_mode_enabled
 import logging
 from itertools import islice
+from typing import Any, Dict, List
+from uuid import UUID
 import time as timesleep
 import pprint
 
@@ -77,21 +80,66 @@ VERSION = "2.9.0b24"
 
 # Batched runs are queued the same way single runs are: this script resolves
 # the batches and records them in a launcher task, and the supervisor spawns
-# one child workflow per batch (see biomero.detached and, in NL-BIOMERO, the
-# WorkflowSupervisor in processor.py). Without a biomero that ships the
-# launcher contract, batches are run inline as sub-scripts as before.
-try:
-    from biomero import detached
-except ImportError:  # pragma: no cover - older biomero release
-    detached = None
+# one child workflow per batch (see WorkflowTracker.add_launcher_task and, in
+# NL-BIOMERO, the WorkflowSupervisor in processor.py). With detached mode off,
+# batches are run inline as sub-scripts.
 
 
-def detached_mode_enabled() -> bool:
-    """Whether to queue the batches for the supervisor instead of running them."""
-    return detached is not None and detached.detached_mode_enabled()
+def register_detached_batches(client: omscripts.client,
+                              slurmClient: SlurmClient,
+                              wf_id: UUID,
+                              selected_workflow_names: List[str],
+                              batch_ids_list: List[List[int]],
+                              effective_type: str,
+                              inputs: Dict[str, Any],
+                              selected_output: Dict[str, Any],
+                              group: int,
+                              image_ids: List[int]) -> UUID:
+    """Record a batched request as a launcher task for the detached supervisor.
+
+    The task's params are the contract with the supervisor's batched parent:
+    every input of this script (including the batch size), the selected
+    workflows, the ``batches`` with their ``effective_type``, the
+    ``base_inputs`` each child starts from, the ``selected_output``, the
+    ``group`` and all image IDs.
+
+    Args:
+        client (omscripts.client): OMERO script client whose inputs are
+            recorded.
+        slurmClient (SlurmClient): Active SLURM client, whose tracker records
+            the task.
+        wf_id (UUID): Workflow the launcher belongs to.
+        selected_workflow_names (List[str]): Workflows the user chose.
+        batch_ids_list (List[List[int]]): The IDs of each batch.
+        effective_type (str): Data type of the items after batching.
+        inputs (Dict[str, Any]): Script inputs as rtypes, as sent to each
+            batch.
+        selected_output (Dict[str, Any]): Resolved output options.
+        group (int): Active OMERO group ID.
+        image_ids (List[int]): All item IDs of the request.
+
+    Returns:
+        UUID: The launcher task ID.
+    """
+    launcher_params = {
+        **(client.getInputs(unwrap=True) or {}),
+        constants.launcher_params.WORKFLOWS: selected_workflow_names,
+        constants.launcher_params.BATCHES: [list(batch) for batch in batch_ids_list],
+        constants.launcher_params.EFFECTIVE_TYPE: effective_type,
+        constants.launcher_params.BASE_INPUTS: {key: unwrap(value)
+                                          for key, value in inputs.items()},
+        constants.launcher_params.SELECTED_OUTPUT: selected_output,
+        constants.launcher_params.GROUP: group,
+        constants.transfer.IDS: list(image_ids)}
+    launcher_task_id = slurmClient.workflowTracker.add_launcher_task(
+        wf_id, constants.RUN_WF_BATCHED_SCRIPT, VERSION,
+        launcher_params[constants.transfer.IDS], launcher_params)
+    logger.info(f"Queued detached workflow {wf_id} (launcher task "
+                f"{launcher_task_id}) for {selected_workflow_names}")
+    return launcher_task_id
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for SLURM batched workflow execution script.
 
     Orchestrates batch processing of workflows on SLURM clusters by dividing
@@ -540,18 +588,10 @@ def runScript():
                 selected_workflow_names = [name for name, selected
                                            in selected_workflows.items()
                                            if selected]
-                detached.register_detached_launcher(
-                    client, slurmClient.workflowTracker, wf_id,
-                    constants.RUN_WF_BATCHED_SCRIPT, VERSION,
-                    selected_workflow_names,
-                    {"batches": [list(batch) for batch in batch_ids_list],
-                     "batch_size": batch_size,
-                     "effective_type": effective_type,
-                     "base_inputs": {key: unwrap(value)
-                                     for key, value in inputs.items()},
-                     "selected_output": selected_output,
-                     "group": group,
-                     constants.transfer.IDS: list(image_ids)})
+                register_detached_batches(
+                    client, slurmClient, wf_id, selected_workflow_names,
+                    batch_ids_list, effective_type, inputs,
+                    selected_output, group, image_ids)
                 client.setOutput("Message", rstring(
                     f"Your {len(batch_ids_list)} batches are queued and run "
                     f"in the background: you can close this tab. Results are "
