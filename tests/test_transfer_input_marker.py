@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from biomero_schema.zarr import TRANSFER_INPUT_MARKER
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -23,7 +25,7 @@ def load_writer():
     namespace = {
         "CanonicalInput": object,
         "Path": Path,
-        "TRANSFER_INPUT_MARKER": ".biomero-input.json",
+        "TRANSFER_INPUT_MARKER": TRANSFER_INPUT_MARKER,
         "json": json,
         "logger": logging.getLogger("transfer-input-marker-test"),
         "os": os,
