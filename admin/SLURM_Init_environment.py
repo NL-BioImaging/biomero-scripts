@@ -5,7 +5,7 @@
 #                                   & Open Microscopy Environment.
 #                    All Rights Reserved.
 # Modified work Copyright 2022 Torec Luik, Amsterdam UMC
-# Use is subject to license terms supplied in LICENSE.txt
+# Licensed under the GNU General Public License version 2; see LICENSE.
 #
 # Example OMERO.script to instantiate a 'empty' Slurm connection.
 
@@ -23,7 +23,7 @@ the cluster environment for workflow execution.
 
 Authors: Torec Luik, OMERO Team
 Institution: Amsterdam UMC, University of Dundee
-License: GPL v2+ (see LICENSE.txt)
+License: GNU GPL version 2 (see LICENSE)
 """
 
 import omero

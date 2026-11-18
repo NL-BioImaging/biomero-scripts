@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+#
+# Copyright 2026 Torec Luik, Amsterdam UMC
+# Licensed under the GNU General Public License version 2; see LICENSE.
+#
 """Administratively migrate BIOMERO shallow-storage contracts."""
 
 import json
@@ -8,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 import omero
@@ -34,6 +39,8 @@ from biomero_importer.utils.canonical_store import (
     CANONICAL_MARKER_NAME,
     external_canonical_marker_path,
     load_canonical_marker,
+    move_canonical_marker,
+    remove_external_canonical_markers,
     write_indexed_canonical_marker,
 )
 from biomero_shallower.migration import (
@@ -298,9 +305,28 @@ def _bind_canonical_plate_source(source, index):
 
 
 def discover_canonical_registrations(
-    conn, storage_roots, *, object_type="All", object_ids=None,
-):
-    """Load every canonical registration and its authoritative marker."""
+    conn: BlitzGateway,
+    storage_roots: Dict[str, Path],
+    *,
+    object_type: str = "All",
+    object_ids: Optional[Iterable[int]] = None,
+) -> List[Dict[str, Any]]:
+    """Load every canonical registration and its authoritative marker.
+
+    Args:
+        conn (BlitzGateway): Connection of an OMERO administrator.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        object_type (str): "Image", "Plate" or "All".
+        object_ids (Optional[Iterable[int]]): Only these object IDs; all when
+            empty.
+
+    Returns:
+        List[Dict[str, Any]]: One record per registration annotation, with
+        its values, the sidecar's state and the decoded source.
+
+    Raises:
+        ValueError: If the connection is not an administrator's.
+    """
     if not conn.isAdmin():
         raise ValueError("Canonical consolidation requires an administrator")
     kinds = ("Image", "Plate") if object_type == "All" else (object_type,)
@@ -488,7 +514,18 @@ def _tree_metrics(path):
     return {"files": files, "bytes": size}
 
 
-def _canonical_marker_path(path):
+def _canonical_marker_path(path: Path) -> Path:
+    """Find the one marker of a canonical store, inside it or in its folder.
+
+    Args:
+        path (Path): The canonical store.
+
+    Returns:
+        Path: The marker file.
+
+    Raises:
+        ValueError: If the store does not have exactly one marker.
+    """
     internal = path / CANONICAL_MARKER_NAME
     external = external_canonical_marker_path(path)
     markers = [candidate for candidate in (internal, external)
@@ -500,7 +537,23 @@ def _canonical_marker_path(path):
     return markers[0]
 
 
-def _write_canonical_marker(path, source):
+def _write_canonical_marker(path: Path, source: Any) -> Path:
+    """Record a canonical source in the marker of a store.
+
+    Updates the store's committed marker, or writes a new indexed marker when
+    it has none.
+
+    Args:
+        path (Path): The canonical store.
+        source (Any): The canonical source to record.
+
+    Returns:
+        Path: The marker file.
+
+    Raises:
+        ValueError: If the existing marker is ambiguous, not committed, or does
+            not read back as ``source``.
+    """
     try:
         marker_path = _canonical_marker_path(path)
     except ValueError:
@@ -519,18 +572,52 @@ def _write_canonical_marker(path, source):
     return marker_path
 
 
-def _move_canonical_store(source, destination):
-    """Rename one generated store and any external marker without copying."""
+def _move_canonical_store(source: Path, destination: Path) -> None:
+    """Rename one generated store and any external sidecar without copying.
+
+    Args:
+        source (Path): The store to move.
+        destination (Path): Where it goes.
+
+    Raises:
+        FileExistsError: If the destination exists.
+        OSError: If the sidecar could not be moved; the store is renamed back
+            first.
+        RuntimeError: If neither the sidecar nor the store could be moved
+            back; the sidecar then needs fixing by hand.
+    """
     if source == destination:
         return
     if destination.exists():
         raise FileExistsError(f"Stable canonical destination exists: {destination}")
-    old_external = external_canonical_marker_path(source)
-    new_external = external_canonical_marker_path(destination)
     source.rename(destination)
-    if old_external.is_file():
-        new_external.parent.mkdir(parents=True, exist_ok=True)
-        old_external.rename(new_external)
+    # The sidecar is keyed by the store's location in a BIOMERO folder (or, for
+    # an older beta, sits next to the store); the importer moves either one.
+    try:
+        moved_sidecar = move_canonical_marker(source, destination)
+        if moved_sidecar is None:
+            # The importer returns None both without a sidecar to move and
+            # when the destination already has one, which it keeps (it logs
+            # which). The caller rewrites and validates the destination
+            # marker next.
+            logger.debug(f"No canonical sidecar moved for {source}; see the "
+                         f"importer log for the reason")
+        else:
+            logger.debug(f"Moved the canonical sidecar of {source} to "
+                         f"{moved_sidecar}")
+    except OSError as exc:
+        try:
+            destination.rename(source)
+        except OSError as rollback_exc:
+            raise RuntimeError(
+                f"Moved {source} to {destination} but could not move its "
+                f"canonical sidecar ({exc}) or move the store back "
+                f"({rollback_exc}); fix the sidecar manually"
+            ) from exc
+        exc.add_note(
+            f"Could not move the canonical sidecar of {source}; renamed the "
+            f"store back")
+        raise
 
 
 def _canonical_registration_values(source):
@@ -633,9 +720,30 @@ def plan_canonical_consolidation(
 
 
 def _apply_canonical_consolidation(
-    conn, plans, replacements, storage_roots, directory,
-):
-    """Apply prevalidated consolidation, deleting duplicates only at the end."""
+    conn: BlitzGateway,
+    plans: List[Dict[str, Any]],
+    replacements: Dict[str, Any],
+    storage_roots: Dict[str, Path],
+    directory: Path,
+) -> List[Dict[str, Any]]:
+    """Apply prevalidated consolidation, deleting duplicates only at the end.
+
+    Moves each selected store to its stable destination with its sidecar,
+    rebinds shallow references and OMERO annotations, and only then removes
+    the generated ``gN`` stores together with their sidecars, so no empty
+    BIOMERO sidecar folder is left behind.
+
+    Args:
+        conn (BlitzGateway): Connection of an OMERO administrator.
+        plans (List[Dict[str, Any]]): The prevalidated consolidation plans.
+        replacements (Dict[str, Any]): Managed locators to their stable
+            replacements.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        directory (Path): Backup directory for this run.
+
+    Returns:
+        List[Dict[str, Any]]: One snapshot per consolidated registration.
+    """
     if not plans:
         return []
     relevant = set(replacements)
@@ -722,7 +830,7 @@ def _apply_canonical_consolidation(
                 continue
             if path.exists():
                 shutil.rmtree(path)
-            external_canonical_marker_path(path).unlink(missing_ok=True)
+            remove_external_canonical_markers(path)
     return results
 
 

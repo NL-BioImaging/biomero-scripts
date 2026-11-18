@@ -1,21 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2023 T T Luik
-# Copyright (C) 2006-2014 University of Dundee. All rights reserved.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+# Original work Copyright (C) 2006-2014 University of Dundee. All rights
+#                    reserved.
+# Modified work Copyright 2023 Torec Luik, Amsterdam UMC
+# Licensed under the GNU General Public License version 2; see LICENSE.
 
 """
 BIOMERO SLURM Image Transfer Script
@@ -48,7 +37,7 @@ Supported Formats:
 
 Authors: Torec Luik, William Moore, OME Team
 Institutions: Amsterdam UMC, University of Dundee
-License: GPL v2+ (see LICENSE.txt)
+License: GNU GPL version 2 (see LICENSE)
 """
 
 import shutil
@@ -94,6 +83,7 @@ from biomero_schema.zarr import (
     ZarrLabelComponent,
 )
 import sys
+from typing import Any, Callable, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +111,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
         from biomero_importer.utils.canonical_store import (
             CanonicalStore,
+            InvalidCanonicalStore,
             load_canonical_marker,
             write_indexed_canonical_marker,
         )
@@ -476,8 +467,19 @@ def bind_canonical_plate_source(source, index):
     })
 
 
-def get_canonical_plate_source(plate):
-    """Resolve compact storage-backed or legacy canonical Plate metadata."""
+def get_canonical_plate_source(plate: Any) -> Optional[CanonicalPlateSource]:
+    """Resolve compact storage-backed or legacy canonical Plate metadata.
+
+    Args:
+        plate (Any): OMERO Plate wrapper whose annotations are inspected.
+
+    Returns:
+        Optional[CanonicalPlateSource]: The Plate's single canonical
+        registration, or None when it has none.
+
+    Raises:
+        ValueError: If the Plate has more than one canonical registration.
+    """
     plate_id = int(plate.getId())
     candidates = []
     indexes = []
@@ -1463,19 +1465,41 @@ def promote_exported_image_zarr(
 
 
 def index_existing_image_zarr(
-    conn,
-    image,
-    existing_path,
-    storage_roots,
+    conn: BlitzGateway,
+    image: Any,
+    existing_path: Path,
+    storage_roots: Dict[str, Path],
     *,
-    source_generation=1,
-    identity_provider=None,
-    semantic_guard_reader=None,
-    promotion_service_factory=None,
-    annotation_writer=None,
-    defer_identity=False,
-):
-    """Index the authoritative managed backing Zarr without rereading OMERO."""
+    source_generation: int = 1,
+    identity_provider: Optional[Any] = None,
+    semantic_guard_reader: Optional[Callable[..., Any]] = None,
+    promotion_service_factory: Optional[Callable[..., Any]] = None,
+    annotation_writer: Optional[Callable[..., Any]] = None,
+    defer_identity: bool = False,
+) -> CanonicalZarrSource:
+    """Index the authoritative managed backing Zarr without rereading OMERO.
+
+    Writes the canonical sidecar before the OMERO annotation.
+
+    Args:
+        conn (BlitzGateway): OMERO connection of the requesting user.
+        image (Any): OMERO Image wrapper backed by the Zarr.
+        existing_path (Path): The managed Zarr store.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        source_generation (int): Generation of the registration.
+        identity_provider (Optional[Any]): Pixel identity provider; defaults
+            to ISCC-BIO.
+        semantic_guard_reader (Optional[Callable[..., Any]]): Reader of the
+            Zarr's semantic guard; defaults to the importer's.
+        promotion_service_factory (Optional[Callable[..., Any]]): Unused by
+            this function.
+        annotation_writer (Optional[Callable[..., Any]]): Writer of the
+            OMERO annotation; defaults to ``post_map_annotation``.
+        defer_identity (bool): Skip measuring the pixel identity.
+
+    Returns:
+        CanonicalZarrSource: The registration that was written and attached.
+    """
     storage_id, storage_root, relative_path = locate_managed_zarr(
         existing_path,
         storage_roots,
@@ -1556,15 +1580,45 @@ def verified_plate_source(source, origin="canonical-bootstrap"):
     )})
 
 
-def upgrade_reused_canonical(conn, obj, source, source_path):
+def upgrade_reused_canonical(
+    conn: BlitzGateway,
+    obj: Any,
+    source: Union[CanonicalZarrSource, CanonicalPlateSource],
+    source_path: Path,
+) -> Union[CanonicalZarrSource, CanonicalPlateSource]:
     """Upgrade old records only when reusing the object's actual backing Zarr.
 
     A cached export is not authoritative merely because it is on managed disk.
     Require the existing import provenance to identify the same backing store.
     Update trust metadata in place without copying or rehashing pixel data.
+    A sidecar that cannot be read or written only costs the cache: the source
+    is then returned as it was.
+
+    Args:
+        conn (BlitzGateway): OMERO connection of the requesting user.
+        obj (Any): The OMERO Image or Plate wrapper that is reused.
+        source (Union[CanonicalZarrSource, CanonicalPlateSource]): The
+            canonical source registered for the object.
+        source_path (Path): The store the object reuses.
+
+    Returns:
+        Union[CanonicalZarrSource, CanonicalPlateSource]: The upgraded or
+            cached source, or ``source`` itself when it cannot be upgraded.
+
+    Raises:
+        ValueError: If the object has more than one canonical registration to
+            refresh.
     """
     is_plate = isinstance(source, CanonicalPlateSource)
-    cached = load_canonical_marker(source_path)
+    try:
+        cached = load_canonical_marker(source_path)
+    except (OSError, InvalidCanonicalStore, ValueError) as exc:
+        # A corrupt, uncommitted or unreachable sidecar only costs the cache:
+        # the workflow continues as if there were none.
+        logger.warning(
+            f"Ignoring the canonical sidecar of {source_path} ({exc}); "
+            f"treating it as absent and continuing")
+        cached = None
     if cached is not None and type(cached) is type(source):
         old_sources = ([i.source for i in source.images] if is_plate else [source])
         new_sources = ([i.source for i in cached.images] if is_plate else [cached])
@@ -1592,7 +1646,17 @@ def upgrade_reused_canonical(conn, obj, source, source_path):
     upgraded = (verified_plate_source(source) if is_plate else
                 source.model_copy(update={"canonical_pixel_verified": True,
                                           "pixel_identity_origin": "canonical-bootstrap"}))
-    write_indexed_canonical_marker(source_path, upgraded)
+    try:
+        write_indexed_canonical_marker(source_path, upgraded)
+    except OSError as exc:
+        # The sidecar is only an optimisation. Without it the registration
+        # stays as it was and the input is reused unverified, as when the
+        # backing store cannot be confirmed above.
+        logger.warning(
+            f"Could not write the canonical sidecar for {source_path} "
+            f"({exc}); keeping the existing registration unverified and "
+            f"continuing")
+        return source
     if is_plate:
         attach_canonical_plate_source(conn, obj, upgraded)
     else:
@@ -1639,17 +1703,35 @@ def verify_exported_plate_source(conn, plate, export_path, source,
 
 
 def index_existing_plate_zarr(
-    conn,
-    plate,
-    existing_path,
-    storage_roots,
+    conn: BlitzGateway,
+    plate: Any,
+    existing_path: Path,
+    storage_roots: Dict[str, Path],
     *,
-    source_generation=1,
-    identity_provider=None,
-    annotation_writer=None,
-    defer_identity=False,
-):
-    """Index a managed Plate Zarr in place using per-image identities."""
+    source_generation: int = 1,
+    identity_provider: Optional[Any] = None,
+    annotation_writer: Optional[Callable[..., Any]] = None,
+    defer_identity: bool = False,
+) -> CanonicalPlateSource:
+    """Index a managed Plate Zarr in place using per-image identities.
+
+    Writes the canonical sidecar before the OMERO annotations.
+
+    Args:
+        conn (BlitzGateway): OMERO connection of the requesting user.
+        plate (Any): OMERO Plate wrapper backed by the Zarr.
+        existing_path (Path): The managed Plate Zarr store.
+        storage_roots (Dict[str, Path]): Managed storage roots by storage ID.
+        source_generation (int): Generation of the registration.
+        identity_provider (Optional[Any]): Pixel identity provider; defaults
+            to ISCC-BIO.
+        annotation_writer (Optional[Callable[..., Any]]): Writer of the
+            OMERO annotations; defaults to ``post_map_annotation``.
+        defer_identity (bool): Skip measuring the pixel identities.
+
+    Returns:
+        CanonicalPlateSource: The registration that was written and attached.
+    """
     storage_id, _storage_root, relative_path = locate_managed_zarr(
         existing_path,
         storage_roots,
