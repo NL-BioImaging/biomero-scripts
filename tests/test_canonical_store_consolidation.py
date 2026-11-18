@@ -13,7 +13,7 @@ from biomero_schema.zarr import (
     PixelIdentity,
 )
 
-from test_canonical_marker_atomic import _moves_sidecars_through_the_importer
+from sidecar_feature import sidecars_live_in_biomero_folders
 
 
 SOURCE_ROOT = Path(os.environ.get(
@@ -240,7 +240,12 @@ def _importer_sidecar(store):
 
 
 def _remove_external_canonical_markers(store):
-    """Stand-in for the importer's helper: drop the sidecar, then its empty folder."""
+    """Stand-in for the importer's helper: drop the sidecar, then its empty folder.
+
+    The empty-folder behaviour is the importer's (``rmdir`` semantics), not the
+    script's; the test pins that the script calls the helper for every
+    generated store and not for the selected one.
+    """
     sidecar = _importer_sidecar(store)
     if sidecar.exists():
         sidecar.unlink()
@@ -251,7 +256,7 @@ def _remove_external_canonical_markers(store):
 
 
 @pytest.mark.skipif(
-    not _moves_sidecars_through_the_importer(SCRIPT_PATH),
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
     reason="sidecars are handled through the importer in a later source",
 )
 @pytest.mark.parametrize("stable_has_sidecar", [False, True],

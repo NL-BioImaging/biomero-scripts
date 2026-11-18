@@ -10,26 +10,14 @@ from uuid import uuid4
 
 import pytest
 
+from sidecar_feature import sidecars_live_in_biomero_folders
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT = SOURCE_ROOT / "admin" / "BIOMERO_Migrate_Shallow_Storage.py"
 MARKER_NAME = ".biomero-canonical.json"
-
-
-def _moves_sidecars_through_the_importer(path):
-    """Whether the source moves sidecars with the importer's helper.
-
-    Gates on the helper call the feature adds, not on log text or on keyword
-    arguments, so rewording a message fails the tests instead of skipping them.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    return any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "move_canonical_marker"
-        for node in ast.walk(tree))
 
 
 def _marker_helpers():
@@ -102,7 +90,7 @@ def test_failed_replacement_preserves_marker_and_cleans_temp_file(tmp_path):
 
 
 @pytest.mark.skipif(
-    not _moves_sidecars_through_the_importer(SCRIPT),
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
     reason="sidecar location moved to BIOMERO folders in a later source",
 )
 def test_store_with_only_a_legacy_sidecar_is_rewritten_by_the_importer(tmp_path):

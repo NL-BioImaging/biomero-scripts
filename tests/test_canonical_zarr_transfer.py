@@ -9,6 +9,8 @@ from time import monotonic
 from types import SimpleNamespace
 
 import pytest
+
+from sidecar_feature import sidecars_live_in_biomero_folders
 from biomero_shallower.ngff import read_attrs as read_ngff_attrs
 
 from biomero_schema.zarr import (
@@ -36,24 +38,6 @@ SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "_data" / "_SLURM_Image_Transfer.py"
-
-
-def _survives_unwritable_sidecars(path):
-    """Whether the trust upgrade treats an unwritable sidecar as optional.
-
-    Gates on the OSError handler the feature adds to ``upgrade_reused_canonical``,
-    not on log text or on keyword arguments, so rewording a message fails the
-    tests instead of skipping them.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    upgrade = next(node for node in tree.body
-                   if isinstance(node, ast.FunctionDef)
-                   and node.name == "upgrade_reused_canonical")
-    return any(
-        isinstance(node, ast.ExceptHandler) and node.type is not None
-        and any(isinstance(name, ast.Name) and name.id == "OSError"
-                for name in ast.walk(node.type))
-        for node in ast.walk(upgrade))
 
 
 class InvalidCanonicalStore(RuntimeError):
@@ -961,7 +945,7 @@ def test_trust_upgrade_updates_one_store_without_new_generation(
 
 
 @pytest.mark.skipif(
-    not _survives_unwritable_sidecars(SCRIPT_PATH),
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
     reason="unwritable sidecar folder handled in a later source",
 )
 def test_trust_upgrade_survives_unwritable_sidecar_folder(
@@ -994,7 +978,7 @@ def test_trust_upgrade_survives_unwritable_sidecar_folder(
 
 
 @pytest.mark.skipif(
-    not _survives_unwritable_sidecars(SCRIPT_PATH),
+    not sidecars_live_in_biomero_folders(SOURCE_ROOT),
     reason="unreadable sidecars handled in a later source",
 )
 @pytest.mark.parametrize("error", [
