@@ -58,11 +58,11 @@ VERSION = "2.9.0b24"
 
 logger = logging.getLogger(__name__)
 
-SLURM_JOB_ID = "SLURM Job Id"
+SLURM_JOB_ID = constants.results.OUTPUT_SLURM_JOB_ID
 SLURM_JOB_ID_OLD = "SLURM Job Id (old)"
 RUN_ON_GPU_NS = "GPU"
 RUNNING_JOB = "Running Job"
-COMPLETED_JOB = "Completed Job"
+COMPLETED_JOB = constants.results.OUTPUT_COMPLETED_JOB
 
 
 def getUserProjects():
@@ -92,7 +92,7 @@ def getUserProjects():
         client.closeSession()
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for SLURM job monitoring and update script.
     
     Provides interface for monitoring active SLURM jobs and retrieving

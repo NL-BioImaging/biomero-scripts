@@ -14,7 +14,7 @@ import sys
 
 import omero
 import omero.scripts as omscripts
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring
 
@@ -211,7 +211,7 @@ def runScript():
                 user_id,
             )
             client.setOutput(
-                "Message",
+                constants.results.MESSAGE_OUTPUT,
                 rstring(
                     "ACCESS DENIED: This script requires OMERO administrator "
                     f"privileges. User ID {user_id} is not an admin."
@@ -226,11 +226,11 @@ def runScript():
         )
         with SlurmClient.from_config() as slurm_client:
             _success, message = run_cownary(slurm_client)
-        client.setOutput("Message", rstring(message))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(message))
     except Exception as exc:
         logger.exception("Cownary failed unexpectedly")
         client.setOutput(
-            "Message",
+            constants.results.MESSAGE_OUTPUT,
             rstring(
                 "COWNARY FAILED\n"
                 f"{type(exc).__name__}: {exc}"

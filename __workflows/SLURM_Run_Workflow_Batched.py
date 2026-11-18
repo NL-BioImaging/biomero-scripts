@@ -425,6 +425,8 @@ def runScript() -> None:
         # 3. Track (omero) jobs, join log outputs
         try:
             # log_string will be output in the Omero Web UI
+            # Internal keys of the text shown to the user, not output names
+            # of another script.
             UI_messages = {
                 'Message': [],
                 'File_Annotation': []
@@ -696,8 +698,7 @@ def runScript() -> None:
                                         [f">> Batch {i}: ",
                                          result_msg])
 
-                                annotation_key = (
-                                    constants.results.FILE_ANNOTATION_OUTPUT)
+                                annotation_key = constants.results.FILE_ANNOTATION_OUTPUT
                                 if annotation_key in results:
                                     UI_messages['File_Annotation'].append(
                                         results[annotation_key].getValue())

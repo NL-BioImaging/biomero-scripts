@@ -185,7 +185,7 @@ def transfer_file_to_slurm(
 # OMERO script entry point
 # ---------------------------------------------------------------------------
 
-def run_script():
+def run_script() -> None:
     """OMERO script entry point for _SLURM_File_Transfer."""
 
     with SlurmClient.from_config() as slurmClient:

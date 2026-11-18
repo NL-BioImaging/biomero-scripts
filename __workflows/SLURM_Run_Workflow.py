@@ -98,8 +98,9 @@ SHALLOW_ZARR_STORAGE_ENABLED = IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
 if IMPORTER_ENABLED:
-    IMPORT_SCRIPTS = ["SLURM_Import_Results.py"]
-    logger.info("Using SLURM_Import_Results.py (importer-enabled workflow)")
+    IMPORT_SCRIPTS = [constants.IMPORT_RESULTS_SCRIPT]
+    logger.info(f"Using {constants.IMPORT_RESULTS_SCRIPT} "
+                f"(importer-enabled workflow)")
 else:
     IMPORT_SCRIPTS = [constants.IMAGE_IMPORT_SCRIPT]
     logger.info("Using SLURM_Get_Results.py (standard workflow)")
@@ -276,8 +277,21 @@ def remove_input_markers_after_import(
         results_path, TRANSFER_INPUT_MARKER, workflow_id)
 
 
-def parse_canonical_inputs_output(results):
-    """Validate canonical input records returned by Image Transfer."""
+def parse_canonical_inputs_output(
+        results: Optional[Dict[str, Any]]) -> Tuple[CanonicalInput, ...]:
+    """Validate canonical input records returned by Image Transfer.
+
+    Args:
+        results (Optional[Dict[str, Any]]): Outputs of the Image Transfer
+            script.
+
+    Returns:
+        Tuple[CanonicalInput, ...]: The recorded inputs; empty when the
+        script returned none.
+
+    Raises:
+        ValueError: If the output is not a JSON list.
+    """
     if not results or constants.results.CANONICAL_INPUTS_OUTPUT not in results:
         logger.debug(
             f"Image Transfer returned no "
@@ -2167,8 +2181,12 @@ def import_completed_job(pipeline: PipelineRun,
     return JobUpdate(finished=True, failed=import_failed, message=log_msg)
 
 
-def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id,
-                            group_id):
+def upload_job_log_to_omero(client: Any,
+                            conn: BlitzGateway,
+                            slurmClient: SlurmClient,
+                            slurm_job_id: int,
+                            wf_id: UUID,
+                            group_id: int) -> str:
     """Fetch a workflow job's Slurm log and attach it to OMERO (best-effort).
 
     Normally the workflow log is uploaded by the result-import step, but that
@@ -2234,16 +2252,17 @@ def upload_job_log_to_omero(client, conn, slurmClient, slurm_job_id, wf_id,
 
 
 def run_workflow(slurmClient: SlurmClient,
-                 workflow_params,
-                 file_params,
-                 client,
-                 conn,
+                 workflow_params: Dict[str, Any],
+                 file_params: Dict[str, Any],
+                 client: Any,
+                 conn: BlitzGateway,
                  UI_messages: str,
-                 zipfile,
-                 email,
-                 name,
-                 wf_id,
-                 output_settings=None):
+                 zipfile: str,
+                 email: str,
+                 name: str,
+                 wf_id: UUID,
+                 output_settings: Optional[Dict[str, Any]] = None
+                 ) -> Tuple[str, int, UUID, UUID]:
     """Execute a specific workflow on the SLURM cluster.
 
     Submits a named workflow to SLURM with user-specified parameters and
@@ -3272,7 +3291,7 @@ def importResultsToOmero(client: omscripts.client,
         persist_dict
     )
     # Add task_id to inputs so Import_Results can update task status during import
-    inputs["Task_ID"] = rstring(str(task_id))
+    inputs[constants.results.TASK_ID] = rstring(str(task_id))
     slurmClient.workflowTracker.start_task(task_id)
     rv, job = run_omero_script(client, svc, script_id, inputs, slurmClient=slurmClient)
     

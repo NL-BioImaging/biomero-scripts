@@ -33,6 +33,9 @@ Institution: Amsterdam UMC, University of Dundee
 License: GNU GPL version 2 (see LICENSE)
 """
 
+from typing import Any, List, Optional
+from uuid import UUID
+
 import omero
 import omero.gateway
 from omero import scripts
@@ -89,8 +92,13 @@ def resolve_log_fallback_target(client, conn):
     return []
 
 
-def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
-                                   targets=None):
+def upload_conversion_log_to_omero(client: Any,
+                                   conn: BlitzGateway,
+                                   slurmClient: SlurmClient,
+                                   slurmJob: Any,
+                                   wf_id: Optional[UUID],
+                                   targets: Optional[List[Any]] = None
+                                   ) -> str:
     """Fetch the conversion job log from Slurm and attach it to OMERO.
 
     The conversion runs as a Slurm array job that writes ``omero-<jobid>_*.log``
@@ -169,7 +177,7 @@ def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
         return f" (failed to upload conversion log: {e})"
 
 
-def runScript():
+def runScript() -> None:
     """
     Main entry point for SLURM remote data conversion script.
 

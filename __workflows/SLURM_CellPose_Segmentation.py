@@ -59,7 +59,7 @@ _DEFAULT_MAIL = "No"
 _DEFAULT_TIME = "00:15:00"
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for CellPose segmentation workflow on SLURM.
     
     Executes CellPose segmentation algorithm on SLURM cluster using

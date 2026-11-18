@@ -31,7 +31,7 @@ import omero.gateway
 from omero import scripts
 from omero.rtypes import rstring, unwrap
 from omero.gateway import BlitzGateway
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 import logging
 import json
 from pathlib import Path
@@ -634,7 +634,7 @@ def runScript():
         
         if not is_admin:
             logger.warning("Access denied: Admin privileges required")
-            client.setOutput("Message", rstring(
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                 f"ACCESS DENIED: This initialization script requires OMERO "
                 f"administrator privileges. User ID {user_id} is not an admin."
             ))
@@ -725,7 +725,7 @@ def runScript():
         if metadata_report is not None:
             message += '\n' + format_metadata_summary(metadata_report)
         logger.info('%s', message)
-        client.setOutput("Message", rstring(str(message)))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message)))
 
     finally:
         client.closeSession()

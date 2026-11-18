@@ -212,13 +212,38 @@ def _get_roi_script_capability(script_service):
     return {"available": True, "script_id": int(unwrap(matches[0].id))}
 
 
-def execute_roi_postprocessing(client, script_service, image_pairs,
-                               roi_shape="Polygon", roi_label_pattern="",
-                               delete_label_images=False,
-                               roi_name_prefix="",
-                               roi_color="",
-                               clear_existing_rois=False,
-                               clear_roi_filter=""):
+def execute_roi_postprocessing(client: Any,
+                               script_service: Any,
+                               image_pairs: List[Tuple[int, int]],
+                               roi_shape: str = "Polygon",
+                               roi_label_pattern: str = "",
+                               delete_label_images: bool = False,
+                               roi_name_prefix: str = "",
+                               roi_color: str = "",
+                               clear_existing_rois: bool = False,
+                               clear_roi_filter: str = "") -> Dict[str, Any]:
+    """Run Labels2Rois with exact imported-label/source-image ID pairs.
+
+    Args:
+        client (Any): OMERO script client.
+        script_service (Any): OMERO script service.
+        image_pairs (List[Tuple[int, int]]): Imported label image ID and the
+            source image ID it belongs to.
+        roi_shape (str): "Polygon" or "Mask".
+        roi_label_pattern (str): Pattern selecting the label images.
+        delete_label_images (bool): Delete the label images afterwards.
+        roi_name_prefix (str): Prefix of the created ROI names.
+        roi_color (str): ``#RRGGBB`` color of the ROIs; empty for the default.
+        clear_existing_rois (bool): Clear existing ROIs first.
+        clear_roi_filter (str): Filter for the existing ROIs to clear.
+
+    Returns:
+        Dict[str, Any]: The ``status`` ("skipped" or "completed") and a
+        ``message``; "completed" also has the number of ``pairs``.
+
+    Raises:
+        ValueError: If the ROI shape is not Polygon or Mask.
+    """
     pairs, ambiguous_sources = select_roi_image_pairs(
         image_pairs, roi_label_pattern)
     if not pairs:
@@ -1654,9 +1679,6 @@ def upload_log_to_omero(
             description += f" (Workflow {wf_id})"
         annotation = create_file_annotation_inplace(
             conn, file, mimetype, namespace, description)
-        # Already have other output in this script
-        # But you could add this as output if you wanted log instead
-
         # Build a fully-qualified URL so it works from any browser location.
         # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
         # the canonical absolute base; fall back to omero.web.prefix for a
@@ -3756,7 +3778,7 @@ def storage_provenance_import_task(tracker, wf_id):
     """Resolve one import task from durable workflow history."""
     workflow = tracker.repository.get(uuid.UUID(str(wf_id)))
     tasks = [tracker.repository.get(tid) for tid in workflow.tasks]
-    imports = [task for task in tasks if task.task_name == 'SLURM_Import_Results.py']
+    imports = [task for task in tasks if task.task_name == constants.IMPORT_RESULTS_SCRIPT]
     if len(imports) != 1:
         raise ValueError('Cannot identify a unique import task for storage provenance')
     return imports[0]

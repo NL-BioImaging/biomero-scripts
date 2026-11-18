@@ -3212,7 +3212,7 @@ def write_logfile(exp_dir):
             log_file.write("\n")
 
 
-def run_script():
+def run_script() -> None:
     """Main entry point for SLURM image transfer script.
     
     Called by OMERO scripting service to handle data export from OMERO
