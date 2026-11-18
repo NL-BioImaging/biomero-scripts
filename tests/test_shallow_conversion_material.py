@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from runner_key_names import runner_key_names
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -465,10 +467,12 @@ def test_detached_launcher_records_zarr_execution_policy():
     )
     extra_params = launcher.args[-1]
     assert isinstance(extra_params, ast.Dict)
+    key_names = runner_key_names(RUNNER_PATH)
     recorded = {
-        key.value: value
+        key_names[key.id] if isinstance(key, ast.Name) else key.value: value
         for key, value in zip(extra_params.keys, extra_params.values)
-        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        if isinstance(key, ast.Name) or (
+            isinstance(key, ast.Constant) and isinstance(key.value, str))
     }
 
     assert isinstance(recorded["use_zarr_format"], ast.Name)

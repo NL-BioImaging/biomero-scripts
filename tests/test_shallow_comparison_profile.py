@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import biomero.constants as biomero_constants
+from runner_key_names import runner_key_names
 
 from test_canonical_zarr_transfer import _load_canonical_functions
 
@@ -50,9 +51,10 @@ def policy_helpers():
                                   OME_ZARR_VERSION_0_4="0.4"),
         results=SimpleNamespace(OUTPUT_ATTACH_NEW_DATASET_ID="dataset_id",
                                 OUTPUT_ATTACH_NEW_SCREEN_ID="screen_id"))
+    runner = Path(os.environ["BIOMERO_SCRIPTS_ROOT"]) / "__workflows/SLURM_Run_Workflow.py"
     return load_functions("__workflows/SLURM_Run_Workflow.py",
         {"build_output_settings", "resolve_pipeline_inputs"}, constants=constants,
-        OUTPUT_OPTIONS=(), unwrap=lambda value: value)
+        OUTPUT_OPTIONS=(), unwrap=lambda value: value, **runner_key_names(runner))
 
 
 def test_parameter_key_matches_shared_core_contract_when_paired():
