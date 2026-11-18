@@ -13,6 +13,12 @@ $env:BIOMERO_SCRIPTS_ROOT = "D:\path\to\biomero-scripts"
 python -m pytest tests -q
 ```
 
+`tests/conftest.py` replaces `ast.parse` for the whole pytest process: parsed
+function signatures lose their parameter and return annotations, so tests can
+run single script functions in a small namespace. Class-body and variable
+annotations are kept. A test that needs to inspect annotations must not use
+`ast.parse` for it (`tests/test_ast_parse_annotations.py` pins this).
+
 Keep tests under `tests/` on this branch. Do not merge this branch into
 `master`; update it independently whenever production behavior changes.
 
