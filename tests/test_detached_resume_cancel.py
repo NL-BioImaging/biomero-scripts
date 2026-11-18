@@ -18,6 +18,8 @@ from uuid import UUID
 
 import pytest
 
+from runner_key_names import runner_key_names
+
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 SOURCE = ROOT / '__workflows' / 'SLURM_Run_Workflow.py'
 TREE = ast.parse(SOURCE.read_text(encoding='utf-8'))
@@ -28,7 +30,7 @@ NODE_NAMES = {
     'execute_workflow_pipeline', 'run_pipeline_stages', 'export_data_stage',
     'convert_data_stage', 'submit_workflow_jobs', 'monitor_slurm_jobs',
     'exportImageToSLURM', 'convertDataOnSLURM', 'ensure_tracking_uuid',
-    'PipelineRun', 'JobUpdate', 'process_job_state', 'end_failed_job',
+    'PipelineRun', 'JobUpdate', 'resolve_pipeline_inputs', 'process_job_state', 'end_failed_job',
     'import_completed_job'}
 NODES = [node for node in TREE.body
          if isinstance(node, (ast.FunctionDef, ast.ClassDef))
@@ -115,7 +117,8 @@ def runner_namespace(**overrides):
         IMPORT_SCRIPTS=(IMPORT,),
         hpc_recovery_scope=lambda *args: contextlib.nullcontext(),
         timesleep=SimpleNamespace(sleep=lambda seconds: None),
-        createFileName=lambda *args: 'input-folder')
+        createFileName=lambda *args: 'input-folder',
+        **runner_key_names(SOURCE))
     exec(compile(ast.Module(body=NODES, type_ignores=[]), str(SOURCE), 'exec'),
          namespace)
     namespace.update(overrides)  # after the exec: stand-ins for source functions
@@ -448,6 +451,47 @@ def test_launcher_records_every_input_and_the_derived_values(tracker,
         biomero_constants.LAUNCHER_MARKER: '2.9.0-test'}
     assert eventsourcing.is_launcher_task(task)
     assert tracker.find_launcher_task(workflow_id).id == task_id
+
+
+def test_launcher_key_names_are_the_persisted_strings():
+    """The launcher params are stored in events: their spelling is a contract."""
+    names = runner_key_names(SOURCE)
+
+    assert {key: value for key, value in names.items()
+            if key.startswith('LAUNCHER_')} == {
+        'LAUNCHER_ZIPFILE': 'zipfile', 'LAUNCHER_EMAIL': 'email',
+        'LAUNCHER_USE_ZARR_FORMAT': 'use_zarr_format',
+        'LAUNCHER_OME_ZARR_VERSION': 'ome_zarr_version',
+        'LAUNCHER_ROI_LABEL_PATTERN': 'roi_label_pattern'}
+    assert names['WF_PARAMS_PREFIX'] == 'wf_params_'
+    assert names['WF_FILE_PARAMS_PREFIX'] == 'wf_file_params_'
+
+
+def test_launcher_params_are_read_back_by_the_names_they_were_written_with():
+    """What runScript registers is what resolve_pipeline_inputs resumes from."""
+    names = runner_key_names(SOURCE)
+    namespace = runner_namespace()
+    written = {
+        names['LAUNCHER_ZIPFILE']: 'recorded-folder',
+        names['LAUNCHER_EMAIL']: 'me@example.org',
+        names['LAUNCHER_USE_ZARR_FORMAT']: True,
+        names['LAUNCHER_OME_ZARR_VERSION']: '0.5',
+        names['LAUNCHER_ROI_LABEL_PATTERN']: 'cells',
+        'group': 3, 'workflows': [WORKFLOW], 'selected_output': {},
+        'output_settings': {'recorded': True},
+        f"{names['WF_PARAMS_PREFIX']}{WORKFLOW}": {'p': 1},
+        f"{names['WF_FILE_PARAMS_PREFIX']}{WORKFLOW}": {'f': 2}}
+
+    resolved = namespace['resolve_pipeline_inputs'](
+        SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), written)
+
+    assert resolved['zipfile'] == 'recorded-folder'
+    assert resolved['email'] == 'me@example.org'
+    assert resolved['use_zarr_format'] is True
+    assert resolved['ome_zarr_version'] == '0.5'
+    assert resolved['roi_label_pattern'] == 'cells'
+    assert resolved['_workflow_params'] == {WORKFLOW: {'p': 1}}
+    assert resolved['_workflow_file_params'] == {WORKFLOW: {'f': 2}}
 
 
 # ------------------- cancel passes through every stage ------------------- #
@@ -846,7 +890,12 @@ def test_unreadable_tasks_still_fail_the_workflow(tracker, workflow_id):
         workflowTracker=tracker, cancel_slurm_jobs=Mock(),
         get_workflow_tasks=Mock(side_effect=RuntimeError('database down')))
 
-    runner_namespace()['cancel_workflow_run'](
+    message = runner_namespace()['cancel_workflow_run'](
         slurm, workflow_id, 'Cancelled: asked', '')
 
     assert last_event(tracker, workflow_id) == 'WorkflowFailed'
+    # Unknown jobs are not "no jobs": the reason must not claim an empty list.
+    assert 'could not be read' in message
+    assert 'unknown' in message and 'cancel them manually' in message
+    assert 'Slurm jobs [' not in message
+    slurm.cancel_slurm_jobs.assert_not_called()

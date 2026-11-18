@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from runner_key_names import runner_key_names
+
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 RUNNER = ROOT / "__workflows" / "SLURM_Run_Workflow.py"
@@ -40,6 +42,7 @@ def test_detached_and_batch_child_input_resolution(use_zarr, requested, expected
             transfer=SimpleNamespace(OME_VERSION="version", OME_ZARR_VERSION_0_4="0.4",
                                      OME_ZARR_VERSION_0_5="0.5"),
             workflow=SimpleNamespace(USE_ZARR_FORMAT="use_zarr")),
+        **runner_key_names(RUNNER),
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(RUNNER), "exec"), namespace)
     params = {"selected_output": {}, "roi_label_pattern": "", "email": "test@example.org",

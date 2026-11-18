@@ -102,7 +102,7 @@ def test_batched_launcher_records_the_contract_the_supervisor_reads():
 
     task_id = names['register_detached_batches'](
         client, SimpleNamespace(workflowTracker=tracker), workflow_id,
-        ['analysis'], [[1, 2], [3]], 2, 'Image', inputs,
+        ['analysis'], [[1, 2], [3]], 'Image', inputs,
         {'New Dataset': True}, 7, [1, 2, 3])
 
     # read back through a fresh tracker, as the supervisor does
@@ -112,7 +112,7 @@ def test_batched_launcher_records_the_contract_the_supervisor_reads():
     assert is_launcher_task(task)
     assert task.params == {
         'IDs': [1, 2, 3], 'Data_Type': 'Image', 'Batch_Size': 2,
-        'workflows': ['analysis'], 'batches': [[1, 2], [3]], 'batch_size': 2,
+        'workflows': ['analysis'], 'batches': [[1, 2], [3]],
         'effective_type': 'Image',
         'base_inputs': {'IDs': [1, 2, 3], 'Data_Type': 'Image',
                         'Duplicate': False},
@@ -131,14 +131,14 @@ def test_batched_launcher_params_include_every_key_the_processor_reads():
     workflow_id = tracker.initiate_workflow('wf', '', user=1, group=2)
     task_id = batched_registration()['register_detached_batches'](
         SimpleNamespace(getInputs=lambda unwrap: {}),
-        SimpleNamespace(workflowTracker=tracker), workflow_id, [], [[1]], 1,
+        SimpleNamespace(workflowTracker=tracker), workflow_id, [], [[1]],
         'Image', {}, {}, 1, [1])
     assert processor_keys <= set(tracker.repository.get(task_id).params)
 
 
 # ----------------------------- cancel script ----------------------------- #
 
-def cancel_runscript(inputs, user_id, is_admin):
+def cancel_runscript(inputs, user_id, is_admin, outputs=None):
     if not CANCEL.exists():
         pytest.skip('Source has no cancel script')
     nodes = source_nodes(CANCEL, {
@@ -147,7 +147,7 @@ def cancel_runscript(inputs, user_id, is_admin):
     # The script file exists, so runScript is part of its contract.
     assert any(isinstance(n, ast.FunctionDef) and n.name == 'runScript'
                for n in nodes), 'Cancel script lacks runScript'
-    outputs = {}
+    outputs = {} if outputs is None else outputs
     client = SimpleNamespace(
         getInputs=lambda unwrap=False: dict(inputs),
         setOutput=lambda key, value: outputs.__setitem__(key, value),
@@ -164,10 +164,21 @@ def cancel_runscript(inputs, user_id, is_admin):
         omero=SimpleNamespace(constants=SimpleNamespace(
             namespaces=SimpleNamespace(NSDYNAMIC='dynamic'))),
         BlitzGateway=lambda client_obj: connection,
-        WorkflowTracker=WorkflowTracker)
-    namespace['runScript']()
-    client.closeSession.assert_called_once()
-    return outputs['Message']
+        WorkflowTracker=WorkflowTracker, constants=constants)
+    try:
+        namespace['runScript']()
+    finally:
+        # The session is closed on success and on failure.
+        client.closeSession.assert_called_once()
+    return outputs[constants.results.MESSAGE_OUTPUT]
+
+
+def cancel_runscript_failure(inputs, user_id, is_admin, error):
+    """Run the cancel script until it fails; return the error and the outputs."""
+    outputs = {}
+    with pytest.raises(error) as raised:
+        cancel_runscript(inputs, user_id, is_admin, outputs)
+    return raised.value, outputs
 
 
 @pytest.mark.parametrize('user_id, is_admin', [(1, True), (7, False)],
@@ -191,16 +202,21 @@ def test_cancel_script_runscript_refuses_another_user():
     tracker = WorkflowTracker()
     workflow_id = tracker.initiate_workflow('wf', '', user=7, group=1)
 
-    message = cancel_runscript(
-        {'Workflow_ID': str(workflow_id), 'Reason': 'because'}, 8, False)
+    error, outputs = cancel_runscript_failure(
+        {'Workflow_ID': str(workflow_id), 'Reason': 'because'}, 8, False,
+        PermissionError)
 
+    # The user sees the reason, and the script ends as failed (red X).
+    message = outputs[constants.results.MESSAGE_OUTPUT]
     assert message.startswith('Error:') and 'belongs to another user' in message
+    assert 'belongs to another user' in str(error)
     assert not WorkflowTracker().is_workflow_cancel_requested(workflow_id)
 
 
-def test_cancel_script_runscript_reports_a_bad_workflow_id():
-    message = cancel_runscript({'Workflow_ID': 'not-a-uuid'}, 1, True)
-    assert message.startswith('Error:')
+def test_cancel_script_runscript_fails_on_a_bad_workflow_id():
+    _, outputs = cancel_runscript_failure(
+        {'Workflow_ID': 'not-a-uuid'}, 1, True, ValueError)
+    assert outputs[constants.results.MESSAGE_OUTPUT].startswith('Error:')
 
 
 def test_cancel_script_runscript_uses_the_default_reason():
