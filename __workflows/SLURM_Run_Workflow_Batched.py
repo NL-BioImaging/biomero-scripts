@@ -90,7 +90,6 @@ def register_detached_batches(client: omscripts.client,
                               wf_id: UUID,
                               selected_workflow_names: List[str],
                               batch_ids_list: List[List[int]],
-                              batch_size: int,
                               effective_type: str,
                               inputs: Dict[str, Any],
                               selected_output: Dict[str, Any],
@@ -99,9 +98,10 @@ def register_detached_batches(client: omscripts.client,
     """Record a batched request as a launcher task for the detached supervisor.
 
     The task's params are the contract with the supervisor's batched parent:
-    every input of this script, the selected workflows, the ``batches`` with
-    their ``batch_size`` and ``effective_type``, the ``base_inputs`` each child
-    starts from, the ``selected_output``, the ``group`` and all image IDs.
+    every input of this script (including the batch size), the selected
+    workflows, the ``batches`` with their ``effective_type``, the
+    ``base_inputs`` each child starts from, the ``selected_output``, the
+    ``group`` and all image IDs.
 
     Args:
         client (omscripts.client): OMERO script client whose inputs are
@@ -111,7 +111,6 @@ def register_detached_batches(client: omscripts.client,
         wf_id (UUID): Workflow the launcher belongs to.
         selected_workflow_names (List[str]): Workflows the user chose.
         batch_ids_list (List[List[int]]): The IDs of each batch.
-        batch_size (int): Items per batch.
         effective_type (str): Data type of the items after batching.
         inputs (Dict[str, Any]): Script inputs as rtypes, as sent to each
             batch.
@@ -126,7 +125,6 @@ def register_detached_batches(client: omscripts.client,
         **(client.getInputs(unwrap=True) or {}),
         constants.launcher_params.WORKFLOWS: selected_workflow_names,
         constants.launcher_params.BATCHES: [list(batch) for batch in batch_ids_list],
-        "batch_size": batch_size,
         constants.launcher_params.EFFECTIVE_TYPE: effective_type,
         constants.launcher_params.BASE_INPUTS: {key: unwrap(value)
                                           for key, value in inputs.items()},
@@ -141,7 +139,7 @@ def register_detached_batches(client: omscripts.client,
     return launcher_task_id
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for SLURM batched workflow execution script.
 
     Orchestrates batch processing of workflows on SLURM clusters by dividing
@@ -592,7 +590,7 @@ def runScript():
                                            if selected]
                 register_detached_batches(
                     client, slurmClient, wf_id, selected_workflow_names,
-                    batch_ids_list, batch_size, effective_type, inputs,
+                    batch_ids_list, effective_type, inputs,
                     selected_output, group, image_ids)
                 client.setOutput("Message", rstring(
                     f"Your {len(batch_ids_list)} batches are queued and run "

@@ -340,8 +340,22 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
 VERSION = "2.9.0b24"
 
 
-def load_canonical_input_snapshot(slurm_client, workflow_id):
-    """Resolve the exact workflow input snapshot from workflow tracking."""
+def load_canonical_input_snapshot(slurm_client: SlurmClient,
+                                  workflow_id: Union[str, UUID]
+                                  ) -> Optional[Any]:
+    """Resolve the exact workflow input snapshot from workflow tracking.
+
+    Args:
+        slurm_client (SlurmClient): Active SLURM client, whose tracker holds
+            the snapshot.
+        workflow_id (Union[str, UUID]): Workflow whose inputs to resolve.
+
+    Returns:
+        Optional[Any]: The workflow's ``CanonicalInputManifest``, with the
+        executed workflow's output policy when it is unambiguous; None when
+        tracking is disabled or the snapshot is missing, corrupt or
+        unreadable (the caller then matches on the returned pixel identity).
+    """
     workflow_id = UUID(str(workflow_id))
     if not slurm_client.track_workflows:
         logger.info(
