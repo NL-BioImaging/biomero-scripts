@@ -124,13 +124,14 @@ def register_detached_batches(client: omscripts.client,
     """
     launcher_params = {
         **(client.getInputs(unwrap=True) or {}),
-        "workflows": selected_workflow_names,
-        "batches": [list(batch) for batch in batch_ids_list],
+        constants.launcher_params.WORKFLOWS: selected_workflow_names,
+        constants.launcher_params.BATCHES: [list(batch) for batch in batch_ids_list],
         "batch_size": batch_size,
-        "effective_type": effective_type,
-        "base_inputs": {key: unwrap(value) for key, value in inputs.items()},
-        "selected_output": selected_output,
-        "group": group,
+        constants.launcher_params.EFFECTIVE_TYPE: effective_type,
+        constants.launcher_params.BASE_INPUTS: {key: unwrap(value)
+                                          for key, value in inputs.items()},
+        constants.launcher_params.SELECTED_OUTPUT: selected_output,
+        constants.launcher_params.GROUP: group,
         constants.transfer.IDS: list(image_ids)}
     launcher_task_id = slurmClient.workflowTracker.add_launcher_task(
         wf_id, constants.RUN_WF_BATCHED_SCRIPT, VERSION,

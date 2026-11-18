@@ -384,10 +384,11 @@ def load_canonical_input_snapshot(slurm_client, workflow_id):
         tasks = [tracker.repository.get(task_id) for task_id in workflow.tasks]
         analyses = [task for task in tasks
                     if task.job_ids and isinstance(
-                        task.params.get("output_settings"), dict)]
+                        task.params.get(constants.launcher_params.OUTPUT_SETTINGS),
+                        dict)]
         if len(analyses) == 1:
             task = analyses[0]
-            settings = task.params["output_settings"]
+            settings = task.params[constants.launcher_params.OUTPUT_SETTINGS]
             return manifest.model_copy(update={
                 "original_pixels_not_required": (
                     settings.get("original_pixels_not_required") is True),
