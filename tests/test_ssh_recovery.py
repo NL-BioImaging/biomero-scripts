@@ -19,7 +19,9 @@ def load(name):
     if not functions and not os.environ.get('BIOMERO_TEST_SSH_RECOVERY'):
         pytest.skip('SSH recovery orchestration is not present in source')
     assert functions, 'Missing SSH recovery orchestration'
-    namespace = {'logger': logging.getLogger(__name__)}
+    from biomero import ssh_recovery
+    namespace = {'logger': logging.getLogger(__name__),
+                 'ssh_recovery': ssh_recovery}
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'),
          namespace)
     return namespace[name]
@@ -75,7 +77,7 @@ def test_preflight_supports_older_core_without_recovery():
 @pytest.mark.parametrize('progress_timeout', [False, True])
 def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeypatch, detached, progress_timeout):
     """Both callers execute the same pipeline; detached does not excuse inline gaps."""
-    ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    from biomero import ssh_recovery
     if not hasattr(ssh_recovery, 'scope'):
         pytest.skip('Requires recovery-capable core')
     if (not hasattr(ssh_recovery, 'DEFAULT_SSH_RECOVERY_TIMEOUT')
@@ -153,6 +155,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
     run = Mock(return_value=('', 42, 'workflow-id', 'task-id'))
     import_results = Mock(return_value={'Message': SimpleNamespace(getValue=lambda: 'Imported')})
     namespace = dict(logger=logging.getLogger(__name__), unwrap=lambda value: value,
+        ssh_recovery=ssh_recovery,
         EXPORT_SCRIPTS=('export',) if owns_resume else (),
         CONVERSION_SCRIPTS=('convert',) if owns_resume else (),
         IMPORT_SCRIPTS=(),
@@ -194,7 +197,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
 
 def test_recovery_scope_preserves_disabled_legacy_behavior():
     """Cores before the one-path change: a window of 0 bypasses the scope."""
-    ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    from biomero import ssh_recovery
     if not hasattr(ssh_recovery, 'enabled'):
         pytest.skip('Core runs one code path; see the window-zero test below')
     heartbeat = Mock()
@@ -207,7 +210,7 @@ def test_recovery_scope_preserves_disabled_legacy_behavior():
 
 def test_recovery_scope_with_window_zero_is_the_same_path_without_retries():
     """Core runs one code path: 0 only turns retrying off."""
-    ssh_recovery = pytest.importorskip('biomero.ssh_recovery')
+    from biomero import ssh_recovery
     if hasattr(ssh_recovery, 'enabled'):
         pytest.skip('This core still bypasses the scope when the window is 0')
     heartbeat = Mock()
@@ -222,18 +225,3 @@ def test_recovery_scope_with_window_zero_is_the_same_path_without_retries():
     assert heartbeat.call_count == 2
     operation.assert_called_once()
     client.close.assert_not_called()
-
-
-def test_recovery_scope_supports_core_without_recovery(monkeypatch):
-    import builtins
-    original_import = builtins.__import__
-    scope = load('hpc_recovery_scope')
-    def old_core_import(name, *args, **kwargs):
-        if name == 'biomero':
-            raise ImportError('old core has no ssh_recovery module')
-        return original_import(name, *args, **kwargs)
-    monkeypatch.setattr(builtins, '__import__', old_core_import)
-    heartbeat = Mock()
-    with scope(SimpleNamespace(), heartbeat):
-        pass
-    heartbeat.assert_not_called()

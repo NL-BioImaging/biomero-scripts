@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 RUNNER = ROOT / "__workflows" / "SLURM_Run_Workflow.py"
@@ -36,6 +38,7 @@ def test_detached_and_batch_child_input_resolution(use_zarr, requested, expected
     namespace = {
         "unwrap": lambda value: value,
         "constants": SimpleNamespace(
+            launcher_params=biomero_constants.launcher_params,
             transfer=SimpleNamespace(OME_VERSION="version", OME_ZARR_VERSION_0_4="0.4",
                                      OME_ZARR_VERSION_0_5="0.5"),
             workflow=SimpleNamespace(USE_ZARR_FORMAT="use_zarr")),
