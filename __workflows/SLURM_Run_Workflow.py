@@ -55,6 +55,7 @@ License:
 from __future__ import print_function
 import sys
 import os
+from pathlib import Path
 import json
 from uuid import UUID, uuid4
 import omero
@@ -80,6 +81,9 @@ SHALLOW_ZARR_ENABLED = (
 )
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     from biomero.zarr_contracts import CanonicalInput
+    from biomero_schema.zarr import TRANSFER_INPUT_MARKER
+# The transfer writes input markers only when both are on.
+SHALLOW_ZARR_STORAGE_ENABLED = IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
 
 EXPORT_SCRIPTS = [constants.IMAGE_EXPORT_SCRIPT]
 # Dynamically choose import script based on IMPORTER_ENABLED
@@ -103,7 +107,6 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_ATTACH_FILE_OUTPUTS,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 VERSION = "2.9.0b24"
-CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
 
 
 def ensure_tracking_uuid(value):
@@ -115,16 +118,136 @@ def ensure_tracking_uuid(value):
     return UUID(str(value))
 
 
+def is_result_folder_of_workflow(results_root: str, workflow_id: UUID) -> bool:
+    """Tell whether the parent folder of a path is named like this workflow.
+
+    ``get_workflow_results_path`` in SLURM_Import_Results.py makes
+    ``<...>/<workflow id>/<timestamp>``; this checks only the workflow id
+    part, so the result folder of another workflow, a workflow folder and
+    most unrelated paths are not accepted.
+
+    Args:
+        results_root (str): Resolved path to check.
+        workflow_id (UUID): Workflow UUID of this run.
+
+    Returns:
+        bool: True if the name of the parent folder is the workflow id.
+    """
+    return Path(results_root).parent.name == str(workflow_id)
+
+
+def log_walk_error(walk_error: OSError) -> None:
+    """Warn about a folder the marker search could not read."""
+    logger.warning(f"Input marker search skipped a folder: {walk_error}")
+
+
+def remove_input_markers(
+        results_path: str, marker_name: str, workflow_id: UUID) -> int:
+    """Remove the transfer input markers from one BIOMERO result folder.
+
+    The workflow runner owns this cleanup: the marker is only a working file
+    of the transfer, and the importer needs it until the result is imported.
+    Only files named exactly like the marker are removed, and only below one
+    import's result folder of this workflow. Links are not
+    followed, and the search stops at the stores: the result folder holds the
+    exported stores directly, and the marker sits at the root of each.
+
+    Args:
+        results_path (str): Result folder of one import,
+            ``<...>/<workflow id>/<timestamp>``.
+        marker_name (str): File name of the input marker; the caller passes
+            ``TRANSFER_INPUT_MARKER``, which only loads with shallow Zarr.
+        workflow_id (UUID): Workflow UUID of this run; the result folder
+            must belong to it.
+
+    Returns:
+        int: Number of markers removed.
+    """
+    results_root = os.path.realpath(results_path)
+    if not is_result_folder_of_workflow(results_root, workflow_id):
+        logger.warning(
+            f"Not removing input markers: {results_root} is not a result "
+            f"folder of the form <...>/{workflow_id}/<timestamp>")
+        return 0
+    if not os.path.isdir(results_root):
+        logger.warning(
+            f"Not removing input markers: result folder {results_root} "
+            "does not exist")
+        return 0
+    removed = 0
+    for directory, subdirectories, file_names in os.walk(
+            results_root, onerror=log_walk_error, followlinks=False):
+        if directory == results_root:
+            continue  # the stores are its subfolders; no marker sits here
+        if marker_name in file_names:
+            marker_path = os.path.join(directory, marker_name)
+            try:
+                os.remove(marker_path)
+                removed += 1
+                logger.info(f"Removed input marker {marker_path}")
+            except OSError as remove_error:
+                logger.warning(
+                    f"Could not remove input marker {marker_path}: "
+                    f"{remove_error}")
+        subdirectories.clear()  # nothing below a store root is a marker
+    logger.info(
+        f"Removed {removed} input marker(s) below {results_root}")
+    return removed
+
+
+def remove_input_markers_after_import(
+        import_outputs: dict, workflow_id: UUID) -> int:
+    """Remove the input markers from the result that was just imported.
+
+    Call this only after the result import succeeded: the importer reads the
+    marker during import, and removes it itself only after a local evaluation
+    or when the helper kept the full result. It stays in a result that was
+    shallowed on the HPC, and in a result the importer did not evaluate.
+    This one step covers all of those paths: the importer's removal is
+    consume-on-use, this one is the final sweep.
+
+    Args:
+        import_outputs (dict): Outputs of the result import script.
+        workflow_id (UUID): Workflow UUID of this run.
+
+    Returns:
+        int: Number of markers removed.
+    """
+    if not SHALLOW_ZARR_STORAGE_ENABLED:
+        logger.debug(
+            "Not removing input markers: shallow Zarr storage is off, so "
+            "the transfer wrote none")
+        return 0
+    results_path_output = constants.results.RESULTS_PATH_OUTPUT
+    if not import_outputs or results_path_output not in import_outputs:
+        logger.warning(
+            f"Cannot remove input markers: the import script returned no "
+            f"{constants.results.RESULTS_PATH_OUTPUT} output")
+        return 0
+    results_path = unwrap(import_outputs[results_path_output])
+    if not results_path:
+        logger.warning(
+            f"Cannot remove input markers: empty "
+            f"{constants.results.RESULTS_PATH_OUTPUT} output")
+        return 0
+    logger.info(
+        f"Result import is done; removing input markers from {results_path}")
+    return remove_input_markers(
+        results_path, TRANSFER_INPUT_MARKER, workflow_id)
+
+
 def parse_canonical_inputs_output(results):
     """Validate canonical input records returned by Image Transfer."""
-    if not results or CANONICAL_INPUTS_OUTPUT not in results:
+    if not results or constants.results.CANONICAL_INPUTS_OUTPUT not in results:
         logger.debug(
-            f"Image Transfer returned no {CANONICAL_INPUTS_OUTPUT} output")
+            f"Image Transfer returned no "
+            f"{constants.results.CANONICAL_INPUTS_OUTPUT} output")
         return ()
-    raw_value = unwrap(results[CANONICAL_INPUTS_OUTPUT])
+    raw_value = unwrap(results[constants.results.CANONICAL_INPUTS_OUTPUT])
     if not raw_value:
         logger.debug(
-            f"Image Transfer returned an empty {CANONICAL_INPUTS_OUTPUT} "
+            f"Image Transfer returned an empty "
+            f"{constants.results.CANONICAL_INPUTS_OUTPUT} "
             "output")
         return ()
     payload = json.loads(raw_value)
@@ -559,7 +682,7 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
 def validate_remote_shallower_ready(slurmClient: SlurmClient,
                                     use_zarr_format: bool) -> None:
     """Fail before workflow submission when remote shallowing cannot run."""
-    if not (IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED and use_zarr_format
+    if not (SHALLOW_ZARR_STORAGE_ENABLED and use_zarr_format
             and slurmClient.remote_shallow_zarr):
         logger.debug(
             "Remote shallower readiness check skipped: "
@@ -612,7 +735,7 @@ def runScript():
             and handled gracefully.
     """
     shallow_state = ("enabled by flags"
-                     if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED
+                     if SHALLOW_ZARR_STORAGE_ENABLED
                      else "disabled, results stay full")
     logger.info(
         f"Shallow Zarr results: BIOMERO_SHALLOW_ZARR={SHALLOW_ZARR_ENABLED}, "
@@ -2009,7 +2132,7 @@ def exportImageToSLURM(client: omscripts.client,
             logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-        if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
+        if SHALLOW_ZARR_STORAGE_ENABLED:
             logger.info(
                 "Shallow Zarr enabled: reading canonical inputs returned by "
                 f"Image Transfer for workflow {wf_id}")
@@ -2526,6 +2649,14 @@ def importResultsToOmero(client: omscripts.client,
         slurmClient.workflowTracker.fail_task(task_id, error_msg)
         wf_failed = True
         raise RuntimeError(error_msg)
+    # Reached only after a successful import: the importer needed the markers.
+    try:
+        remove_input_markers_after_import(rv, wf_id)
+    except Exception as cleanup_error:
+        # The result is imported; a cleanup problem must not fail the run.
+        logger.warning(
+            f"Input marker cleanup failed, leaving the markers: "
+            f"{cleanup_error}", exc_info=True)
     return rv
 
 

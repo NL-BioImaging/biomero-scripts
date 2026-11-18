@@ -56,6 +56,12 @@ When cleanup is enabled, this script removes:
   directory once import completes **unless** it was attached to OMERO (in which case
   OMERO may reference the file directly via an in-place symlink and it must remain).
 
+OUTPUTS:
+- Message: concise summary of the import.
+- Workflow_UUID: the workflow the results belong to.
+- Results_Path: the ``.analyzed/uuid/timestamp`` folder that was imported from;
+  SLURM_Run_Workflow.py uses it to remove the transfer input markers afterwards.
+
 PERMANENT STORAGE (otherwise preserved):
 - Permanent storage: .analyzed/uuid/timestamp/ directories and extracted contents
 - Complete workflow preservation: images, CSVs, metadata, logs, analysis results
@@ -113,6 +119,9 @@ USE_INPLACE_ATTACHMENTS = os.getenv("USE_INPLACE_ATTACHMENTS", "true").lower() =
 
 logger = logging.getLogger(__name__)
 
+# BIOMERO's result folder under the group folder; configurability is tracked
+# in NL-BIOMERO#111.
+RESULTS_FOLDER = ".analyzed"
 RESULTS_RETRIEVED_MARKER = ".biomero-results-retrieved.json"
 RESULT_IMPORT_STATE = ".biomero-result-import.json"
 IMPORT_POLL_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -1940,7 +1949,7 @@ def get_workflow_results_path(group_name: str, wf_id: Optional[str]) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     results_path = os.path.join(
-        base_path, '.analyzed', wf_id, timestamp)
+        base_path, RESULTS_FOLDER, wf_id, timestamp)
     return results_path
 
 
@@ -1957,7 +1966,7 @@ def find_existing_result_storage(
     """
     base_path = get_importer_group_base_path(group_name)
     workflow_path = os.path.join(
-        base_path, '.analyzed', str(wf_id)) if base_path else None
+        base_path, RESULTS_FOLDER, str(wf_id)) if base_path else None
     if not workflow_path or not os.path.isdir(workflow_path):
         return None, None
 
@@ -5258,6 +5267,7 @@ def runScript() -> None:
             slurm_job_id = None
             wf_id = None
             slurm_data_path = None
+            permanent_storage_path = None
             folder = None
             log_file = None
             script_failed = False
@@ -5419,7 +5429,7 @@ def runScript() -> None:
             # including concurrent first attempts before a result folder exists.
             result_recovery = recovery_locks.enter_context(result_import_recovery(
                 os.path.join(get_importer_group_base_path(group_name),
-                             ".analyzed", str(wf_id)),
+                             RESULTS_FOLDER, str(wf_id)),
                 name=f".biomero-finalize-{uuid.uuid5(uuid.NAMESPACE_URL, str(slurm_job_id))}.lock"))
             # Update task status to IMPORTING if task_id is available
             if task_id and slurmClient.track_workflows:
@@ -5907,6 +5917,12 @@ def runScript() -> None:
             try:
                 if wf_id is not None:
                     client.setOutput(constants.results.WORKFLOW_UUID_OUTPUT, rstring(str(wf_id)))
+                # Tell the workflow runner which result folder was imported,
+                # so it can clean up the transfer's working files there.
+                if permanent_storage_path:
+                    client.setOutput(
+                        constants.results.RESULTS_PATH_OUTPUT,
+                        rstring(str(permanent_storage_path)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
                     client.setOutput("Message", rstring(str(message)))
