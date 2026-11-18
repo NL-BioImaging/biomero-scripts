@@ -8,6 +8,7 @@ import pytest
 
 import biomero.constants as biomero_constants
 from runner_key_names import runner_key_names
+
 from test_canonical_zarr_transfer import _load_canonical_functions
 
 pytestmark = pytest.mark.skipif(
