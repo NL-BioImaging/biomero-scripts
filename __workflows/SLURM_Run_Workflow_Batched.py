@@ -827,7 +827,7 @@ def add_batch_supervisor_metadata_for_batch(conn, slurmClient, supervisor_wf_id,
 
         if output_objects:
             batch_supervisor_dict = {
-                'Batch_Supervisor_Workflow_ID': str(supervisor_wf_id),
+                constants.metadata_keys.BATCH_SUPERVISOR_WORKFLOW_ID: str(supervisor_wf_id),
                 'Batch_Index': str(batch_index + 1),  # 1-indexed for users
                 'Total_Batches': str(total_batches),
                 ids_key: ', '.join(map(str, batch_ids[:10])) + ('...' if len(batch_ids) > 10 else '')

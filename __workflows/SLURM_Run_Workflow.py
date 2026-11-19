@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
-    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+    os.getenv(constants.slurm_env.BIOMERO_SHALLOW_ZARR, "false").lower() == "true"
 )
 if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
     from biomero_schema.zarr import TRANSFER_INPUT_MARKER
@@ -2369,7 +2369,9 @@ def run_workflow(slurmClient: SlurmClient,
                         raise
                     ft_rv, _ = run_omero_script(client, svc, ft_script_id, ft_inputs,
                                                slurmClient=slurmClient)
-                    slurm_path = unwrap(ft_rv.get(constants.file_transfer.SLURM_PATH_OUTPUT)) if ft_rv else None
+                    slurm_path = (unwrap(ft_rv.get(
+                        constants.file_transfer.SLURM_PATH_OUTPUT))
+                        if ft_rv else None)
                     ft_msg = (
                         unwrap(ft_rv.get(constants.results.MESSAGE_OUTPUT,
                                          None))

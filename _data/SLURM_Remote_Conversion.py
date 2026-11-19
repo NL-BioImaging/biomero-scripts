@@ -52,9 +52,10 @@ logger = logging.getLogger(__name__)
 CONV_OPTIONS_SOURCE = ['zarr']
 CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 
-# Version constant for easy version management
 # Output that shows the uploaded conversion log; no other script reads it.
 CONVERSION_LOG_OUTPUT = "Conversion_Log"
+
+# Version constant for easy version management
 VERSION = "2.9.0b28"
 
 

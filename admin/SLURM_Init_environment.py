@@ -150,7 +150,9 @@ def refresh_workflow_metadata(conn, tracker, object_type, object_id, workflow_id
             if not (ns == NAMESPACE or ns.startswith(NAMESPACE + '/task/')):
                 continue
             pairs = ann.getValue()
-            if ['Workflow_ID', str(workflow_id)] not in [list(p) for p in pairs]:
+            workflow_pair = [constants.metadata_keys.WORKFLOW_ID,
+                             str(workflow_id)]
+            if workflow_pair not in [list(p) for p in pairs]:
                 continue
             values = _read_values(pairs)
             rows.append(MetadataAnnotation(ns, values))
@@ -255,7 +257,7 @@ def discover_metadata_targets(conn):
                     kind, ns=NAMESPACE, params=ParametersI().page(offset, 500)))
                 for link in page:
                     for key, value in link.getAnnotation().getValue():
-                        if key == 'Workflow_ID' and value:
+                        if key == constants.metadata_keys.WORKFLOW_ID and value:
                             targets.add((kind, link.getParent().getId(), value))
                 if len(page) < 500:
                     break
@@ -677,7 +679,8 @@ def runScript():
                     importer_enabled = (
                         os.getenv("IMPORTER_ENABLED", "false").lower() == "true")
                     shallow_zarr_enabled = (
-                        os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true")
+                        os.getenv(constants.slurm_env.BIOMERO_SHALLOW_ZARR,
+                                  "false").lower() == "true")
                     if (importer_enabled
                             and shallow_zarr_enabled
                             and slurmClient.remote_shallow_zarr

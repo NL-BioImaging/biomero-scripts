@@ -263,8 +263,8 @@ def execute_roi_postprocessing(client: Any,
         "Label_Image_IDs": rlist([rlong(label) for label, _ in pairs]),
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
-        "ROI_Name_Prefix": rstring(roi_name_prefix),
-        "ROI_Color": rstring(roi_color),
+        constants.results.ROI_NAME_PREFIX: rstring(roi_name_prefix),
+        constants.results.ROI_COLOR: rstring(roi_color),
         "Clear_Existing_ROIs": rbool(clear_existing_rois),
         "Clear_ROI_Filter": rstring(clear_roi_filter),
         "Delete_Label_Image": rbool(delete_label_images),
@@ -300,7 +300,7 @@ def execute_roi_postprocessing(client: Any,
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
-    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+    os.getenv(constants.slurm_env.BIOMERO_SHALLOW_ZARR, "false").lower() == "true"
 )
 UUID_PATTERN = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
@@ -2420,7 +2420,7 @@ def create_metadata_csv(
     metadata_rows = []
 
     # Add basic job metadata
-    metadata_rows.append(['Job_ID', str(job_id)])
+    metadata_rows.append([constants.metadata_keys.JOB_ID, str(job_id)])
     metadata_rows.append(['Import_Type', 'SLURM_Results'])
     metadata_rows.append(['Import_User', conn.getUser().getName()])
     metadata_rows.append(
@@ -2437,7 +2437,7 @@ def create_metadata_csv(
 
             # Add workflow metadata
             metadata_rows.extend([
-                ['Workflow_ID', str(wf_id)],
+                [constants.metadata_keys.WORKFLOW_ID, str(wf_id)],
                 ['Workflow_Name', wf.name],
                 ['Workflow_Version', str(workflow_version)],
                 ['Workflow_Created_On', wf._created_on.isoformat()],
@@ -2489,7 +2489,7 @@ def create_metadata_csv(
         except Exception as e:
             logger.error(f"Failed to extract detailed workflow metadata: {e}")
             # Add minimal workflow info
-            metadata_rows.append(['Workflow_ID', str(wf_id)])
+            metadata_rows.append([constants.metadata_keys.WORKFLOW_ID, str(wf_id)])
 
     # Use the same file discovery logic as upload orders to find where to put metadata.csv
     image_files = find_supported_image_paths(target_path)
@@ -3633,7 +3633,9 @@ def post_provenance_map_annotation(
             return None, "failed"
 
     reference = "metadata_{}.csv".format(
-        kv_dict.get("Workflow_ID") or kv_dict.get("Job_ID") or "workflow")
+        kv_dict.get(constants.metadata_keys.WORKFLOW_ID)
+        or kv_dict.get(constants.metadata_keys.JOB_ID)
+        or "workflow")
     # Bound the combined key/value bytes conservatively; do not depend on
     # compression, page size, or the failing server's index tuple overhead.
     reduced = {}
@@ -3814,7 +3816,8 @@ def backfill_import_storage_provenance(
         raise ValueError('Imported result target not found')
     if not any(
             ann.getNs() == 'biomero/workflow'
-            and ['Workflow_ID', wf_id] in [list(pair) for pair in ann.getValue()]
+            and [constants.metadata_keys.WORKFLOW_ID, wf_id]
+            in [list(pair) for pair in ann.getValue()]
             for ann in target.listAnnotations()):
         raise ValueError('Target has no workflow metadata matching this workflow')
     evidence = collect_import_storage_provenance(
@@ -3872,7 +3875,7 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
         ns_task = ns_wf + "/task"
         ns_task_job = ns_task + "/job"
         job_dict = {
-            'Job_ID': str(job_id),
+            constants.metadata_keys.JOB_ID: str(job_id),
         }
         # job metadata
         logger.debug(
@@ -4540,13 +4543,14 @@ def resolve_non_image_output_targets(
     """
     input_targets = list(
         configured_input_targets or input_container_fallback or [])
-    mode = target_mode or "legacy_input_container"
+    mode = target_mode or constants.file_output_targets.LEGACY
 
-    if mode in ("auto", "result_destination") \
+    if mode in (constants.file_output_targets.AUTO,
+                constants.file_output_targets.RESULT_DESTINATION) \
             and importer_destination_target is not None:
         return [importer_destination_target]
 
-    if mode == "input_parent":
+    if mode == constants.file_output_targets.INPUT_PARENT:
         parents = []
         seen = set()
         for target in input_targets:
@@ -5494,7 +5498,7 @@ def runScript() -> None:
             if task_id and slurmClient.track_workflows:
                 try:
                     slurmClient.workflowTracker.update_task_status(
-                        task_id, "IMPORTING")
+                        task_id, constants.workflow_status.IMPORTING)
                     logger.info(f"Updated task {task_id} status to IMPORTING")
                 except Exception as db_e:
                     logger.warning(f"Failed to update task status: {db_e}")
@@ -5886,7 +5890,7 @@ def runScript() -> None:
             if task_id and slurmClient and slurmClient.track_workflows:
                 try:
                     slurmClient.workflowTracker.update_task_status(
-                        task_id, "IMPORTED")
+                        task_id, constants.workflow_status.IMPORTED)
                     logger.info(f"Updated task {task_id} status to IMPORTED")
                 except Exception as db_e:
                     logger.warning(
@@ -5933,7 +5937,7 @@ def runScript() -> None:
                     and not isinstance(e, ResultFinalizationBusy)):
                 try:
                     slurmClient.workflowTracker.update_task_status(
-                        task_id, "FAILED")
+                        task_id, constants.workflow_status.FAILED)
                     slurmClient.workflowTracker.fail_task(
                         task_id, f"Import failed: {str(e)}")
                     logger.info(f"Updated task {task_id} status to FAILED")

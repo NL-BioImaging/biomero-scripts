@@ -230,8 +230,8 @@ def execute_roi_postprocessing(client: Any,
         "Label_Image_IDs": rlist([rlong(label) for label, _ in pairs]),
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
-        "ROI_Name_Prefix": rstring(roi_name_prefix),
-        "ROI_Color": rstring(roi_color),
+        constants.results.ROI_NAME_PREFIX: rstring(roi_name_prefix),
+        constants.results.ROI_COLOR: rstring(roi_color),
         "Clear_Existing_ROIs": rbool(clear_existing_rois),
         "Clear_ROI_Filter": rstring(clear_roi_filter),
         "Delete_Label_Image": rbool(delete_label_images),
@@ -793,7 +793,9 @@ def post_provenance_map_annotation(
             return None, "failed"
 
     reference = "metadata_{}.csv".format(
-        kv_dict.get("Workflow_ID") or kv_dict.get("Job_ID") or "workflow")
+        kv_dict.get(constants.metadata_keys.WORKFLOW_ID)
+        or kv_dict.get(constants.metadata_keys.JOB_ID)
+        or "workflow")
     # Bound the combined key/value bytes conservatively; do not depend on
     # compression, page size, or the failing server's index tuple overhead.
     reduced = {}
@@ -853,7 +855,7 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
         ns_task = ns_wf + "/task"
         ns_task_job = ns_task + "/job"
         job_dict = {
-            'Job_ID': str(job_id),
+            constants.metadata_keys.JOB_ID: str(job_id),
         }
         # job metadata
         logger.debug(
@@ -1274,7 +1276,7 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
     metadata_rows = []
 
     # Add basic job metadata
-    metadata_rows.append(['Job_ID', str(job_id)])
+    metadata_rows.append([constants.metadata_keys.JOB_ID, str(job_id)])
     metadata_rows.append(['Import_Type', 'SLURM_Results'])
     metadata_rows.append(['Import_User', conn.getUser().getName()])
     metadata_rows.append(['Import_Group', conn.getGroupFromContext().getName()])
@@ -1289,7 +1291,7 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
 
             # Add workflow metadata
             metadata_rows.extend([
-                ['Workflow_ID', str(wf_id)],
+                [constants.metadata_keys.WORKFLOW_ID, str(wf_id)],
                 ['Workflow_Name', wf.name],
                 ['Workflow_Version', str(workflow_version)],
                 ['Workflow_Created_On', wf._created_on.isoformat()],
@@ -1339,7 +1341,7 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
         except Exception as e:
             logger.error(f"Failed to extract detailed workflow metadata: {e}")
             # Add minimal workflow info
-            metadata_rows.append(['Workflow_ID', str(wf_id)])
+            metadata_rows.append([constants.metadata_keys.WORKFLOW_ID, str(wf_id)])
 
     # Find where to put metadata.csv - same logic as images
     all_files = glob.iglob(target_path + '**/**', recursive=True)
@@ -1764,11 +1766,12 @@ def resolve_non_image_output_targets(
     """Resolve file-annotation containers for the classic result route."""
     input_targets = list(
         configured_input_targets or input_container_fallback or [])
-    mode = target_mode or "legacy_input_container"
-    if mode in ("auto", "result_destination") \
+    mode = target_mode or constants.file_output_targets.LEGACY
+    if mode in (constants.file_output_targets.AUTO,
+                constants.file_output_targets.RESULT_DESTINATION) \
             and result_destination_target is not None:
         return [result_destination_target]
-    if mode == "input_parent":
+    if mode == constants.file_output_targets.INPUT_PARENT:
         parents = []
         seen = set()
         for target in input_targets:
@@ -2295,7 +2298,7 @@ def runScript() -> None:
                            grouping="08.11",
                            description="Optional case-sensitive ROI name filter. Empty deletes all existing ROIs when clearing is enabled.",
                            default=""),
-            scripts.Bool("Cleanup?",
+            scripts.Bool(constants.CLEANUP,
                          optional=True,
                          grouping="09",
                          description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
@@ -2602,7 +2605,7 @@ def runScript() -> None:
                                 message += file_outputs_message
 
                             # Only cleanup if Cleanup? is True
-                            if unwrap(client.getInput("Cleanup?")):
+                            if unwrap(client.getInput(constants.CLEANUP)):
                                 clean_result = slurmClient.cleanup_tmp_files(
                                     slurm_job_id,
                                     filename,
@@ -2618,7 +2621,7 @@ def runScript() -> None:
                 finally:
                     if folder and log_file:
                         # Only cleanup locally if Cleanup? is True
-                        if unwrap(client.getInput("Cleanup?")):
+                        if unwrap(client.getInput(constants.CLEANUP)):
                             message = cleanup_tmp_files_locally(message, folder, log_file)
                             logger.info("Local cleanup completed")
                         else:

@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
-    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+    os.getenv(constants.slurm_env.BIOMERO_SHALLOW_ZARR, "false").lower() == "true"
 )
 
 SHALLOW_ZARR_RESTORE_AVAILABLE = False
@@ -3174,7 +3174,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             logger.error(f"Critical error: Unzipping on SLURM failed: {e}")
             raise Exception(f"Data unpacking on SLURM failed: {e}") from e
     
-    cleanup_enabled = script_params.get("Cleanup?", True)
+    cleanup_enabled = script_params.get(constants.CLEANUP, True)
     file_annotation = None
     if transfer_successful and unpack_successful and cleanup_enabled:
         message += (
@@ -3376,7 +3376,7 @@ def run_script() -> None:
                 default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
 
             scripts.Bool(
-                "Cleanup?", grouping="4",
+                constants.CLEANUP, grouping="4",
                 description="Remove zip/annotation from OMERO after successful transfer to SLURM. Uncheck to keep downloadable copy in OMERO.",
                 default=True),
 
