@@ -1,15 +1,29 @@
 import ast
 import logging
 import os
+import sys
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
 CANONICAL = SimpleNamespace(inputs=(object(),))
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 SOURCE = ROOT / '_data/SLURM_Import_Results.py'
+
+
+HELPER_IMAGE = 'registry/helper:0.1.0'
+
+
+@pytest.fixture(autouse=True)
+def installed_shallower_names_its_helper_image():
+    """The stage asks the installed shallower for the helper image."""
+    capabilities = ModuleType('biomero_shallower.capabilities')
+    capabilities.helper_image = Mock(return_value=HELPER_IMAGE)
+    with patch.dict(sys.modules,
+                    {'biomero_shallower.capabilities': capabilities}):
+        yield capabilities
 
 
 def source_text():
@@ -35,7 +49,33 @@ def load():
 def test_enabled_runs_remote_shallowing():
     client = SimpleNamespace(remote_shallow_zarr=True, shallow_results_on_slurm=Mock())
     load()(client, '/data', 'workflow')
-    client.shallow_results_on_slurm.assert_called_once_with('/data', 'workflow', CANONICAL)
+    client.shallow_results_on_slurm.assert_called_once_with(
+        '/data', 'workflow', CANONICAL, helper_image=HELPER_IMAGE)
+
+
+def test_helper_image_comes_from_the_installed_shallower(
+        installed_shallower_names_its_helper_image):
+    installed_shallower_names_its_helper_image.helper_image.return_value = (
+        'other/helper:9.9.9')
+    client = SimpleNamespace(remote_shallow_zarr=True,
+                             shallow_results_on_slurm=Mock())
+    load()(client, '/data', 'workflow')
+    assert client.shallow_results_on_slurm.call_args.kwargs[
+        'helper_image'] == 'other/helper:9.9.9'
+
+
+@pytest.mark.parametrize('failure', [ValueError('dev version'),
+                                     RuntimeError('no repository')])
+def test_no_helper_image_keeps_full_results_and_warns(
+        caplog, installed_shallower_names_its_helper_image, failure):
+    installed_shallower_names_its_helper_image.helper_image.side_effect = failure
+    client = SimpleNamespace(remote_shallow_zarr=True,
+                             shallow_results_on_slurm=Mock())
+    with caplog.at_level(logging.DEBUG):
+        assert load()(client, '/data', 'workflow') is None
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert 'results stay full' in caplog.records[0].getMessage()
+    client.shallow_results_on_slurm.assert_not_called()
 
 
 def test_absent_flag_is_a_noop():
@@ -73,6 +113,8 @@ def test_shallower_receives_workflow_connection():
         callback = client.shallow_results_on_slurm.call_args.kwargs['heartbeat']
         callback()
         conn.keepAlive.assert_called_once()
+        assert client.shallow_results_on_slurm.call_args.kwargs[
+            'helper_image'] == HELPER_IMAGE
         assert 'omero_conn' not in client.shallow_results_on_slurm.call_args.kwargs
     else:
         client.shallow_results_on_slurm.assert_called_once_with(
