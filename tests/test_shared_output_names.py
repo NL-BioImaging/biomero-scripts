@@ -20,11 +20,12 @@ SCRIPTS = sorted(
     for path in (SOURCE_ROOT / folder).glob("*.py"))
 # Output name -> the biomero.constants.results constant that holds it.
 SHARED_OUTPUTS = {
-    OUTPUT_NAMES.MESSAGE_OUTPUT: "MESSAGE_OUTPUT",
-    OUTPUT_NAMES.URL_OUTPUT: "URL_OUTPUT",
-    OUTPUT_NAMES.FILE_ANNOTATION_OUTPUT: "FILE_ANNOTATION_OUTPUT",
-    OUTPUT_NAMES.CANONICAL_INPUTS_OUTPUT: "CANONICAL_INPUTS_OUTPUT",
-    OUTPUT_NAMES.RESULTS_PATH_OUTPUT: "RESULTS_PATH_OUTPUT",
+    OUTPUT_NAMES.MESSAGE_OUTPUT: "results.MESSAGE_OUTPUT",
+    OUTPUT_NAMES.URL_OUTPUT: "results.URL_OUTPUT",
+    OUTPUT_NAMES.FILE_ANNOTATION_OUTPUT: "results.FILE_ANNOTATION_OUTPUT",
+    OUTPUT_NAMES.CANONICAL_INPUTS_OUTPUT: "results.CANONICAL_INPUTS_OUTPUT",
+    OUTPUT_NAMES.RESULTS_PATH_OUTPUT: "results.RESULTS_PATH_OUTPUT",
+    OUTPUT_NAMES.SLURM_PATH_OUTPUT: "file_transfer.SLURM_PATH_OUTPUT",
 }
 # The batched runner keeps its own UI message buckets under these names.
 UI_MESSAGES_NAME = "UI_messages"
@@ -147,8 +148,14 @@ EXPECTED_OUTPUT_USES = {
     "_data/_SLURM_Image_Transfer.py": {
         "CANONICAL_INPUTS_OUTPUT": 1, "FILE_ANNOTATION_OUTPUT": 1},
 }
-# Output names the scripts still write as literals until core defines them.
-OUTPUTS_NOT_YET_IN_CORE = {"Job_Log", "Conversion_Log", "Slurm_Path"}
+# Outputs only one script sets and no other script reads: module constants of
+# that script, not core names.
+SCRIPT_LOCAL_OUTPUTS = {"JOB_LOG_OUTPUT", "CONVERSION_LOG_OUTPUT"}
+# The file transfer's output, which the runner reads: a core name too.
+EXPECTED_FILE_TRANSFER_USES = {
+    "__workflows/SLURM_Run_Workflow.py": 1,
+    "_data/_SLURM_File_Transfer.py": 1,
+}
 
 
 def results_constants_used(source):
@@ -185,7 +192,7 @@ def test_the_detectors_read_a_source():
 @pytest.mark.parametrize("path", SCRIPTS, ids=relative)
 def test_shared_output_names_come_from_core_constants(path):
     offenders = [f"{path.name}:{line} uses {name!r}; use "
-                 f"constants.results.{SHARED_OUTPUTS[name]}"
+                 f"constants.{SHARED_OUTPUTS[name]}"
                  for line, name in output_literals(
                      path.read_text(encoding="utf-8"))]
     assert not offenders, "\n".join(offenders)
@@ -206,8 +213,9 @@ def test_every_set_output_is_named_by_a_core_constant(path):
     names = set_output_names(path.read_text(encoding="utf-8"))
     not_from_core = [
         name for name in names
-        if not name.startswith("constants.results.")
-        and name.strip("'\"") not in OUTPUTS_NOT_YET_IN_CORE
+        if not name.startswith(("constants.results.",
+                                "constants.file_transfer."))
+        and name not in SCRIPT_LOCAL_OUTPUTS
         # the batched runner's per-batch File_Annotation_<n> outputs
         and not name.startswith("f'File_Annotation_")]
     assert not not_from_core, (
@@ -224,3 +232,25 @@ def test_each_script_names_its_outputs_as_expected(path):
     assert dict(uses) == EXPECTED_OUTPUT_USES.get(relative(path), {}), (
         f"{path.name}: the core output constants it uses changed; if that is "
         f"intended, update EXPECTED_OUTPUT_USES")
+
+
+@requires_core_constants
+@pytest.mark.parametrize("path", SCRIPTS, ids=relative)
+def test_the_file_transfer_output_name_comes_from_core(path):
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    uses = sum(1 for node in ast.walk(tree)
+               if isinstance(node, ast.Attribute)
+               and ast.unparse(node) == "constants.file_transfer.SLURM_PATH_OUTPUT")
+    assert uses == EXPECTED_FILE_TRANSFER_USES.get(relative(path), 0)
+
+
+@requires_core_constants
+def test_the_cancel_script_is_named_by_core_and_uses_its_parameter_names():
+    from biomero import constants
+    script = SOURCE_ROOT / "admin" / constants.CANCEL_WORKFLOW_SCRIPT
+    source = script.read_text(encoding="utf-8")
+    assert "constants.cancel_workflow.WORKFLOW_ID" in source
+    assert "constants.cancel_workflow.REASON" in source
+    assert not [name for name in ("Workflow_ID", "Reason")
+                if f'"{name}"' in source]

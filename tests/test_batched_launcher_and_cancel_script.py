@@ -142,7 +142,7 @@ def cancel_runscript(inputs, user_id, is_admin, outputs=None):
     if not CANCEL.exists():
         pytest.skip('Source has no cancel script')
     nodes = source_nodes(CANCEL, {
-        'request_cancel', 'runScript', '_WORKFLOW_ID', '_REASON',
+        'request_cancel', 'runScript',
         '_DEFAULT_REASON', '_MAX_REASON_LENGTH', 'VERSION'})
     # The script file exists, so runScript is part of its contract.
     assert any(isinstance(n, ast.FunctionDef) and n.name == 'runScript'

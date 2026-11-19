@@ -6,7 +6,7 @@ core itself, so they cannot drift from it.
 """
 from types import SimpleNamespace
 
-from biomero.constants import results
+from biomero.constants import file_transfer, results
 
 OUTPUT_NAMES = SimpleNamespace(
     MESSAGE_OUTPUT=results.MESSAGE_OUTPUT,
@@ -14,4 +14,5 @@ OUTPUT_NAMES = SimpleNamespace(
     FILE_ANNOTATION_OUTPUT=results.FILE_ANNOTATION_OUTPUT,
     CANONICAL_INPUTS_OUTPUT=results.CANONICAL_INPUTS_OUTPUT,
     RESULTS_PATH_OUTPUT=results.RESULTS_PATH_OUTPUT,
+    SLURM_PATH_OUTPUT=file_transfer.SLURM_PATH_OUTPUT,
 )
