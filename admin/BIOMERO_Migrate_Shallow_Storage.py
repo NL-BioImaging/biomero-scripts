@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 import omero
+from biomero import constants
 from omero import scripts
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, unwrap
@@ -54,7 +55,7 @@ from biomero_shallower.result_zarr import load_managed_storage_roots
 
 
 logger = logging.getLogger(__name__)
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 OBJECT_TYPE = "Object Type"
 OBJECT_IDS = "Object IDs (optional)"
@@ -1314,10 +1315,10 @@ def runScript():
             object_ids=object_ids,
             backup_directory=unwrap(client.getInput(BACKUP_DIRECTORY)),
         )
-        client.setOutput("Message", rstring(_summary(report)))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(_summary(report)))
     except Exception as error:
         logger.exception("Shallow-storage migration failed")
-        client.setOutput("Message", rstring(
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
             f"Shallow-storage migration failed: {error}"
         ))
     finally:

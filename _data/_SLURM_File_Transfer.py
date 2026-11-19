@@ -49,7 +49,7 @@ from biomero import SlurmClient, constants
 
 logger = logging.getLogger(__name__)
 
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ def transfer_file_to_slurm(
 # OMERO script entry point
 # ---------------------------------------------------------------------------
 
-def run_script():
+def run_script() -> None:
     """OMERO script entry point for _SLURM_File_Transfer."""
 
     with SlurmClient.from_config() as slurmClient:
@@ -290,12 +290,15 @@ Connection ready? {slurmClient.validate()}""",
                 allowed_formats=allowed_formats,
             )
 
-            client.setOutput("Message", rstring(message))
-            client.setOutput("Slurm_Path", rstring(slurm_path))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(message))
+            client.setOutput(constants.file_transfer.SLURM_PATH_OUTPUT,
+                             rstring(slurm_path))
 
         except Exception as exc:
             logger.exception("File transfer failed")
-            client.setOutput("Message", rstring(f"ERROR: {exc}"))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(f"ERROR: {exc}"))
             raise
 
         finally:

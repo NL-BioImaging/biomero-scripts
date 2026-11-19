@@ -76,7 +76,7 @@ OUTPUT_OPTIONS = [constants.workflow.OUTPUT_RENAME,
                   constants.workflow.OUTPUT_CREATE_ROIS]
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 # Batched runs are queued the same way single runs are: this script resolves
 # the batches and records them in a launcher task, and the supervisor spawns
@@ -425,6 +425,8 @@ def runScript() -> None:
         # 3. Track (omero) jobs, join log outputs
         try:
             # log_string will be output in the Omero Web UI
+            # Internal keys of the text shown to the user, not output names
+            # of another script.
             UI_messages = {
                 'Message': [],
                 'File_Annotation': []
@@ -435,7 +437,8 @@ def runScript() -> None:
                 client.getInput(wf_name)) for wf_name in workflows}
             if not any(selected_workflows.values()):
                 errormsg = "ERROR: Please select at least 1 workflow!"
-                client.setOutput("Message", rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(errormsg))
                 raise ValueError(errormsg)
             version_errors = ""
             for wf, selected in selected_workflows.items():
@@ -465,7 +468,8 @@ def runScript() -> None:
                     selected_output[output_option] = True
             if not any(selected_output.values()):
                 errormsg = "ERROR: Please select at least 1 output method!"
-                client.setOutput("Message", rstring(errormsg))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(errormsg))
                 raise ValueError(errormsg)
             else:
                 logger.info(f"Output options chosen: {selected_output}")
@@ -592,7 +596,7 @@ def runScript() -> None:
                     client, slurmClient, wf_id, selected_workflow_names,
                     batch_ids_list, effective_type, inputs,
                     selected_output, group, image_ids)
-                client.setOutput("Message", rstring(
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                     f"Your {len(batch_ids_list)} batches are queued and run "
                     f"in the background: you can close this tab. Results are "
                     f"imported into OMERO automatically and progress is shown "
@@ -685,16 +689,19 @@ def runScript() -> None:
                             try:
                                 results = process.getResults(
                                     0)  # 0 ms; RtypeDict
-                                if 'Message' in results:
-                                    result_msg = results['Message'].getValue()
+                                if constants.results.MESSAGE_OUTPUT in results:
+                                    result_msg = results[
+                                        constants.results.MESSAGE_OUTPUT
+                                    ].getValue()
                                     logger.info(result_msg)
                                     UI_messages['Message'].extend(
                                         [f">> Batch {i}: ",
                                          result_msg])
 
-                                if 'File_Annotation' in results:
+                                annotation_key = constants.results.FILE_ANNOTATION_OUTPUT
+                                if annotation_key in results:
                                     UI_messages['File_Annotation'].append(
-                                        results['File_Annotation'].getValue())
+                                        results[annotation_key].getValue())
                             except Exception as results_e:
                                 logger.error(
                                     f"Error getting results for batch {i}: {results_e}")
@@ -763,7 +770,7 @@ def runScript() -> None:
                     proc.close(False)  # stop the scripts
 
             # 7. Script output
-            client.setOutput("Message",
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
                              rstring("\n".join(UI_messages['Message'])))
 
             if wf_failed:
@@ -820,7 +827,7 @@ def add_batch_supervisor_metadata_for_batch(conn, slurmClient, supervisor_wf_id,
 
         if output_objects:
             batch_supervisor_dict = {
-                'Batch_Supervisor_Workflow_ID': str(supervisor_wf_id),
+                constants.metadata_keys.BATCH_SUPERVISOR_WORKFLOW_ID: str(supervisor_wf_id),
                 'Batch_Index': str(batch_index + 1),  # 1-indexed for users
                 'Total_Batches': str(total_batches),
                 ids_key: ', '.join(map(str, batch_ids[:10])) + ('...' if len(batch_ids) > 10 else '')
@@ -894,9 +901,10 @@ def find_output_plates_for_batch(conn, input_plate_ids):
         join ma.details.creationEvent ev
         join ma.mapValue mvName
         join ma.mapValue mv
-        where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
+        where ma.ns = 'biomero/workflow/task/{constants.IMAGE_IMPORT_SCRIPT}'
           and mvName.name = 'Name'
-          and (mvName.value = 'SLURM_Get_Results.py' or mvName.value = 'SLURM_Import_Results.py')
+          and (mvName.value = '{constants.IMAGE_IMPORT_SCRIPT}'
+               or mvName.value = '{constants.IMPORT_RESULTS_SCRIPT}')
           and mv.name = 'Input_Data'
           and ev.time > :cutoff
           and ({like_clause})
@@ -962,9 +970,10 @@ def find_output_images_for_batch(conn, input_image_ids):
         join ma.details.creationEvent ev
         join ma.mapValue mvName
         join ma.mapValue mv
-        where ma.ns = 'biomero/workflow/task/SLURM_Get_Results.py'
+        where ma.ns = 'biomero/workflow/task/{constants.IMAGE_IMPORT_SCRIPT}'
           and mvName.name = 'Name'
-          and (mvName.value = 'SLURM_Get_Results.py' or mvName.value = 'SLURM_Import_Results.py')
+          and (mvName.value = '{constants.IMAGE_IMPORT_SCRIPT}'
+               or mvName.value = '{constants.IMPORT_RESULTS_SCRIPT}')
           and mv.name = 'Input_Data'
           and ev.time > :cutoff
           and ({like_clause})

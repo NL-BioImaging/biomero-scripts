@@ -212,13 +212,38 @@ def _get_roi_script_capability(script_service):
     return {"available": True, "script_id": int(unwrap(matches[0].id))}
 
 
-def execute_roi_postprocessing(client, script_service, image_pairs,
-                               roi_shape="Polygon", roi_label_pattern="",
-                               delete_label_images=False,
-                               roi_name_prefix="",
-                               roi_color="",
-                               clear_existing_rois=False,
-                               clear_roi_filter=""):
+def execute_roi_postprocessing(client: Any,
+                               script_service: Any,
+                               image_pairs: List[Tuple[int, int]],
+                               roi_shape: str = "Polygon",
+                               roi_label_pattern: str = "",
+                               delete_label_images: bool = False,
+                               roi_name_prefix: str = "",
+                               roi_color: str = "",
+                               clear_existing_rois: bool = False,
+                               clear_roi_filter: str = "") -> Dict[str, Any]:
+    """Run Labels2Rois with exact imported-label/source-image ID pairs.
+
+    Args:
+        client (Any): OMERO script client.
+        script_service (Any): OMERO script service.
+        image_pairs (List[Tuple[int, int]]): Imported label image ID and the
+            source image ID it belongs to.
+        roi_shape (str): "Polygon" or "Mask".
+        roi_label_pattern (str): Pattern selecting the label images.
+        delete_label_images (bool): Delete the label images afterwards.
+        roi_name_prefix (str): Prefix of the created ROI names.
+        roi_color (str): ``#RRGGBB`` color of the ROIs; empty for the default.
+        clear_existing_rois (bool): Clear existing ROIs first.
+        clear_roi_filter (str): Filter for the existing ROIs to clear.
+
+    Returns:
+        Dict[str, Any]: The ``status`` ("skipped" or "completed") and a
+        ``message``; "completed" also has the number of ``pairs``.
+
+    Raises:
+        ValueError: If the ROI shape is not Polygon or Mask.
+    """
     pairs, ambiguous_sources = select_roi_image_pairs(
         image_pairs, roi_label_pattern)
     if not pairs:
@@ -238,8 +263,8 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         "Label_Image_IDs": rlist([rlong(label) for label, _ in pairs]),
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
-        "ROI_Name_Prefix": rstring(roi_name_prefix),
-        "ROI_Color": rstring(roi_color),
+        constants.results.ROI_NAME_PREFIX: rstring(roi_name_prefix),
+        constants.results.ROI_COLOR: rstring(roi_color),
         "Clear_Existing_ROIs": rbool(clear_existing_rois),
         "Clear_ROI_Filter": rstring(clear_roi_filter),
         "Delete_Label_Image": rbool(delete_label_images),
@@ -257,7 +282,8 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         job = process.getJob()
         status_id = (int(unwrap(job.getStatus().getId()))
                      if job is not None else None)
-        returned_message = unwrap(results.get("Message"))
+        returned_message = unwrap(
+            results.get(constants.results.MESSAGE_OUTPUT))
         message = str(returned_message or "ROI postprocessing completed")
         if status_id in (6, 9) or message.startswith("FAILED:"):
             raise RuntimeError(
@@ -274,7 +300,7 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
 # Check if importer is enabled via environment variable
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
-    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+    os.getenv(constants.slurm_env.BIOMERO_SHALLOW_ZARR, "false").lower() == "true"
 )
 UUID_PATTERN = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
@@ -337,7 +363,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 def load_canonical_input_snapshot(slurm_client: SlurmClient,
@@ -1162,7 +1188,8 @@ def saveImagesToOmeroAsAttachments(
                         message = upload_metadata_csv_to_omero(
                             client, conn, message, job_id, [image], metadata_files, wf_id)
 
-                client.setOutput("File_Annotation", robject(file_ann._obj))
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
+                                 robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
                 logger.warning(msg)
@@ -1652,10 +1679,6 @@ def upload_log_to_omero(
             description += f" (Workflow {wf_id})"
         annotation = create_file_annotation_inplace(
             conn, file, mimetype, namespace, description)
-        # Already have other output in this script
-        # But you could add this as output if you wanted log instead
-        # client.setOutput("File_Annotation", robject(annotation._obj))
-
         # Build a fully-qualified URL so it works from any browser location.
         # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
         # the canonical absolute base; fall back to omero.web.prefix for a
@@ -1670,7 +1693,8 @@ def upload_log_to_omero(
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT,
+                         wrap({"type": "URL", "href": url}))
 
         for project in projects:
             project.linkAnnotation(annotation)  # link it to project.
@@ -1839,7 +1863,8 @@ def upload_zip_to_omero(
         zip_annotation = create_file_annotation_inplace(
             conn, f"{folder}.zip", mimetype, namespace, description)
 
-        client.setOutput("File_Annotation", robject(zip_annotation._obj))
+        client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
+                         robject(zip_annotation._obj))
 
         for project in projects:
             project.linkAnnotation(zip_annotation)  # link it to project.
@@ -2395,7 +2420,7 @@ def create_metadata_csv(
     metadata_rows = []
 
     # Add basic job metadata
-    metadata_rows.append(['Job_ID', str(job_id)])
+    metadata_rows.append([constants.metadata_keys.JOB_ID, str(job_id)])
     metadata_rows.append(['Import_Type', 'SLURM_Results'])
     metadata_rows.append(['Import_User', conn.getUser().getName()])
     metadata_rows.append(
@@ -2412,7 +2437,7 @@ def create_metadata_csv(
 
             # Add workflow metadata
             metadata_rows.extend([
-                ['Workflow_ID', str(wf_id)],
+                [constants.metadata_keys.WORKFLOW_ID, str(wf_id)],
                 ['Workflow_Name', wf.name],
                 ['Workflow_Version', str(workflow_version)],
                 ['Workflow_Created_On', wf._created_on.isoformat()],
@@ -2464,7 +2489,7 @@ def create_metadata_csv(
         except Exception as e:
             logger.error(f"Failed to extract detailed workflow metadata: {e}")
             # Add minimal workflow info
-            metadata_rows.append(['Workflow_ID', str(wf_id)])
+            metadata_rows.append([constants.metadata_keys.WORKFLOW_ID, str(wf_id)])
 
     # Use the same file discovery logic as upload orders to find where to put metadata.csv
     image_files = find_supported_image_paths(target_path)
@@ -3608,7 +3633,9 @@ def post_provenance_map_annotation(
             return None, "failed"
 
     reference = "metadata_{}.csv".format(
-        kv_dict.get("Workflow_ID") or kv_dict.get("Job_ID") or "workflow")
+        kv_dict.get(constants.metadata_keys.WORKFLOW_ID)
+        or kv_dict.get(constants.metadata_keys.JOB_ID)
+        or "workflow")
     # Bound the combined key/value bytes conservatively; do not depend on
     # compression, page size, or the failing server's index tuple overhead.
     reduced = {}
@@ -3753,7 +3780,7 @@ def storage_provenance_import_task(tracker, wf_id):
     """Resolve one import task from durable workflow history."""
     workflow = tracker.repository.get(uuid.UUID(str(wf_id)))
     tasks = [tracker.repository.get(tid) for tid in workflow.tasks]
-    imports = [task for task in tasks if task.task_name == 'SLURM_Import_Results.py']
+    imports = [task for task in tasks if task.task_name == constants.IMPORT_RESULTS_SCRIPT]
     if len(imports) != 1:
         raise ValueError('Cannot identify a unique import task for storage provenance')
     return imports[0]
@@ -3789,7 +3816,8 @@ def backfill_import_storage_provenance(
         raise ValueError('Imported result target not found')
     if not any(
             ann.getNs() == 'biomero/workflow'
-            and ['Workflow_ID', wf_id] in [list(pair) for pair in ann.getValue()]
+            and [constants.metadata_keys.WORKFLOW_ID, wf_id]
+            in [list(pair) for pair in ann.getValue()]
             for ann in target.listAnnotations()):
         raise ValueError('Target has no workflow metadata matching this workflow')
     evidence = collect_import_storage_provenance(
@@ -3847,7 +3875,7 @@ def add_object_annotations(conn, slurmClient, object_type, object_id, job_id, wf
         ns_task = ns_wf + "/task"
         ns_task_job = ns_task + "/job"
         job_dict = {
-            'Job_ID': str(job_id),
+            constants.metadata_keys.JOB_ID: str(job_id),
         }
         # job metadata
         logger.debug(
@@ -4515,13 +4543,14 @@ def resolve_non_image_output_targets(
     """
     input_targets = list(
         configured_input_targets or input_container_fallback or [])
-    mode = target_mode or "legacy_input_container"
+    mode = target_mode or constants.file_output_targets.LEGACY
 
-    if mode in ("auto", "result_destination") \
+    if mode in (constants.file_output_targets.AUTO,
+                constants.file_output_targets.RESULT_DESTINATION) \
             and importer_destination_target is not None:
         return [importer_destination_target]
 
-    if mode == "input_parent":
+    if mode == constants.file_output_targets.INPUT_PARENT:
         parents = []
         seen = set()
         for target in input_targets:
@@ -5337,7 +5366,8 @@ def runScript() -> None:
                 
                 # Perform the write access check with existing connection
                 success, result_message = check_write_access_for_importer(group_name, conn=conn)
-                client.setOutput("Message", rstring(result_message))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(result_message))
                 if not success:
                     raise RuntimeError(result_message)
                 logger.info(f"Write access check successful: {result_message}")
@@ -5468,7 +5498,7 @@ def runScript() -> None:
             if task_id and slurmClient.track_workflows:
                 try:
                     slurmClient.workflowTracker.update_task_status(
-                        task_id, "IMPORTING")
+                        task_id, constants.workflow_status.IMPORTING)
                     logger.info(f"Updated task {task_id} status to IMPORTING")
                 except Exception as db_e:
                     logger.warning(f"Failed to update task status: {db_e}")
@@ -5860,7 +5890,7 @@ def runScript() -> None:
             if task_id and slurmClient and slurmClient.track_workflows:
                 try:
                     slurmClient.workflowTracker.update_task_status(
-                        task_id, "IMPORTED")
+                        task_id, constants.workflow_status.IMPORTED)
                     logger.info(f"Updated task {task_id} status to IMPORTED")
                 except Exception as db_e:
                     logger.warning(
@@ -5907,7 +5937,7 @@ def runScript() -> None:
                     and not isinstance(e, ResultFinalizationBusy)):
                 try:
                     slurmClient.workflowTracker.update_task_status(
-                        task_id, "FAILED")
+                        task_id, constants.workflow_status.FAILED)
                     slurmClient.workflowTracker.fail_task(
                         task_id, f"Import failed: {str(e)}")
                     logger.info(f"Updated task {task_id} status to FAILED")
@@ -5917,7 +5947,8 @@ def runScript() -> None:
 
             # Set failure output and re-raise to show red X in OMERO
             try:
-                client.setOutput("Message", rstring(f"FAILED: {message}"))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(f"FAILED: {message}"))
             except Exception:
                 pass
 
@@ -5957,7 +5988,8 @@ def runScript() -> None:
                         rstring(str(permanent_storage_path)))
                 # Only set success message if we haven't already set a failure message
                 if not script_failed:
-                    client.setOutput("Message", rstring(str(message)))
+                    client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                     rstring(str(message)))
             except Exception as output_error:
                 logger.error(f"Failed to set output: {output_error}")
 

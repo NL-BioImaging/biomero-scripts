@@ -79,7 +79,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 def get_images_by_ids(conn, image_ids):
@@ -179,14 +179,38 @@ def _get_roi_script_capability(script_service):
     return {"available": True, "script_id": int(unwrap(matches[0].id))}
 
 
-def execute_roi_postprocessing(client, script_service, image_pairs,
-                               roi_shape="Polygon", roi_label_pattern="",
-                               delete_label_images=False,
-                               roi_name_prefix="",
-                               roi_color="",
-                               clear_existing_rois=False,
-                               clear_roi_filter=""):
-    """Run Labels2Rois with exact imported-label/source-image ID pairs."""
+def execute_roi_postprocessing(client: Any,
+                               script_service: Any,
+                               image_pairs: List[Tuple[int, int]],
+                               roi_shape: str = "Polygon",
+                               roi_label_pattern: str = "",
+                               delete_label_images: bool = False,
+                               roi_name_prefix: str = "",
+                               roi_color: str = "",
+                               clear_existing_rois: bool = False,
+                               clear_roi_filter: str = "") -> Dict[str, Any]:
+    """Run Labels2Rois with exact imported-label/source-image ID pairs.
+
+    Args:
+        client (Any): OMERO script client.
+        script_service (Any): OMERO script service.
+        image_pairs (List[Tuple[int, int]]): Imported label image ID and the
+            source image ID it belongs to.
+        roi_shape (str): "Polygon" or "Mask".
+        roi_label_pattern (str): Pattern selecting the label images.
+        delete_label_images (bool): Delete the label images afterwards.
+        roi_name_prefix (str): Prefix of the created ROI names.
+        roi_color (str): ``#RRGGBB`` color of the ROIs; empty for the default.
+        clear_existing_rois (bool): Clear existing ROIs first.
+        clear_roi_filter (str): Filter for the existing ROIs to clear.
+
+    Returns:
+        Dict[str, Any]: The ``status`` ("skipped" or "completed") and a
+        ``message``; "completed" also has the number of ``pairs``.
+
+    Raises:
+        ValueError: If the ROI shape is not Polygon or Mask.
+    """
     pairs, ambiguous_sources = select_roi_image_pairs(
         image_pairs, roi_label_pattern)
     if not pairs:
@@ -206,8 +230,8 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         "Label_Image_IDs": rlist([rlong(label) for label, _ in pairs]),
         "Target_Image_IDs": rlist([rlong(target) for _, target in pairs]),
         "ROI_type": rstring(roi_shape),
-        "ROI_Name_Prefix": rstring(roi_name_prefix),
-        "ROI_Color": rstring(roi_color),
+        constants.results.ROI_NAME_PREFIX: rstring(roi_name_prefix),
+        constants.results.ROI_COLOR: rstring(roi_color),
         "Clear_Existing_ROIs": rbool(clear_existing_rois),
         "Clear_ROI_Filter": rstring(clear_roi_filter),
         "Delete_Label_Image": rbool(delete_label_images),
@@ -225,7 +249,8 @@ def execute_roi_postprocessing(client, script_service, image_pairs,
         job = process.getJob()
         status_id = (int(unwrap(job.getStatus().getId()))
                      if job is not None else None)
-        returned_message = unwrap(results.get("Message"))
+        returned_message = unwrap(
+            results.get(constants.results.MESSAGE_OUTPUT))
         message = str(returned_message or "ROI postprocessing completed")
         if status_id in (6, 9) or message.startswith("FAILED:"):
             raise RuntimeError(
@@ -543,8 +568,13 @@ def match_results_to_inputs(
     return mapping
 
 
-def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=None,
-                                   input_images=None):
+def saveImagesToOmeroAsAttachments(conn: BlitzGateway,
+                                   folder: str,
+                                   client: Any,
+                                   metadata_files: List[str],
+                                   wf_id: Optional[str] = None,
+                                   input_images: Optional[List[Any]] = None
+                                   ) -> str:
     """Save image from a (unzipped) folder to OMERO as file attachments.
 
     Args:
@@ -635,7 +665,8 @@ def saveImagesToOmeroAsAttachments(conn, folder, client, metadata_files, wf_id=N
                 logger.debug(
                     f"Attaching FileAnnotation to Image: File ID: {file_ann.getId()}, {file_ann.getFile().getName()}, Size: {file_ann.getFile().getSize()}")
 
-                client.setOutput("File_Annotation", robject(file_ann._obj))
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
+                                 robject(file_ann._obj))
             except Exception as e:
                 msg = f"Issue attaching file {name} to OMERO {og_name}: {e}"
                 logger.warning(msg)
@@ -762,7 +793,9 @@ def post_provenance_map_annotation(
             return None, "failed"
 
     reference = "metadata_{}.csv".format(
-        kv_dict.get("Workflow_ID") or kv_dict.get("Job_ID") or "workflow")
+        kv_dict.get(constants.metadata_keys.WORKFLOW_ID)
+        or kv_dict.get(constants.metadata_keys.JOB_ID)
+        or "workflow")
     # Bound the combined key/value bytes conservatively; do not depend on
     # compression, page size, or the failing server's index tuple overhead.
     reduced = {}
@@ -822,7 +855,7 @@ def add_image_annotations(conn, slurmClient, object_id, job_id, wf_id=None):
         ns_task = ns_wf + "/task"
         ns_task_job = ns_task + "/job"
         job_dict = {
-            'Job_ID': str(job_id),
+            constants.metadata_keys.JOB_ID: str(job_id),
         }
         # job metadata
         logger.debug(
@@ -1243,7 +1276,7 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
     metadata_rows = []
 
     # Add basic job metadata
-    metadata_rows.append(['Job_ID', str(job_id)])
+    metadata_rows.append([constants.metadata_keys.JOB_ID, str(job_id)])
     metadata_rows.append(['Import_Type', 'SLURM_Results'])
     metadata_rows.append(['Import_User', conn.getUser().getName()])
     metadata_rows.append(['Import_Group', conn.getGroupFromContext().getName()])
@@ -1258,7 +1291,7 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
 
             # Add workflow metadata
             metadata_rows.extend([
-                ['Workflow_ID', str(wf_id)],
+                [constants.metadata_keys.WORKFLOW_ID, str(wf_id)],
                 ['Workflow_Name', wf.name],
                 ['Workflow_Version', str(workflow_version)],
                 ['Workflow_Created_On', wf._created_on.isoformat()],
@@ -1308,7 +1341,7 @@ def create_metadata_csv(conn, slurmClient, target_path, job_id, wf_id=None):
         except Exception as e:
             logger.error(f"Failed to extract detailed workflow metadata: {e}")
             # Add minimal workflow info
-            metadata_rows.append(['Workflow_ID', str(wf_id)])
+            metadata_rows.append([constants.metadata_keys.WORKFLOW_ID, str(wf_id)])
 
     # Find where to put metadata.csv - same logic as images
     all_files = glob.iglob(target_path + '**/**', recursive=True)
@@ -1626,7 +1659,13 @@ def resolve_log_fallback_target(
     return []
 
 
-def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_id=None):
+def upload_log_to_omero(client: Any,
+                        conn: BlitzGateway,
+                        message: str,
+                        slurm_job_id: str,
+                        projects: List[Any],
+                        file: str,
+                        wf_id: Optional[str] = None) -> str:
     """ Upload a (log/text)file to omero 
 
     Args:
@@ -1649,10 +1688,6 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
         annotation = conn.createFileAnnfromLocalFile(
             file, mimetype=mimetype,
             ns=namespace, desc=description)
-        # Already have other output in this script
-        # But you could add this as output if you wanted log instead
-        # client.setOutput("File_Annotation", robject(annotation._obj))
-
         # Build a fully-qualified URL so it works from any browser location.
         # omero.client.web.host (e.g. "https://omero.example.com/omero/") is
         # the canonical absolute base; fall back to omero.web.prefix for a
@@ -1667,7 +1702,8 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(constants.results.URL_OUTPUT,
+                         wrap({"type": "URL", "href": url}))
 
 
         for project in projects:
@@ -1681,7 +1717,13 @@ def upload_log_to_omero(client, conn, message, slurm_job_id, projects, file, wf_
     return message
 
 
-def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, wf_id=None):
+def upload_zip_to_omero(client: Any,
+                        conn: BlitzGateway,
+                        message: str,
+                        slurm_job_id: str,
+                        projects: List[Any],
+                        folder: str,
+                        wf_id: Optional[str] = None) -> str:
     """ Upload a zip to omero (without unpacking)
 
     Args:
@@ -1704,7 +1746,8 @@ def upload_zip_to_omero(client, conn, message, slurm_job_id, projects, folder, w
             f"{folder}.zip", mimetype=mimetype,
             ns=namespace, desc=description)
 
-        client.setOutput("File_Annotation", robject(zip_annotation._obj))
+        client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
+                         robject(zip_annotation._obj))
 
         for project in projects:
             project.linkAnnotation(zip_annotation)  # link it to project.
@@ -1723,11 +1766,12 @@ def resolve_non_image_output_targets(
     """Resolve file-annotation containers for the classic result route."""
     input_targets = list(
         configured_input_targets or input_container_fallback or [])
-    mode = target_mode or "legacy_input_container"
-    if mode in ("auto", "result_destination") \
+    mode = target_mode or constants.file_output_targets.LEGACY
+    if mode in (constants.file_output_targets.AUTO,
+                constants.file_output_targets.RESULT_DESTINATION) \
             and result_destination_target is not None:
         return [result_destination_target]
-    if mode == "input_parent":
+    if mode == constants.file_output_targets.INPUT_PARENT:
         parents = []
         seen = set()
         for target in input_targets:
@@ -2082,10 +2126,10 @@ def runScript() -> None:
             scripts.String(constants.results.OUTPUT_SLURM_JOB_ID,
                            optional=False, grouping="01.1",
                            values=_oldjobs),
-            scripts.String("workflow_uuid",
+            scripts.String(constants.results.WORKFLOW_UUID,
                            optional=True, grouping="01.2",
                            description="UUID of the workflow that generated these results (auto-extracted from SLURM log if not provided)"),
-            scripts.String("Task_ID",
+            scripts.String(constants.results.TASK_ID,
                            optional=True, grouping="01.3",
                            description="Task ID for biomero workflow tracking and status updates"),
             scripts.String(constants.results.LOG_FALLBACK_TARGET,
@@ -2254,7 +2298,7 @@ def runScript() -> None:
                            grouping="08.11",
                            description="Optional case-sensitive ROI name filter. Empty deletes all existing ROIs when clearing is enabled.",
                            default=""),
-            scripts.Bool("Cleanup?",
+            scripts.Bool(constants.CLEANUP,
                          optional=True,
                          grouping="09",
                          description="Cleanup temporary files after completion (default: True). Turn off for debugging.",
@@ -2279,7 +2323,7 @@ def runScript() -> None:
             # Get task_id if provided for status updates
             task_id = None
             try:
-                task_id_input = unwrap(client.getInput("Task_ID"))
+                task_id_input = unwrap(client.getInput(constants.results.TASK_ID))
                 if task_id_input and task_id_input.strip():
                     task_id = uuid.UUID(task_id_input.strip())  # Convert to UUID object
                     logger.info(f"Using task ID {task_id} for status updates")
@@ -2295,7 +2339,7 @@ def runScript() -> None:
             # Get and validate workflow ID using proper UUID parsing
             script_wf_id = None
             try:
-                wf_uuid_input = unwrap(client.getInput("workflow_uuid"))
+                wf_uuid_input = unwrap(client.getInput(constants.results.WORKFLOW_UUID))
                 if wf_uuid_input and wf_uuid_input.strip():
                     # Validate UUID format by parsing, but keep as string for downstream use.
                     # uuid.UUID() expects a str; passing the object itself causes AttributeError.
@@ -2561,7 +2605,7 @@ def runScript() -> None:
                                 message += file_outputs_message
 
                             # Only cleanup if Cleanup? is True
-                            if unwrap(client.getInput("Cleanup?")):
+                            if unwrap(client.getInput(constants.CLEANUP)):
                                 clean_result = slurmClient.cleanup_tmp_files(
                                     slurm_job_id,
                                     filename,
@@ -2577,21 +2621,23 @@ def runScript() -> None:
                 finally:
                     if folder and log_file:
                         # Only cleanup locally if Cleanup? is True
-                        if unwrap(client.getInput("Cleanup?")):
+                        if unwrap(client.getInput(constants.CLEANUP)):
                             message = cleanup_tmp_files_locally(message, folder, log_file)
                             logger.info("Local cleanup completed")
                         else:
                             message += f"\nCleanup disabled: Local files preserved at {folder}"
                             logger.info(f"Cleanup disabled: Preserved local files at {folder}")
 
-            client.setOutput("Message", rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(str(message)))
         except Exception as e:
             logger.error(f"Script execution failed: {e}", exc_info=True)
             message += f"\nScript execution failed: {e}"
 
             # Set failure output and re-raise to show red X in OMERO
             try:
-                client.setOutput("Message", rstring(f"FAILED: {message}"))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(f"FAILED: {message}"))
             except Exception:
                 pass
 

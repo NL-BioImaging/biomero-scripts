@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 IMPORTER_ENABLED = os.getenv("IMPORTER_ENABLED", "false").lower() == "true"
 SHALLOW_ZARR_ENABLED = (
-    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+    os.getenv(constants.slurm_env.BIOMERO_SHALLOW_ZARR, "false").lower() == "true"
 )
 
 SHALLOW_ZARR_RESTORE_AVAILABLE = False
@@ -137,7 +137,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 BIOMERO_CONFIG_FILE = os.getenv(
     "OMERO_BIOMERO_CONFIG_FILE",
     os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
@@ -3174,7 +3174,7 @@ def batch_image_export(conn, script_params, slurmClient: SlurmClient,
             logger.error(f"Critical error: Unzipping on SLURM failed: {e}")
             raise Exception(f"Data unpacking on SLURM failed: {e}") from e
     
-    cleanup_enabled = script_params.get("Cleanup?", True)
+    cleanup_enabled = script_params.get(constants.CLEANUP, True)
     file_annotation = None
     if transfer_successful and unpack_successful and cleanup_enabled:
         message += (
@@ -3212,7 +3212,7 @@ def write_logfile(exp_dir):
             log_file.write("\n")
 
 
-def run_script():
+def run_script() -> None:
     """Main entry point for SLURM image transfer script.
     
     Called by OMERO scripting service to handle data export from OMERO
@@ -3376,7 +3376,7 @@ def run_script():
                 default=constants.transfer.FOLDER_DEFAULT+str(int(datetime.now().timestamp()))),
 
             scripts.Bool(
-                "Cleanup?", grouping="4",
+                constants.CLEANUP, grouping="4",
                 description="Remove zip/annotation from OMERO after successful transfer to SLURM. Uncheck to keep downloadable copy in OMERO.",
                 default=True),
 
@@ -3410,7 +3410,8 @@ def run_script():
 
             # return this fileAnnotation to the client.
             _require_keepalive(conn.keepAlive, "writing Image Transfer outputs")
-            client.setOutput("Message", rstring(message))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(message))
             client.setOutput(
                 constants.results.CANONICAL_INPUTS_OUTPUT,
                 rstring(json.dumps([
@@ -3418,7 +3419,7 @@ def run_script():
                 ], separators=(",", ":"), sort_keys=True)),
             )
             if file_annotation is not None:
-                client.setOutput("File_Annotation",
+                client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
                                  robject(file_annotation._obj))
 
         finally:

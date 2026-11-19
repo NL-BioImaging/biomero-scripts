@@ -14,7 +14,7 @@ import omero.scripts as omscripts
 import omero
 import re
 import subprocess
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 from omero.gateway import BlitzGateway
 import logging
 import os
@@ -66,7 +66,7 @@ _SOTHER = "Run_Other_Command"
 _SCMD = "Linux_Command"
 _DEFAULT_SCMD = "ls -la"
 
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 def runScript():
@@ -108,7 +108,7 @@ def runScript():
 
         if not is_admin:
             logger.warning("Access denied: Admin privileges required")
-            client.setOutput("Message", rstring(
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                 f"ACCESS DENIED: This script requires OMERO administrator "
                 f"privileges. User ID {user_id} is not an admin."
             ))
@@ -136,7 +136,7 @@ def runScript():
                         f"BLOCKED command from admin user {user_name} "
                         f"(id={user_id}): '{custom_cmd}' — {safety_error}"
                     )
-                    client.setOutput("Message", rstring(
+                    client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                         f"Command blocked: {safety_error}"
                     ))
                     return
@@ -157,7 +157,7 @@ def runScript():
                 logger.error(f"Command error: {e}")
                 print_result.append(f"Error: {e}")
 
-            client.setOutput("Message", rstring("\n".join(print_result)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring("\n".join(print_result)))
 
     finally:
         client.closeSession()

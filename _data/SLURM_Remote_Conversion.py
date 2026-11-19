@@ -33,6 +33,9 @@ Institution: Amsterdam UMC, University of Dundee
 License: GNU GPL version 2 (see LICENSE)
 """
 
+from typing import Any, List, Optional
+from uuid import UUID
+
 import omero
 import omero.gateway
 from omero import scripts
@@ -49,8 +52,11 @@ logger = logging.getLogger(__name__)
 CONV_OPTIONS_SOURCE = ['zarr']
 CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 
+# Output that shows the uploaded conversion log; no other script reads it.
+CONVERSION_LOG_OUTPUT = "Conversion_Log"
+
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 def resolve_log_fallback_target(client, conn):
@@ -89,8 +95,13 @@ def resolve_log_fallback_target(client, conn):
     return []
 
 
-def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
-                                   targets=None):
+def upload_conversion_log_to_omero(client: Any,
+                                   conn: BlitzGateway,
+                                   slurmClient: SlurmClient,
+                                   slurmJob: Any,
+                                   wf_id: Optional[UUID],
+                                   targets: Optional[List[Any]] = None
+                                   ) -> str:
     """Fetch the conversion job log from Slurm and attach it to OMERO.
 
     The conversion runs as a Slurm array job that writes ``omero-<jobid>_*.log``
@@ -156,8 +167,9 @@ def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
 
-        client.setOutput("Conversion_Log", robject(annotation._obj))
-        client.setOutput("URL", wrap({"type": "URL", "href": url}))
+        client.setOutput(CONVERSION_LOG_OUTPUT, robject(annotation._obj))
+        client.setOutput(constants.results.URL_OUTPUT,
+                         wrap({"type": "URL", "href": url}))
         logger.info(
             f"Uploaded conversion log {local_path} to OMERO (file {obj_id}), "
             f"linked to {len(targets or [])} container(s)")
@@ -168,7 +180,7 @@ def upload_conversion_log_to_omero(client, conn, slurmClient, slurmJob, wf_id,
         return f" (failed to upload conversion log: {e})"
 
 
-def runScript():
+def runScript() -> None:
     """
     Main entry point for SLURM remote data conversion script.
 
@@ -359,11 +371,13 @@ def runScript():
                     slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
 
                 # Always set output message with error for parent detection
-                client.setOutput("Message", rstring(str(message)))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(str(message)))
                 raise e
 
             # Set successful output message
-            client.setOutput("Message", rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(str(message)))
             # slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()

@@ -25,13 +25,11 @@ from omero.gateway import BlitzGateway
 import omero
 from biomero import WorkflowTracker, constants
 
-_WORKFLOW_ID = "Workflow_ID"
-_REASON = "Reason"
 _DEFAULT_REASON = "Cancelled by user"
 _MAX_REASON_LENGTH = 200
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +100,12 @@ def runScript() -> None:
         it is marked FAILED with the reason. Only the workflow's owner or an
         OMERO administrator can cancel it.
         """,
-        omscripts.String(_WORKFLOW_ID, grouping="01", optional=False,
+        omscripts.String(constants.cancel_workflow.WORKFLOW_ID,
+                         grouping="01", optional=False,
                          description="UUID of the workflow, as shown in the "
                                      "BIOMERO workflow overview."),
-        omscripts.String(_REASON, grouping="02", optional=True,
+        omscripts.String(constants.cancel_workflow.REASON,
+                         grouping="02", optional=True,
                          default=_DEFAULT_REASON,
                          description="Why the workflow is cancelled."),
         namespaces=[omero.constants.namespaces.NSDYNAMIC],
@@ -118,8 +118,10 @@ def runScript() -> None:
     try:
         conn = BlitzGateway(client_obj=client)
         inputs = client.getInputs(unwrap=True)
-        workflow_id = UUID(str(inputs[_WORKFLOW_ID]).strip())
-        reason = inputs.get(_REASON) or _DEFAULT_REASON
+        workflow_id = UUID(
+            str(inputs[constants.cancel_workflow.WORKFLOW_ID]).strip())
+        reason = (inputs.get(constants.cancel_workflow.REASON)
+                  or _DEFAULT_REASON)
         with WorkflowTracker() as tracker:
             message = request_cancel(
                 tracker, workflow_id, conn.getUserId(),

@@ -18,6 +18,7 @@ import os
 import sys
 from omero.gateway import BlitzGateway
 import omero
+from biomero import constants
 
 # Define log path and tail lines constants
 _LOG_PATH = "Log_Path"
@@ -26,7 +27,7 @@ _TAIL_LINES = "Tail_Lines"
 _DEFAULT_TAIL_LINES = 5000
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def runScript():
 
         if not is_admin:
             logger.warning("Access denied: Admin privileges required")
-            client.setOutput("Message", rstring(
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                 f"ACCESS DENIED: This script requires OMERO administrator privileges. "
                 f"User ID {user_id} is not an admin."
             ))
@@ -96,12 +97,12 @@ def runScript():
             print(f"Error: Log file not found at {log_path}.", file=sys.stderr)
 
         # Send completion message to OMERO
-        client.setOutput("Message", rstring("Log tailing complete"))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring("Log tailing complete"))
 
     except Exception as e:
         # If something goes wrong, log the error and return a message to OMERO
         logger.error(f"Error occurred: {str(e)}")
-        client.setOutput("Message", rstring(f"Error: {str(e)}"))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"Error: {str(e)}"))
 
     finally:
         client.closeSession()

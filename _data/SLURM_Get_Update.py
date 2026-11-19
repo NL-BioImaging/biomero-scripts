@@ -48,21 +48,21 @@ import omero.util.script_utils as script_utils
 from omero.constants.namespaces import NSCREATED
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, robject, unwrap, wrap
-from biomero import SlurmClient
+from biomero import SlurmClient, constants
 import logging
 import os
 import sys
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 logger = logging.getLogger(__name__)
 
-SLURM_JOB_ID = "SLURM Job Id"
+SLURM_JOB_ID = constants.results.OUTPUT_SLURM_JOB_ID
 SLURM_JOB_ID_OLD = "SLURM Job Id (old)"
 RUN_ON_GPU_NS = "GPU"
 RUNNING_JOB = "Running Job"
-COMPLETED_JOB = "Completed Job"
+COMPLETED_JOB = constants.results.OUTPUT_COMPLETED_JOB
 
 
 def getUserProjects():
@@ -92,7 +92,7 @@ def getUserProjects():
         client.closeSession()
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for SLURM job monitoring and update script.
     
     Provides interface for monitoring active SLURM jobs and retrieving
@@ -179,7 +179,8 @@ def runScript():
                     obj = client.upload(export_file, type=mimetype)
                     obj_id = obj.id.val
                     url = f"get_original_file/{obj_id}/"
-                    client.setOutput("URL", wrap({"type": "URL", "href": url}))
+                    client.setOutput(constants.results.URL_OUTPUT,
+                                     wrap({"type": "URL", "href": url}))
                     # Attach logfile (OriginalFile) to Project
                     conn = BlitzGateway(client_obj=client)
                     project_ids = unwrap(client.getInput("Project"))
@@ -200,12 +201,13 @@ def runScript():
                             project.linkAnnotation(file_annotation)
                     # Script output
                     message += ann_message
-                    client.setOutput("File_Annotation",
+                    client.setOutput(constants.results.FILE_ANNOTATION_OUTPUT,
                                      robject(file_annotation._obj))
                 except Exception as e:
                     message += f" Importing logfile failed: {e}\n"
 
-            client.setOutput("Message", rstring(str(message)))
+            client.setOutput(constants.results.MESSAGE_OUTPUT,
+                             rstring(str(message)))
 
         finally:
             client.closeSession()

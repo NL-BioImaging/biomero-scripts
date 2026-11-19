@@ -51,7 +51,7 @@ from biomero import SlurmClient, constants
 import logging
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ _DEFAULT_MAIL = "No"
 _DEFAULT_TIME = "00:15:00"
 
 
-def runScript():
+def runScript() -> None:
     """Main entry point for CellPose segmentation workflow on SLURM.
     
     Executes CellPose segmentation algorithm on SLURM cluster using
@@ -202,7 +202,7 @@ def runScript():
                     f"Error running CellPose job: {cp_result.stderr}")
                 slurmClient.workflowTracker.fail_workflow(
                     wf_id, "CellPose job submission failed")
-                client.setOutput("Message", rstring(
+                client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                     f"Failed to submit job: {cp_result.stderr}"))
             else:
                 print_result = f"Submitted to Slurm as batch job {slurm_job_id}."
@@ -229,12 +229,14 @@ def runScript():
                     logger.warning(print_result)
                     slurmClient.workflowTracker.fail_workflow(
                         wf_id, "Error checking job status")
-                    client.setOutput("Message", rstring(print_result))
+                    client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                     rstring(print_result))
 
             # 7. Script output
             logger.info(print_result)
             if not 'ERROR' in print_result:
-                client.setOutput("Message", rstring(print_result))
+                client.setOutput(constants.results.MESSAGE_OUTPUT,
+                                 rstring(print_result))
                 slurmClient.workflowTracker.complete_workflow(wf_id)
         finally:
             client.closeSession()

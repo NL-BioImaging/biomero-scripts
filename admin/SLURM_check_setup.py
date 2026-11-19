@@ -51,7 +51,7 @@ import omero.gateway
 from omero import scripts
 from omero.rtypes import rstring, unwrap
 from omero.gateway import BlitzGateway
-from biomero import SlurmClient, WorkflowTracker
+from biomero import SlurmClient, WorkflowTracker, constants
 from biomero.detached import detached_mode_enabled
 from biomero.maintenance import metadata_refresh_statuses
 import logging
@@ -60,7 +60,7 @@ import sys
 import pkg_resources
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ def runScript():
         
         if not is_admin:
             logger.warning("Access denied: Admin privileges required")
-            client.setOutput("Message", rstring(
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
                 f"ACCESS DENIED: This administrative script requires OMERO "
                 f"administrator privileges. User ID {user_id} is not an admin."
             ))
@@ -183,7 +183,7 @@ def runScript():
         if check_slurm is None:
             check_slurm = True
         if not check_slurm:
-            client.setOutput('Message', rstring(message))
+            client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(message))
             return
         maintenance_message = message
         with SlurmClient.from_config() as slurmClient:
@@ -208,7 +208,7 @@ def runScript():
             
             logger.info(message)
 
-        client.setOutput("Message", rstring(str(message) + '\n' + maintenance_message))
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(str(message) + '\n' + maintenance_message))
 
     finally:
         client.closeSession()
