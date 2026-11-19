@@ -79,7 +79,7 @@ import numpy as np
 from omero_metadata.populate import ParsingContext
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 def get_images_by_ids(conn, image_ids):

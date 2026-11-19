@@ -134,6 +134,9 @@ QUALITATIVE_COLOR_SCHEME = (
     "#946638",  # sepia3
     "#7961DB",  # indigo3
 )
+# Output of this script that shows the uploaded Slurm job log; no other script
+# reads it, so it is defined here.
+JOB_LOG_OUTPUT = "Job_Log"
 # The runner validates the color before any work starts, so a bad value fails
 # early; Labels2Rois validates it again for standalone runs.
 ROI_COLOR_PATTERN = re.compile(r"#[0-9A-F]{6}")
@@ -148,7 +151,7 @@ LAUNCHER_EMAIL = "email"
 LAUNCHER_USE_ZARR_FORMAT = "use_zarr_format"
 LAUNCHER_OME_ZARR_VERSION = "ome_zarr_version"
 LAUNCHER_ROI_LABEL_PATTERN = "roi_label_pattern"
-VERSION = "2.9.0b24"
+VERSION = "2.9.0b28"
 
 
 def ensure_tracking_uuid(value):
@@ -2239,7 +2242,7 @@ def upload_job_log_to_omero(client: Any,
         except Exception:
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
-        client.setOutput("Job_Log", robject(annotation._obj))
+        client.setOutput(JOB_LOG_OUTPUT, robject(annotation._obj))
         client.setOutput(constants.results.URL_OUTPUT,
                          wrap({"type": "URL", "href": url}))
         logger.info(
@@ -2366,7 +2369,7 @@ def run_workflow(slurmClient: SlurmClient,
                         raise
                     ft_rv, _ = run_omero_script(client, svc, ft_script_id, ft_inputs,
                                                slurmClient=slurmClient)
-                    slurm_path = unwrap(ft_rv.get('Slurm_Path')) if ft_rv else None
+                    slurm_path = unwrap(ft_rv.get(constants.file_transfer.SLURM_PATH_OUTPUT)) if ft_rv else None
                     ft_msg = (
                         unwrap(ft_rv.get(constants.results.MESSAGE_OUTPUT,
                                          None))

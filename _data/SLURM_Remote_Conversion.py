@@ -53,7 +53,9 @@ CONV_OPTIONS_SOURCE = ['zarr']
 CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 
 # Version constant for easy version management
-VERSION = "2.9.0b24"
+# Output that shows the uploaded conversion log; no other script reads it.
+CONVERSION_LOG_OUTPUT = "Conversion_Log"
+VERSION = "2.9.0b28"
 
 
 def resolve_log_fallback_target(client, conn):
@@ -164,7 +166,7 @@ def upload_conversion_log_to_omero(client: Any,
             web_host = ""
         url = f"{web_host}/webclient/get_original_file/{obj_id}/"
 
-        client.setOutput("Conversion_Log", robject(annotation._obj))
+        client.setOutput(CONVERSION_LOG_OUTPUT, robject(annotation._obj))
         client.setOutput(constants.results.URL_OUTPUT,
                          wrap({"type": "URL", "href": url}))
         logger.info(
