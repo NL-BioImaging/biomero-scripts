@@ -137,7 +137,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b28"
+VERSION = "2.9.0b29"
 BIOMERO_CONFIG_FILE = os.getenv(
     "OMERO_BIOMERO_CONFIG_FILE",
     os.getenv("BIOMERO_CONFIG_FILE", "/opt/omero/server/biomero-config.json"),
