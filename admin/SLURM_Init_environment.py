@@ -684,20 +684,16 @@ def runScript():
                     if (importer_enabled
                             and shallow_zarr_enabled
                             and slurmClient.remote_shallow_zarr):
-                        from biomero.remote_shallower import image_spec
-                        from biomero_shallower.capabilities import (
-                            helper_image)
+                        from biomero.remote_shallower import (
+                            image_spec, resolve_helper_image)
                         # The installed shallower names its own helper image,
                         # so the image on Slurm always matches this package.
-                        try:
-                            shallower_image = helper_image()
-                        except (ValueError, RuntimeError) as exc:
-                            logger.warning(
-                                "Remote shallowing is enabled but the "
-                                f"installed shallower names no helper image "
-                                f"({exc}); the image is not staged and "
-                                "remote shallowing cannot run")
-                        else:
+                        # Init runs these steps itself, not core's
+                        # setup_slurm, so it can keep the OMERO session alive
+                        # (conn.keepAlive) between them; it therefore adds the
+                        # helper image to the image array itself.
+                        shallower_image = resolve_helper_image()
+                        if shallower_image:
                             converter_specs.append(
                                 image_spec(slurmClient, shallower_image))
                             logger.info("Staging the remote shallower image "

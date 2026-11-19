@@ -466,16 +466,12 @@ def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None
             f"No canonical snapshot for workflow {workflow_id}; remote "
             "shallowing skipped, results stay full")
         return None
-    try:
-        # The helper image Slurm Init installed comes from the installed
-        # shallower; core runs the image it is given.
-        from biomero_shallower.capabilities import helper_image
-        shallower_image = helper_image()
-    except (ImportError, ValueError, RuntimeError) as exc:
-        logger.warning(
-            f"Remote shallowing is enabled but not run for workflow "
-            f"{workflow_id}: the installed shallower names no helper image "
-            f"({exc}); results stay full")
+    # The helper image Slurm Init installed comes from the installed
+    # shallower; core runs the image it is given. A missing image therefore
+    # warns twice by design: once in the Run Workflow preflight and once here.
+    from biomero.remote_shallower import resolve_helper_image
+    shallower_image = resolve_helper_image()
+    if shallower_image is None:
         return None
     logger.info(f"Remote shallowing on Slurm requested for workflow "
                 f"{workflow_id} in {data_path} with helper image "

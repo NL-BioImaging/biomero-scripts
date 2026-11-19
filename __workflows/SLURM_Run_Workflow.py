@@ -826,17 +826,16 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
 
     from biomero.remote_shallower import (
         image_spec,
+        resolve_helper_image,
         validate_installed_tool,
     )
-    from biomero_shallower.capabilities import helper_image
 
-    try:
-        spec = image_spec(slurmClient, helper_image())
-    except (ValueError, RuntimeError) as exc:
-        logger.warning(
-            "Remote shallowing is enabled but cannot run: the installed "
-            f"shallower names no helper image ({exc}); results stay full")
+    # A missing helper image warns here (preflight) and again when the result
+    # stage runs; the second is intended, the first lets an admin see it early.
+    shallower_image = resolve_helper_image()
+    if shallower_image is None:
         return
+    spec = image_spec(slurmClient, shallower_image)
     ready, pending = slurmClient._partition_existing_images([spec])
     if pending or not ready:
         logger.warning(
