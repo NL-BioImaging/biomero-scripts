@@ -7,6 +7,7 @@ import shutil
 from types import SimpleNamespace
 
 import pytest
+from biomero_schema.zarr import CANONICAL_MARKER_NAME
 
 from runner_key_names import runner_key_names
 
@@ -76,6 +77,7 @@ def load_save_as_zarr(
 
     canonical_plate = SimpleNamespace(images=(object(),))
     namespace = {
+        "CANONICAL_MARKER_NAME": CANONICAL_MARKER_NAME,
         "Path": Path,
         "ShallowPlateReference": plate_type,
         "build_zarr_export_error": lambda *_args: "export failed",

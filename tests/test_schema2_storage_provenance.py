@@ -75,7 +75,8 @@ def test_plate_joins_graph_to_bindings_and_preserves_remote_receipt(managed_resu
     manifest.write_text(json.dumps(manifest_dict(profile)), encoding="utf-8")
     receipt = {"schema": 1, "workflow_id": WF, "storage": "shallow-zarr",
                "location": "remote", "container": "helper:0.1.0b4",
-               "tool_version": "0.1.0b4"}
+               "tool_version": "0.1.0b4", "task_id": "task-1", "job_id": None,
+               "report_sha256": "0" * 64}
     (root / ".biomero-import-storage.json").write_text(json.dumps(receipt))
     evidence = collect(reference)
     decision = ({"decision_basis": ["pixel-comparison"]}
