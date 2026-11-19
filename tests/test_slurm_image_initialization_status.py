@@ -223,7 +223,8 @@ def test_initializer_logs_unstaged_shallower_at_debug(
                  "logger": logging.getLogger(__name__),
                  "constants": biomero_constants}
     helper = ModuleType("biomero.remote_shallower")
-    with patch.dict(sys.modules, {"biomero.remote_shallower": helper}),             caplog.at_level(logging.DEBUG):
+    with patch.dict(sys.modules, {"biomero.remote_shallower": helper}), \
+            caplog.at_level(logging.DEBUG):
         exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],
                                 type_ignores=[]),
                      str(INIT_SCRIPT), "exec"), namespace)
