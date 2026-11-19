@@ -117,6 +117,11 @@ from biomero_schema.imports import (
     IMPORT_STORAGE_SHALLOW,
     parse_import_storage_record,
 )
+from biomero_schema.zarr import (
+    SHALLOW_COLLECTION_MANIFEST,
+    SHALLOW_COLLECTION_NAMESPACE,
+    ShallowManifest,
+)
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True
@@ -3688,11 +3693,11 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
     other_workflow_reference = False
     for ann in target.listAnnotations():
         ns = ann.getNs()
-        if ns not in ('biomero.zarr.shallow',
+        if ns not in (SHALLOW_COLLECTION_NAMESPACE,
                       (IMPORTER_CONFIG or {}).get('annotation_namespace', 'biomero.import')):
             continue
         values = dict(ann.getValue())
-        if ns == 'biomero.zarr.shallow':
+        if ns == SHALLOW_COLLECTION_NAMESPACE:
             if values.get('workflowId') == str(wf_id):
                 refs.append(values)
             else:
@@ -3721,7 +3726,7 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
             for parent in (candidate, *candidate.parents):
                 if not parent.is_relative_to(mount):
                     break
-                if (parent / '.biomero-shallow.json').is_file():
+                if (parent / SHALLOW_COLLECTION_MANIFEST).is_file():
                     nearest = parent
                     break
                 if nearest is None and any((parent / name).is_file()
@@ -3734,7 +3739,7 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
         if len(roots) != 1:
             raise ValueError('Ambiguous imported storage paths')
         root = roots.pop()
-    manifest = root / '.biomero-shallow.json'
+    manifest = root / SHALLOW_COLLECTION_MANIFEST
     shallow = manifest.is_file()
     if reference and not shallow:
         raise ValueError('Shallow reference has no readable manifest')
@@ -3755,8 +3760,6 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
     elif shallow:
         evidence['location'] = 'unknown'
     if shallow:
-        from biomero_schema.zarr import ShallowManifest
-
         raw = manifest.read_bytes()
         collection = ShallowManifest.from_dict(json.loads(raw))
         if str(collection.workflow_id) != str(wf_id):

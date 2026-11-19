@@ -20,6 +20,7 @@ from biomero import constants
 from omero import scripts
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, unwrap
+from pydantic import ValidationError
 from omero.sys import ParametersI
 
 from biomero_schema.zarr import (
@@ -1254,6 +1255,25 @@ def _summary(report):
     )
 
 
+def _failure_message(error: Exception) -> str:
+    """Summarize a failure for the activity message.
+
+    A schema ``ValidationError`` lists every problem of a file; the message
+    names only the first one, and ``logger.exception`` keeps the full detail.
+
+    Args:
+        error (Exception): The failure.
+
+    Returns:
+        str: One line describing the failure.
+    """
+    if not isinstance(error, ValidationError):
+        return str(error)
+    first_problem = error.errors()[0]
+    location = ".".join(str(part) for part in first_problem["loc"])
+    return f"invalid {error.title} at {location}: {first_problem['msg']}"
+
+
 def runScript():
     client = scripts.client(
         "BIOMERO Migrate Shallow Storage (Admin Only)",
@@ -1320,7 +1340,7 @@ def runScript():
     except Exception as error:
         logger.exception("Shallow-storage migration failed")
         client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
-            f"Shallow-storage migration failed: {error}"
+            f"Shallow-storage migration failed: {_failure_message(error)}"
         ))
     finally:
         client.closeSession()
