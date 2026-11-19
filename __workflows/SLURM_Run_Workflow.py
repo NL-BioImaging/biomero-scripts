@@ -808,7 +808,11 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
 
 def validate_remote_shallower_ready(slurmClient: SlurmClient,
                                     use_zarr_format: bool) -> None:
-    """Fail before workflow submission when remote shallowing cannot run."""
+    """Warn before workflow submission when remote shallowing cannot run.
+
+    A missing helper image is not fatal: the results stay full. An installed
+    image that fails validation still stops the workflow.
+    """
     if not (SHALLOW_ZARR_STORAGE_ENABLED and use_zarr_format
             and slurmClient.remote_shallow_zarr):
         logger.debug(
@@ -824,15 +828,23 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
         image_spec,
         validate_installed_tool,
     )
+    from biomero_shallower.capabilities import helper_image
 
-    spec = image_spec(slurmClient)
+    try:
+        spec = image_spec(slurmClient, helper_image())
+    except (ValueError, RuntimeError) as exc:
+        logger.warning(
+            "Remote shallowing is enabled but cannot run: the installed "
+            f"shallower names no helper image ({exc}); results stay full")
+        return
     ready, pending = slurmClient._partition_existing_images([spec])
     if pending or not ready:
-        raise RuntimeError(
+        logger.warning(
             f"Remote shallower image missing or invalid: {spec['destination']}. "
             "Ask an administrator to run SLURM Init Environment and verify "
-            "the image with SLURM Check Setup before starting this workflow."
-        )
+            "the image with SLURM Check Setup; this workflow keeps its full "
+            "results.")
+        return
     validate_installed_tool(slurmClient, spec["destination"])
     destination = spec["destination"]
     logger.info(f"Remote shallower image {destination} is ready; results "
