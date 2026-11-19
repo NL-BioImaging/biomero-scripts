@@ -9,6 +9,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from biomero_schema.zarr import (
+    CANONICAL_MARKER_NAME, CanonicalMarker, CanonicalZarrSource)
 
 from sidecar_feature import sidecars_live_in_biomero_folders
 
@@ -17,7 +19,21 @@ SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT = SOURCE_ROOT / "admin" / "BIOMERO_Migrate_Shallow_Storage.py"
-MARKER_NAME = ".biomero-canonical.json"
+MARKER_NAME = CANONICAL_MARKER_NAME
+
+
+def canonical_source(relative_path):
+    return CanonicalZarrSource(
+        storage_root="group-5-data", relative_path=relative_path,
+        node_path="A", source_object_type="Image", source_object_id=1,
+        source_generation=1, interchange_profile="ngff-0.4-zarr-v2",
+        pixel_identity_origin="raw", canonical_pixel_verified=False)
+
+
+def marker_text(source):
+    """A marker as BIOMERO.importer writes it."""
+    return json.dumps({"markerSchema": 1, "state": "committed",
+                       "source": source.to_dict()}, indent=2, sort_keys=True)
 
 
 def _marker_helpers():
@@ -31,6 +47,7 @@ def _marker_helpers():
         "os": os,
         "uuid4": uuid4,
         "CANONICAL_MARKER_NAME": MARKER_NAME,
+        "CanonicalMarker": CanonicalMarker,
         "PROCESSED_DATA_FOLDER": ".processed",
         "external_canonical_marker_path": (
             lambda path, **_kwargs: path.parent / "external-marker"),
@@ -49,11 +66,9 @@ def test_existing_canonical_marker_is_replaced_without_direct_overwrite(tmp_path
     store = tmp_path / "image.zarr"
     store.mkdir()
     marker = store / MARKER_NAME
-    marker.write_text(json.dumps({
-        "state": "committed", "markerSchema": 1,
-        "source": {"relativePath": "old"},
-    }), encoding="utf-8")
-    source = SimpleNamespace(to_dict=lambda: {"relativePath": "new"})
+    marker.write_text(marker_text(canonical_source("old.zarr")),
+                      encoding="utf-8")
+    source = canonical_source("new.zarr")
     helpers["load_canonical_marker"] = lambda path, **_kwargs: (
         source if json.loads((path / MARKER_NAME).read_text(
             encoding="utf-8"
