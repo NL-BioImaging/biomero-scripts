@@ -123,18 +123,6 @@ def test_initializer_submits_one_combined_array_and_reads_its_status():
     assert "sing.log" not in source
 
 
-def test_initializer_installs_the_helper_image_of_the_installed_shallower():
-    source = INIT_SCRIPT.read_text(encoding="utf-8")
-
-    assert "slurmClient.remote_shallow_zarr" in source
-    assert "from biomero_shallower.capabilities import" in source
-    assert "shallower_image = helper_image()" in source
-    assert "image_spec(slurmClient, shallower_image)" in source
-    # The helper image is no longer an INI setting.
-    assert "remote_shallower_image" not in source
-    assert "remote_shallower_version" not in source
-
-
 @pytest.mark.skipif(
     "BIOMERO_SHALLOW_ZARR" not in
     INIT_SCRIPT.read_text(encoding="utf-8"),
@@ -178,40 +166,26 @@ def test_initializer_only_acquires_enabled_remote_shallower(
     helper = ModuleType("biomero.remote_shallower")
     spec = {"kind": "shallower", "destination": image}
     helper.image_spec = Mock(return_value=spec)
-    capabilities = _capabilities(image)
+    # No image means the installed shallower names none; core logs that.
+    helper.resolve_helper_image = Mock(return_value=image)
     converter_spec = {"kind": "converter", "destination": "converter.sif"}
     specs = [converter_spec]
     namespace = {"os": os, "slurmClient": client, "converter_specs": specs,
                  "logger": logging.getLogger(__name__),
                  "constants": biomero_constants}
 
-    with patch.dict(sys.modules, {
-            "biomero.remote_shallower": helper,
-            "biomero_shallower.capabilities": capabilities}):
+    with patch.dict(sys.modules, {"biomero.remote_shallower": helper}):
         exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],
                                 type_ignores=[]),
                      str(INIT_SCRIPT), "exec"), namespace)
 
     assert specs == [converter_spec] + ([spec] if expected else [])
     if expected:
-        # The image to install is the one the installed shallower names.
+        # The image to install is the one the shallower resolver returns.
+        helper.resolve_helper_image.assert_called_once_with()
         helper.image_spec.assert_called_once_with(client, image)
     else:
         helper.image_spec.assert_not_called()
-
-
-def _remote_shallower_module():
-    module = ModuleType("biomero.remote_shallower")
-    module.image_spec = Mock(return_value={})
-    return module
-
-
-def _capabilities(image):
-    """Fake biomero_shallower.capabilities; no image means no helper image."""
-    capabilities = ModuleType("biomero_shallower.capabilities")
-    capabilities.helper_image = Mock(
-        return_value=image, side_effect=None if image else ValueError("dev"))
-    return capabilities
 
 
 def _flag_assignments(tree):
@@ -225,17 +199,14 @@ def _flag_assignments(tree):
     ]
 
 
-@pytest.mark.parametrize("importer,shallow,image,level", [
-    ("false", "true", "shallower.sif", logging.DEBUG),
-    ("true", "false", "shallower.sif", logging.DEBUG),
-    ("true", "true", None, logging.WARNING),
+@pytest.mark.parametrize("importer,shallow", [
+    ("false", "true"),
+    ("true", "false"),
 ])
-def test_initializer_logs_unstaged_shallower_by_reason(
-    monkeypatch, caplog, importer, shallow, image, level,
+def test_initializer_logs_unstaged_shallower_at_debug(
+    monkeypatch, caplog, importer, shallow,
 ):
     source = INIT_SCRIPT.read_text(encoding="utf-8")
-    if "names no helper image" not in source:
-        pytest.skip("Staging decision logging is not in source revision")
     tree = ast.parse(source)
     branch = next(
         node for node in ast.walk(tree)
@@ -251,31 +222,26 @@ def test_initializer_logs_unstaged_shallower_by_reason(
     namespace = {"os": os, "slurmClient": client, "converter_specs": specs,
                  "logger": logging.getLogger(__name__),
                  "constants": biomero_constants}
-    with patch.dict(sys.modules, {
-            "biomero.remote_shallower": _remote_shallower_module(),
-            "biomero_shallower.capabilities": _capabilities(image),
-    }), caplog.at_level(logging.DEBUG):
+    helper = ModuleType("biomero.remote_shallower")
+    with patch.dict(sys.modules, {"biomero.remote_shallower": helper}),             caplog.at_level(logging.DEBUG):
         exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],
                                 type_ignores=[]),
                      str(INIT_SCRIPT), "exec"), namespace)
     assert specs == []
-    assert [record.levelno for record in caplog.records] == [level]
+    assert [record.levelno for record in caplog.records] == [logging.DEBUG]
 
 
 PREFLIGHT_IMAGE = "registry/helper:0.1.0"
 
 
-def _run_preflight(client, remote_shallower, capabilities=None):
+def _run_preflight(client, remote_shallower):
     validator = load_function(RUN_SCRIPT, "validate_remote_shallower_ready")
     validator.__globals__.update(
         IMPORTER_ENABLED=True,
         SHALLOW_ZARR_ENABLED=True,
         SHALLOW_ZARR_STORAGE_ENABLED=True,
     )
-    with patch.dict(sys.modules, {
-            "biomero.remote_shallower": remote_shallower,
-            "biomero_shallower.capabilities": (
-                capabilities or _capabilities(PREFLIGHT_IMAGE))}):
+    with patch.dict(sys.modules, {"biomero.remote_shallower": remote_shallower}):
         validator(client, use_zarr_format=True)
 
 
@@ -288,8 +254,9 @@ def _preflight_client(destination, installed=True):
     )
 
 
-def _preflight_module(destination, **overrides):
+def _preflight_module(destination, image=PREFLIGHT_IMAGE, **overrides):
     remote_shallower = ModuleType("biomero.remote_shallower")
+    remote_shallower.resolve_helper_image = Mock(return_value=image)
     remote_shallower.image_spec = Mock(return_value={"destination": destination})
     remote_shallower.validate_installed_tool = Mock(**overrides)
     return remote_shallower
@@ -331,12 +298,12 @@ def test_workflow_preflight_warns_when_remote_shallower_is_not_installed(caplog)
 def test_workflow_preflight_warns_when_shallower_names_no_helper_image(caplog):
     destination = "/images/shallower.sif"
     client = _preflight_client(destination)
-    remote_shallower = _preflight_module(destination)
+    remote_shallower = _preflight_module(destination, image=None)
 
     with caplog.at_level(logging.DEBUG):
-        _run_preflight(client, remote_shallower, _capabilities(None))
+        _run_preflight(client, remote_shallower)
 
-    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    # The resolver (core) logs the reason; the preflight just stops.
     remote_shallower.image_spec.assert_not_called()
     client._partition_existing_images.assert_not_called()
 

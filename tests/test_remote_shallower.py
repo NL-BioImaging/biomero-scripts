@@ -18,12 +18,12 @@ HELPER_IMAGE = 'registry/helper:0.1.0'
 
 @pytest.fixture(autouse=True)
 def installed_shallower_names_its_helper_image():
-    """The stage asks the installed shallower for the helper image."""
-    capabilities = ModuleType('biomero_shallower.capabilities')
-    capabilities.helper_image = Mock(return_value=HELPER_IMAGE)
+    """The stage asks core's resolver, which asks the installed shallower."""
+    remote_shallower = ModuleType('biomero.remote_shallower')
+    remote_shallower.resolve_helper_image = Mock(return_value=HELPER_IMAGE)
     with patch.dict(sys.modules,
-                    {'biomero_shallower.capabilities': capabilities}):
-        yield capabilities
+                    {'biomero.remote_shallower': remote_shallower}):
+        yield remote_shallower
 
 
 def source_text():
@@ -55,7 +55,7 @@ def test_enabled_runs_remote_shallowing():
 
 def test_helper_image_comes_from_the_installed_shallower(
         installed_shallower_names_its_helper_image):
-    installed_shallower_names_its_helper_image.helper_image.return_value = (
+    installed_shallower_names_its_helper_image.resolve_helper_image.return_value = (
         'other/helper:9.9.9')
     client = SimpleNamespace(remote_shallow_zarr=True,
                              shallow_results_on_slurm=Mock())
@@ -64,17 +64,13 @@ def test_helper_image_comes_from_the_installed_shallower(
         'helper_image'] == 'other/helper:9.9.9'
 
 
-@pytest.mark.parametrize('failure', [ValueError('dev version'),
-                                     RuntimeError('no repository')])
-def test_no_helper_image_keeps_full_results_and_warns(
-        caplog, installed_shallower_names_its_helper_image, failure):
-    installed_shallower_names_its_helper_image.helper_image.side_effect = failure
+def test_no_helper_image_keeps_full_results(
+        installed_shallower_names_its_helper_image):
+    """The resolver (core) logs why; the stage returns without shallowing."""
+    installed_shallower_names_its_helper_image.resolve_helper_image.return_value = None
     client = SimpleNamespace(remote_shallow_zarr=True,
                              shallow_results_on_slurm=Mock())
-    with caplog.at_level(logging.DEBUG):
-        assert load()(client, '/data', 'workflow') is None
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
-    assert 'results stay full' in caplog.records[0].getMessage()
+    assert load()(client, '/data', 'workflow') is None
     client.shallow_results_on_slurm.assert_not_called()
 
 
