@@ -9,6 +9,7 @@ import pytest
 
 import biomero.constants as biomero_constants
 import biomero_schema.imports as schema_imports
+import biomero_schema.zarr as schema_zarr
 
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 SOURCE = ROOT / '_data' / 'SLURM_Import_Results.py'
@@ -26,6 +27,9 @@ def load():
     namespace = dict(os=os, json=json, Path=Path, uuid=__import__('uuid'),
                      logger=Mock(), IMPORTER_CONFIG={},
                      constants=biomero_constants,
+                     SHALLOW_COLLECTION_MANIFEST=schema_zarr.SHALLOW_COLLECTION_MANIFEST,
+                     SHALLOW_COLLECTION_NAMESPACE=schema_zarr.SHALLOW_COLLECTION_NAMESPACE,
+                     ShallowManifest=schema_zarr.ShallowManifest,
                      IMPORT_STORAGE_FILENAME=schema_imports.IMPORT_STORAGE_FILENAME,
                      IMPORT_STORAGE_FULL=schema_imports.IMPORT_STORAGE_FULL,
                      IMPORT_STORAGE_SCHEMA=schema_imports.IMPORT_STORAGE_SCHEMA,

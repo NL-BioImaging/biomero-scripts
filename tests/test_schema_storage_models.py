@@ -11,6 +11,7 @@ Two kinds of test:
 
 import ast
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from biomero_schema.imports import (
 )
 from biomero_schema.zarr import (
     CANONICAL_MARKER_NAME,
+    SHALLOW_COLLECTION_MANIFEST,
+    SHALLOW_COLLECTION_NAMESPACE,
     CanonicalMarker,
     CanonicalZarrSource,
 )
@@ -37,6 +40,8 @@ MIGRATE = SOURCE_ROOT / "admin" / "BIOMERO_Migrate_Shallow_Storage.py"
 WF = "4f596081-5d48-41af-a539-a3c5e120ba66"
 OTHER_WF = "9a1c1d1e-0000-4000-8000-000000000001"
 
+# TODO(biomero-scripts#109): remove this gate once the scripts adopted the
+# models (biomero-scripts#112) are merged.
 # The tests of the new behaviour wait for the scripts to adopt the models;
 # until then only the compatibility tests (which hold for both) run.
 ADOPTED = "parse_import_storage_record" in IMPORT_RESULTS.read_text(
@@ -67,6 +72,22 @@ def test_import_results_uses_the_import_storage_models():
     names = _imported_names(IMPORT_RESULTS, "biomero_schema.imports")
     assert {"IMPORT_STORAGE_FILENAME", "parse_import_storage_record"} <= names
     assert IMPORT_STORAGE_FILENAME not in _string_literals(IMPORT_RESULTS)
+
+
+@requires_adoption
+def test_import_results_names_the_shallow_files_through_schema_constants():
+    names = _imported_names(IMPORT_RESULTS, "biomero_schema.zarr")
+    assert {"SHALLOW_COLLECTION_MANIFEST", "SHALLOW_COLLECTION_NAMESPACE",
+            "ShallowManifest"} <= names
+    literals = _string_literals(IMPORT_RESULTS)
+    assert SHALLOW_COLLECTION_MANIFEST not in literals
+    assert SHALLOW_COLLECTION_NAMESPACE not in literals
+    function_imports = [
+        node for function in ast.walk(_tree(IMPORT_RESULTS))
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.ImportFrom) and node.module == "biomero_schema.zarr"]
+    assert function_imports == []
 
 
 @requires_adoption
@@ -119,6 +140,17 @@ EARLIER_BETA_RECORDS = {
         "location": "remote", "container": "ghcr.io/x/shallower:0.1.0b4",
         "tool_version": "0.1.0b4", "task_id": "task-3", "job_id": None,
         "report_sha256": "c" * 64},
+    # Beta.14 and later write the optional fields explicitly, also as null.
+    "remote-full-explicit-nulls": {
+        "schema": 1, "workflow_id": WF, "storage": "full-zarr",
+        "location": "remote", "decision_basis": None,
+        "container": "ghcr.io/x/shallower:0.1.0b11",
+        "tool_version": "0.1.0b11", "task_id": "task-4", "job_id": None,
+        "report_sha256": "d" * 64},
+    "importer-shallow-explicit-null": {
+        "schema": 1, "workflow_id": WF, "storage": "shallow-zarr",
+        "location": "importer", "tool_version": "0.1.0b11",
+        "decision_basis": None},
     "remote-with-job": {
         "schema": 1, "workflow_id": WF, "storage": "full-zarr",
         "location": "remote", "decision_basis": "pixel-comparison",
@@ -173,6 +205,8 @@ def test_record_from_an_earlier_beta_gives_the_evidence_it_always_did(
         "manifest", "manifest_sha256", "source_biocodes", "decision_basis"}
     if record["storage"] == IMPORT_STORAGE_FULL:
         assert set(evidence) == set(record)
+        # An explicit null is part of the file, so it stays in the evidence.
+        assert evidence.get("decision_basis") == record.get("decision_basis")
 
 
 @pytest.mark.parametrize("name", sorted(EARLIER_BETA_RECORDS))
@@ -294,3 +328,68 @@ def test_marker_the_model_rejects_is_not_rewritten(tmp_path, mutation):
     assert (store / CANONICAL_MARKER_NAME).read_text(
         encoding="utf-8") == original
 
+
+
+# --- failures stay contained ------------------------------------------------
+
+@requires_adoption
+def test_invalid_storage_record_warns_and_does_not_abort_the_import(
+        tmp_path, monkeypatch, caplog):
+    """A ValidationError from the record is logged by add_object_annotations
+    and the other workflow metadata is still written."""
+    from test_provenance_fallback import load as load_annotations
+    from test_schema2_storage_provenance import tracker_fixture
+    from test_storage_provenance import connection
+    record = {**EARLIER_BETA_RECORDS["importer-full"], "surprise": True}
+    root = _result_with_record(tmp_path, monkeypatch, record)
+    conn = connection([("biomero.import", {"Imported_from": str(root)})])
+    slurm, _ = tracker_fixture()
+    slurm.track_workflows = True
+    namespace = load_annotations("Import")
+    namespace.update(_load_provenance_functions())
+    namespace["logger"] = logging.getLogger("storage-record-test")
+    posted = []
+    namespace["render_workflow_metadata"] = lambda *args, **kwargs: [
+        type("Annotation", (), {"namespace": "biomero/workflow",
+                                "values": {"Workflow_ID": WF}})()]
+    namespace["post_provenance_map_annotation"] = (
+        lambda **kwargs: (posted.append(kwargs) or 1, "complete"))
+
+    with caplog.at_level(logging.WARNING, logger="storage-record-test"):
+        outcome = namespace["add_object_annotations"](
+            conn, slurm, "Image", 1, "15", WF)
+
+    assert outcome == "failed"
+    assert any(entry.levelno == logging.WARNING
+               and "Storage provenance unavailable" in entry.getMessage()
+               for entry in caplog.records)
+    slurm.workflowTracker.record_storage_provenance.assert_not_called()
+    assert len(posted) == 1
+
+
+def _load_provenance_functions():
+    from test_storage_provenance import load
+    return load()
+
+
+@requires_adoption
+def test_migration_failure_message_names_the_first_invalid_field(tmp_path):
+    from pydantic import ValidationError
+    tree = _tree(MIGRATE)
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_failure_message")
+    namespace = {"ValidationError": ValidationError}
+    exec(compile(ast.Module(body=[function], type_ignores=[]),
+                 str(MIGRATE), "exec"), namespace)
+    marker = json.loads(_importer_marker_text(_canonical_source("a.zarr")))
+    marker["state"] = "pending"
+    marker["surprise"] = True
+    with pytest.raises(ValidationError) as caught:
+        CanonicalMarker.from_dict(marker)
+
+    message = namespace["_failure_message"](caught.value)
+
+    assert len(message.splitlines()) == 1
+    assert message.startswith("invalid CanonicalMarker at ")
+    assert namespace["_failure_message"](ValueError("plain")) == "plain"
