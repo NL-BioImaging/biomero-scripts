@@ -27,6 +27,7 @@ def load_log_upload_function():
             warning=lambda *_args, **_kwargs: None,
         ),
         "constants": SimpleNamespace(results=OUTPUT_NAMES),
+        "JOB_LOG_OUTPUT": "Job_Log",
         "robject": lambda value: value,
         "unwrap": lambda value: getattr(value, "val", value),
         "wrap": lambda value: value,
