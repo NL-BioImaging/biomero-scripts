@@ -20,15 +20,18 @@ from biomero import constants
 from omero import scripts
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, unwrap
+from pydantic import ValidationError
 from omero.sys import ParametersI
 
 from biomero_schema.zarr import (
+    CANONICAL_MARKER_NAME,
     CANONICAL_PLATE_IMAGE_NAMESPACE,
     CANONICAL_PLATE_LABEL_NAMESPACE,
     CANONICAL_PLATE_SOURCE_NAMESPACE,
     CANONICAL_SOURCE_NAMESPACE,
     SHALLOW_COLLECTION_MANIFEST,
     SHALLOW_COLLECTION_NAMESPACE,
+    CanonicalMarker,
     CanonicalPlateIndex,
     CanonicalPlateSource,
     CanonicalZarrSource,
@@ -37,7 +40,6 @@ from biomero_schema.zarr import (
     ShallowZarrReference,
 )
 from biomero_importer.utils.canonical_store import (
-    CANONICAL_MARKER_NAME,
     external_canonical_marker_path,
     load_canonical_marker,
     move_canonical_marker,
@@ -552,8 +554,9 @@ def _write_canonical_marker(path: Path, source: Any) -> Path:
         Path: The marker file.
 
     Raises:
-        ValueError: If the existing marker is ambiguous, not committed, or does
-            not read back as ``source``.
+        ValueError: If the existing marker is ambiguous, is not a valid
+            committed marker (``pydantic.ValidationError``), or does not read
+            back as ``source``.
     """
     try:
         marker_path = _canonical_marker_path(path)
@@ -563,11 +566,10 @@ def _write_canonical_marker(path: Path, source: Any) -> Path:
         if internal.exists() or external.exists():
             raise
         return write_indexed_canonical_marker(path, source)
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    if marker.get("state") != "committed" or "markerSchema" not in marker:
-        raise ValueError(f"Canonical marker is not committed: {marker_path}")
-    marker["source"] = source.to_dict()
-    _write_json(marker_path, marker)
+    existing_marker = CanonicalMarker.from_dict(
+        json.loads(marker_path.read_text(encoding="utf-8")))
+    updated_marker = existing_marker.model_copy(update={"source": source})
+    _write_json(marker_path, updated_marker.to_dict())
     if load_canonical_marker(path) != source:
         raise ValueError(f"Canonical marker update did not validate: {path}")
     return marker_path
@@ -1253,6 +1255,25 @@ def _summary(report):
     )
 
 
+def _failure_message(error: Exception) -> str:
+    """Summarize a failure for the activity message.
+
+    A schema ``ValidationError`` lists every problem of a file; the message
+    names only the first one, and ``logger.exception`` keeps the full detail.
+
+    Args:
+        error (Exception): The failure.
+
+    Returns:
+        str: One line describing the failure.
+    """
+    if not isinstance(error, ValidationError):
+        return str(error)
+    first_problem = error.errors()[0]
+    location = ".".join(str(part) for part in first_problem["loc"])
+    return f"invalid {error.title} at {location}: {first_problem['msg']}"
+
+
 def runScript():
     client = scripts.client(
         "BIOMERO Migrate Shallow Storage (Admin Only)",
@@ -1319,7 +1340,7 @@ def runScript():
     except Exception as error:
         logger.exception("Shallow-storage migration failed")
         client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
-            f"Shallow-storage migration failed: {error}"
+            f"Shallow-storage migration failed: {_failure_message(error)}"
         ))
     finally:
         client.closeSession()
