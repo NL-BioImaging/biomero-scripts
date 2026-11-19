@@ -375,7 +375,7 @@ if IMPORTER_ENABLED and SHALLOW_ZARR_ENABLED:
         )
 
 # Version constant for easy version management
-VERSION = "2.9.0b28"
+VERSION = "2.9.0b29"
 
 
 def load_canonical_input_snapshot(slurm_client: SlurmClient,
@@ -478,8 +478,16 @@ def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None
             f"No canonical snapshot for workflow {workflow_id}; remote "
             "shallowing skipped, results stay full")
         return None
+    # The helper image Slurm Init installed comes from the installed
+    # shallower; core runs the image it is given. A missing image therefore
+    # warns twice by design: once in the Run Workflow preflight and once here.
+    from biomero.remote_shallower import resolve_helper_image
+    shallower_image = resolve_helper_image()
+    if shallower_image is None:
+        return None
     logger.info(f"Remote shallowing on Slurm requested for workflow "
-                f"{workflow_id} in {data_path}")
+                f"{workflow_id} in {data_path} with helper image "
+                f"{shallower_image}")
     kwargs = {}
     if omero_conn is not None:
         def heartbeat():
@@ -487,7 +495,8 @@ def shallow_remote_results(slurm_client, data_path, workflow_id, omero_conn=None
                 raise RuntimeError('OMERO connection is no longer active')
         kwargs['heartbeat'] = heartbeat
     return slurm_client.shallow_results_on_slurm(
-        data_path, workflow_id, canonical, **kwargs)
+        data_path, workflow_id, canonical, helper_image=shallower_image,
+        **kwargs)
 
 
 def build_shallow_import_options(canonical_inputs, client=None, remote_receipts=()):

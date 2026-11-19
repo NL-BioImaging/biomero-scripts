@@ -151,7 +151,7 @@ LAUNCHER_EMAIL = "email"
 LAUNCHER_USE_ZARR_FORMAT = "use_zarr_format"
 LAUNCHER_OME_ZARR_VERSION = "ome_zarr_version"
 LAUNCHER_ROI_LABEL_PATTERN = "roi_label_pattern"
-VERSION = "2.9.0b28"
+VERSION = "2.9.0b29"
 
 
 def ensure_tracking_uuid(value):
@@ -808,7 +808,11 @@ def validate_importer_write_access(slurmClient: SlurmClient, conn: BlitzGateway,
 
 def validate_remote_shallower_ready(slurmClient: SlurmClient,
                                     use_zarr_format: bool) -> None:
-    """Fail before workflow submission when remote shallowing cannot run."""
+    """Warn before workflow submission when remote shallowing cannot run.
+
+    A missing helper image is not fatal: the results stay full. An installed
+    image that fails validation still stops the workflow.
+    """
     if not (SHALLOW_ZARR_STORAGE_ENABLED and use_zarr_format
             and slurmClient.remote_shallow_zarr):
         logger.debug(
@@ -822,17 +826,24 @@ def validate_remote_shallower_ready(slurmClient: SlurmClient,
 
     from biomero.remote_shallower import (
         image_spec,
+        resolve_helper_image,
         validate_installed_tool,
     )
 
-    spec = image_spec(slurmClient)
+    # A missing helper image warns here (preflight) and again when the result
+    # stage runs; the second is intended, the first lets an admin see it early.
+    shallower_image = resolve_helper_image()
+    if shallower_image is None:
+        return
+    spec = image_spec(slurmClient, shallower_image)
     ready, pending = slurmClient._partition_existing_images([spec])
     if pending or not ready:
-        raise RuntimeError(
+        logger.warning(
             f"Remote shallower image missing or invalid: {spec['destination']}. "
             "Ask an administrator to run SLURM Init Environment and verify "
-            "the image with SLURM Check Setup before starting this workflow."
-        )
+            "the image with SLURM Check Setup; this workflow keeps its full "
+            "results.")
+        return
     validate_installed_tool(slurmClient, spec["destination"])
     destination = spec["destination"]
     logger.info(f"Remote shallower image {destination} is ready; results "

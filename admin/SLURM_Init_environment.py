@@ -51,7 +51,7 @@ from functools import partial
 from queue import Queue, Empty
 
 logger = logging.getLogger(__name__)
-VERSION = "2.9.0b28"
+VERSION = "2.9.0b29"
 
 
 def format_metadata_summary(report):
@@ -683,17 +683,21 @@ def runScript():
                                   "false").lower() == "true")
                     if (importer_enabled
                             and shallow_zarr_enabled
-                            and slurmClient.remote_shallow_zarr
-                            and slurmClient.remote_shallower_image):
-                        from biomero.remote_shallower import image_spec
-                        converter_specs.append(image_spec(slurmClient))
-                        logger.info("Staging the remote shallower image")
-                    elif (importer_enabled and shallow_zarr_enabled
                             and slurmClient.remote_shallow_zarr):
-                        logger.warning(
-                            "Remote shallowing is enabled but "
-                            "remote_shallower_image is empty; the image is "
-                            "not staged and remote shallowing cannot run")
+                        from biomero.remote_shallower import (
+                            image_spec, resolve_helper_image)
+                        # The installed shallower names its own helper image,
+                        # so the image on Slurm always matches this package.
+                        # Init runs these steps itself, not core's
+                        # setup_slurm, so it can keep the OMERO session alive
+                        # (conn.keepAlive) between them; it therefore adds the
+                        # helper image to the image array itself.
+                        shallower_image = resolve_helper_image()
+                        if shallower_image:
+                            converter_specs.append(
+                                image_spec(slurmClient, shallower_image))
+                            logger.info("Staging the remote shallower image "
+                                        f"{shallower_image}")
                     else:
                         logger.debug(
                             "Remote shallower image not staged: "
