@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -33,7 +35,7 @@ def load_target_resolver():
         if isinstance(node, ast.FunctionDef)
         and node.name == "resolve_non_image_output_targets"
     ]
-    namespace = {}
+    namespace = {"constants": biomero_constants}
     exec(compile(ast.Module(body=functions, type_ignores=[]),
                  str(SCRIPT_PATH), "exec"), namespace)
     return namespace["resolve_non_image_output_targets"]

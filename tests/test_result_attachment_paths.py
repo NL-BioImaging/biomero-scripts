@@ -11,6 +11,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from script_output_names import OUTPUT_NAMES
+
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 SOURCE = ROOT / "_data" / "SLURM_Import_Results.py"
@@ -30,7 +32,8 @@ def load():
         SUPPORTED_IMAGE_EXTENSIONS=(".tif", ".tiff", ".png", ".zarr"),
         NSCREATED="test", unwrap=lambda value: value, robject=lambda value: value,
         constants=SimpleNamespace(results=SimpleNamespace(
-            OUTPUT_SLURM_JOB_ID="job_id")),
+            OUTPUT_SLURM_JOB_ID="job_id",
+            **vars(OUTPUT_NAMES))),
         upload_metadata_csv_to_omero=Mock(return_value="metadata linked"),
     )
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"),
@@ -130,7 +133,8 @@ def test_regular_file_attachment_uses_a_permanent_source_path(
     assert ann.getFile().saved_name == (
         "cells.wf-123.ome.tif" if workflow_id else path.name)
     images[0].linkAnnotation.assert_called_once_with(ann)
-    client.setOutput.assert_called_once_with("File_Annotation", ann._obj)
+    client.setOutput.assert_called_once_with(
+        OUTPUT_NAMES.FILE_ANNOTATION_OUTPUT, ann._obj)
     if workflow_id:
         assert f"Workflow {workflow_id}" in kwargs["description"]
 

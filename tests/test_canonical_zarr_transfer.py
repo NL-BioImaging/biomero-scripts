@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from script_output_names import OUTPUT_NAMES
 from sidecar_feature import sidecars_live_in_biomero_folders
 from biomero_shallower.ngff import read_attrs as read_ngff_attrs
 
@@ -124,7 +125,8 @@ def _load_canonical_functions():
         "SHALLOW_ZARR_ENABLED": False,
         "SHALLOW_ZARR_SUPPORT_AVAILABLE": True,
         "constants": SimpleNamespace(
-            transfer=SimpleNamespace(FORMAT_OMEZARR="OME-ZARR")
+            transfer=SimpleNamespace(FORMAT_OMEZARR="OME-ZARR"),
+            results=OUTPUT_NAMES,
         ),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SCRIPT_PATH),
@@ -1358,9 +1360,6 @@ def test_snapshot_hashes_labels_already_in_canonical_zarr(
 def test_image_transfer_publishes_canonical_inputs_output():
     script = SCRIPT_PATH.read_text(encoding="utf-8")
 
-    # Defined locally, or taken from core's constants.results.
-    assert ('CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"' in script
-            or "constants.results.CANONICAL_INPUTS_OUTPUT," in script)
     assert "client.setOutput(" in script
     assert "CANONICAL_INPUTS_OUTPUT," in script
 

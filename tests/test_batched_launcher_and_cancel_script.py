@@ -138,11 +138,13 @@ def test_batched_launcher_params_include_every_key_the_processor_reads():
 
 # ----------------------------- cancel script ----------------------------- #
 
-def cancel_runscript(inputs, user_id, is_admin, outputs=None):
+def cancel_runscript(inputs, user_id, is_admin, outputs=None, declared=None):
+    # The skip below and the old-form names are removed when the cancel script
+    # is on master (NL-BioImaging/biomero-scripts#109).
     if not CANCEL.exists():
         pytest.skip('Source has no cancel script')
     nodes = source_nodes(CANCEL, {
-        'request_cancel', 'runScript', '_WORKFLOW_ID', '_REASON',
+        'request_cancel', 'runScript', '_WORKFLOW_ID', '_REASON',  # old form, #109
         '_DEFAULT_REASON', '_MAX_REASON_LENGTH', 'VERSION'})
     # The script file exists, so runScript is part of its contract.
     assert any(isinstance(n, ast.FunctionDef) and n.name == 'runScript'
@@ -160,7 +162,9 @@ def cancel_runscript(inputs, user_id, is_admin, outputs=None):
         logger=logging.getLogger('cancel-script'),
         UUID=UUID, rstring=lambda value: value,
         omscripts=SimpleNamespace(client=lambda *a, **k: client,
-                                  String=lambda *a, **k: None),
+                                  String=lambda name, *a, **k: (
+                                      declared.append(name)
+                                      if declared is not None else None)),
         omero=SimpleNamespace(constants=SimpleNamespace(
             namespaces=SimpleNamespace(NSDYNAMIC='dynamic'))),
         BlitzGateway=lambda client_obj: connection,
@@ -225,3 +229,14 @@ def test_cancel_script_runscript_uses_the_default_reason():
     cancel_runscript({'Workflow_ID': str(workflow_id)}, 7, False)
     assert WorkflowTracker().repository.get(
         workflow_id).cancel_reason == 'Cancelled by user'
+
+
+def test_cancel_script_declares_exactly_the_core_parameter_names():
+    declared = []
+    inputs = {constants.cancel_workflow.WORKFLOW_ID: 'not-a-uuid'}
+
+    with pytest.raises(ValueError):
+        cancel_runscript(inputs, 1, True, declared=declared)
+
+    assert declared == [constants.cancel_workflow.WORKFLOW_ID,
+                        constants.cancel_workflow.REASON]

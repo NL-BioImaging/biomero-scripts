@@ -29,7 +29,7 @@ older or unrelated source revisions. This keeps the harness forward-compatible
 without weakening coverage on the feature branch that introduces the behavior.
 
 Schema-2 storage-provenance regression tests use the published
-`biomero-schema>=0.3.0b1,<0.4` contract. They activate when the source uses
+`biomero-schema` contract. They activate when the source uses
 `ShallowManifest.from_dict`; set `BIOMERO_TEST_SCHEMA2_STORAGE=1` to force their
 red run against the older source. These replace the old shallow-provenance
 fixtures, which did not represent a valid manifest.

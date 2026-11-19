@@ -20,6 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from biomero_schema.zarr import TRANSFER_INPUT_MARKER
+from biomero.constants import results as core_results
+from script_output_names import OUTPUT_NAMES
 
 SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
@@ -48,11 +50,28 @@ class Node(str):
         return Node(f"{self}.{name}")
 
 
+class FakeResults:
+    """``constants.results``: core's real shared output names, and unique
+    values for every other constant."""
+
+    def __getattr__(self, name):
+        # A name core does not define (a typo in a script) must fail, as it
+        # would against the real constants.
+        if name.startswith("_") or not hasattr(core_results, name):
+            raise AttributeError(f"core's constants.results has no {name!r}")
+        if hasattr(OUTPUT_NAMES, name):
+            return getattr(OUTPUT_NAMES, name)
+        return Node(f"results.{name}")
+
+
 class FakeConstants:
     """Stand-in for ``biomero.constants`` with unique string values."""
 
     file_output_targets = SimpleNamespace(
         USER_VALUES=("input",), INPUT_CONTAINER="input")
+
+    # The shared output names are core's real ones, as the scripts use them.
+    results = FakeResults()
 
     def __getattr__(self, name):
         return Node(name)
@@ -513,7 +532,7 @@ def test_marker_is_gone_after_import_on_every_path(
         seen["marker_present_at_import"] = (store / MARKER).is_file()
         if importer_removes_today and PATHS[path]["importer_removes"]:
             importer_removes_marker(store)
-        return ({"Message": "imported",
+        return ({OUTPUT_NAMES.MESSAGE_OUTPUT: "imported",
                  RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(3))
 
     fake_script_environment(fake_import)()
@@ -528,7 +547,7 @@ def test_marker_stays_when_the_import_fails(results_root):
     store = make_store(results_root)
 
     def failing_import(client, svc, script_id, inputs, **kwargs):
-        return ({"Message": "FAILED: importer down",
+        return ({OUTPUT_NAMES.MESSAGE_OUTPUT: "FAILED: importer down",
                  RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(6))
 
     with pytest.raises(RuntimeError):
@@ -541,7 +560,7 @@ def test_a_failing_cleanup_does_not_fail_the_import(results_root, caplog):
     store = make_store(results_root)
 
     def fake_import(client, svc, script_id, inputs, **kwargs):
-        return ({"Message": "imported",
+        return ({OUTPUT_NAMES.MESSAGE_OUTPUT: "imported",
                  RESULTS_PATH_OUTPUT: RString(str(results_root))}, job_with_status(3))
 
     def broken_cleanup(import_outputs, workflow_id):
@@ -550,7 +569,7 @@ def test_a_failing_cleanup_does_not_fail_the_import(results_root, caplog):
     with caplog.at_level(logging.WARNING, logger="marker-test"):
         rv = fake_script_environment(fake_import, cleanup=broken_cleanup)()
 
-    assert rv["Message"] == "imported"
+    assert rv[OUTPUT_NAMES.MESSAGE_OUTPUT] == "imported"
     assert (store / MARKER).is_file()
     record = next(r for r in caplog.records
                   if "cleanup failed" in r.getMessage())

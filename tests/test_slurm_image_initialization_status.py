@@ -5,6 +5,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 import pytest
+
+import biomero.constants as biomero_constants
 from pathlib import Path
 
 
@@ -130,7 +132,7 @@ def test_initializer_adds_configured_remote_shallower_to_image_array():
 
 
 @pytest.mark.skipif(
-    'os.getenv("BIOMERO_SHALLOW_ZARR", "false")' not in
+    "BIOMERO_SHALLOW_ZARR" not in
     INIT_SCRIPT.read_text(encoding="utf-8"),
     reason="initializer feature gates are not present on this source revision",
 )
@@ -177,7 +179,8 @@ def test_initializer_only_acquires_enabled_remote_shallower(
     converter_spec = {"kind": "converter", "destination": "converter.sif"}
     specs = [converter_spec]
     namespace = {"os": os, "slurmClient": client, "converter_specs": specs,
-                 "logger": logging.getLogger(__name__)}
+                 "logger": logging.getLogger(__name__),
+                 "constants": biomero_constants}
 
     with patch.dict(sys.modules, {"biomero.remote_shallower": helper}):
         exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],
@@ -227,7 +230,8 @@ def test_initializer_logs_unstaged_shallower_by_reason(
         remote_shallow_zarr=True, remote_shallower_image=image)
     specs = []
     namespace = {"os": os, "slurmClient": client, "converter_specs": specs,
-                 "logger": logging.getLogger(__name__)}
+                 "logger": logging.getLogger(__name__),
+                 "constants": biomero_constants}
     with patch.dict(sys.modules, {"biomero.remote_shallower": ModuleType(
             "biomero.remote_shallower")}), caplog.at_level(logging.DEBUG):
         exec(compile(ast.Module(body=_flag_assignments(tree) + [branch],

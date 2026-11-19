@@ -7,6 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 ROOT = Path(os.environ.get('BIOMERO_SCRIPTS_ROOT', Path(__file__).parents[1]))
 SOURCE = ROOT / '_data' / 'SLURM_Import_Results.py'
 pytestmark = pytest.mark.skipif('def collect_import_storage_provenance' not in SOURCE.read_text(encoding='utf-8'),
@@ -19,7 +21,8 @@ def load():
              and 'storage_provenance' in n.name}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     namespace = dict(os=os, json=json, Path=Path, uuid=__import__('uuid'),
-                     logger=Mock(), IMPORTER_CONFIG={})
+                     logger=Mock(), IMPORTER_CONFIG={},
+                     constants=biomero_constants)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), namespace)
     return namespace
 

@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from script_output_names import OUTPUT_NAMES
+
 from biomero_schema.zarr import (
     CanonicalInput,
     CanonicalZarrSource,
@@ -19,7 +21,7 @@ SOURCE_ROOT = Path(os.environ.get(
     "BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]
 ))
 SCRIPT_PATH = SOURCE_ROOT / "__workflows" / "SLURM_Run_Workflow.py"
-CANONICAL_INPUTS_OUTPUT = "Canonical_Inputs"
+CANONICAL_INPUTS_OUTPUT = OUTPUT_NAMES.CANONICAL_INPUTS_OUTPUT
 
 
 def _load_snapshot_functions():
