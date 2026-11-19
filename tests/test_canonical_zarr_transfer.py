@@ -15,6 +15,7 @@ from sidecar_feature import sidecars_live_in_biomero_folders
 from biomero_shallower.ngff import read_attrs as read_ngff_attrs
 
 from biomero_schema.zarr import (
+    CANONICAL_MARKER_NAME,
     CANONICAL_PLATE_IMAGE_NAMESPACE,
     CANONICAL_PLATE_LABEL_NAMESPACE,
     CANONICAL_PLATE_SOURCE_NAMESPACE,
@@ -86,6 +87,7 @@ def _load_canonical_functions():
             "verify_exported_plate_source", "canonical_interchange_profile"}
     ]
     namespace = {
+        "CANONICAL_MARKER_NAME": CANONICAL_MARKER_NAME,
         "CANONICAL_PLATE_IMAGE_NAMESPACE": CANONICAL_PLATE_IMAGE_NAMESPACE,
         "CANONICAL_PLATE_LABEL_NAMESPACE": CANONICAL_PLATE_LABEL_NAMESPACE,
         "CANONICAL_PLATE_SOURCE_NAMESPACE": CANONICAL_PLATE_SOURCE_NAMESPACE,
