@@ -254,3 +254,81 @@ def test_the_cancel_script_is_named_by_core_and_uses_its_parameter_names():
     assert "constants.cancel_workflow.REASON" in source
     assert not [name for name in ("Workflow_ID", "Reason")
                 if f'"{name}"' in source]
+
+
+@requires_core_constants
+@pytest.mark.parametrize("script, constant, value", [
+    ("__workflows/SLURM_Run_Workflow.py", "JOB_LOG_OUTPUT", "Job_Log"),
+    ("_data/SLURM_Remote_Conversion.py", "CONVERSION_LOG_OUTPUT",
+     "Conversion_Log"),
+])
+def test_script_local_outputs_keep_their_wire_values(script, constant, value):
+    from script_output_names import module_constant
+    assert module_constant(SOURCE_ROOT / script, constant) == value
+
+
+# Names the scripts share with core, other than the output names above: a
+# literal equal to one of them (in any quote style) is a name core owns.
+SHARED_NAMES = {
+    "Workflow_ID": "metadata_keys.WORKFLOW_ID",
+    "Job_ID": "metadata_keys.JOB_ID",
+    "Batch_Supervisor_Workflow_ID": "metadata_keys.BATCH_SUPERVISOR_WORKFLOW_ID",
+    "Task_ID": "results.TASK_ID",
+    "Cleanup?": "CLEANUP",
+    "ROI_Name_Prefix": "results.ROI_NAME_PREFIX",
+    "ROI_Color": "results.ROI_COLOR",
+    "IMPORTING": "workflow_status.IMPORTING",
+    "IMPORTED": "workflow_status.IMPORTED",
+    "legacy_input_container": "file_output_targets.LEGACY",
+    "auto": "file_output_targets.AUTO",
+    "result_destination": "file_output_targets.RESULT_DESTINATION",
+    "input_parent": "file_output_targets.INPUT_PARENT",
+    "BIOMERO_SHALLOW_ZARR": "slurm_env.BIOMERO_SHALLOW_ZARR",
+    "SLURM_Import_Results.py": "IMPORT_RESULTS_SCRIPT",
+}
+
+
+def shared_name_literals(source):
+    """Yield (line, literal) of every string equal to a shared core name.
+
+    Docstrings are text, not names; any other string constant counts, in
+    single or double quotes.
+    """
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and node.value in SHARED_NAMES
+                and not isinstance(parents[node], ast.Expr)):
+            yield node.lineno, node.value
+
+
+def test_the_shared_name_detector_sees_both_quote_styles():
+    source = ("a = {'Workflow_ID': 1, \"Job_ID\": 2}\n"
+              "x.get('Cleanup?')\n"
+              "if mode == \"auto\": pass\n"
+              "\"\"\"Docs mention Workflow_ID.\"\"\"\n"
+              "constants.metadata_keys.WORKFLOW_ID\n")
+    assert [name for _, name in shared_name_literals(source)] == [
+        "Workflow_ID", "Job_ID", "Cleanup?", "auto"]
+
+
+@requires_core_constants
+@pytest.mark.parametrize("path", SCRIPTS, ids=relative)
+def test_shared_names_come_from_core_constants(path):
+    offenders = [f"{path.name}:{line} uses {name!r}; use "
+                 f"constants.{SHARED_NAMES[name]}"
+                 for line, name in shared_name_literals(
+                     path.read_text(encoding="utf-8"))]
+    assert not offenders, "\n".join(offenders)
+
+
+@requires_core_constants
+def test_the_shared_names_equal_what_core_defines():
+    from biomero import constants
+    for name, dotted in SHARED_NAMES.items():
+        value = constants
+        for part in dotted.split("."):
+            value = getattr(value, part)
+        assert value == name, dotted

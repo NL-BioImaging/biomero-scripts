@@ -14,6 +14,8 @@ from unittest.mock import Mock
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 
 ROOT = Path(os.environ.get("BIOMERO_SCRIPTS_ROOT", Path(__file__).parents[1]))
 try:
@@ -38,7 +40,8 @@ def load(route):
              "add_metadata_to_imported_plates", "upload_contents_to_omero"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
              and (n.name in names or "provenance" in n.name)]
-    ns = dict(os=os, re=re, csv=csv, glob=glob, json=json,
+    ns = dict(constants=biomero_constants, os=os, re=re, csv=csv,
+              glob=glob, json=json,
               SUPPORTED_IMAGE_EXTENSIONS=(".tif",), logger=logging.getLogger("test"),
               ezomero=SimpleNamespace(post_map_annotation=Mock(return_value=19)),
               NSCREATED="test", Any=object, BlitzGateway=object, SlurmClient=object,

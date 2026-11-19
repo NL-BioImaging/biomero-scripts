@@ -3,6 +3,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import biomero.constants as biomero_constants
+
 import ast
 import json
 import logging
@@ -44,7 +46,7 @@ class AggregateNotFoundError(Exception):
 
 
 adapter = ModuleType("metadata_refresh_test_adapter")
-adapter.__dict__.update(json=json, Path=Path, MetadataAnnotation=MetadataAnnotation,
+adapter.__dict__.update(constants=biomero_constants, json=json, Path=Path, MetadataAnnotation=MetadataAnnotation,
                         UUID=UUID, uuid4=uuid4, logger=logging.getLogger(__name__),
                         ThreadPoolExecutor=ThreadPoolExecutor, contextmanager=contextmanager,
                         Queue=Queue, Empty=Empty, partial=partial,

@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from script_output_names import OUTPUT_NAMES
+from script_output_names import OUTPUT_NAMES, module_constant
 
 
 SOURCE_ROOT = Path(os.environ.get(
@@ -27,7 +27,8 @@ def load_log_upload_function():
             warning=lambda *_args, **_kwargs: None,
         ),
         "constants": SimpleNamespace(results=OUTPUT_NAMES),
-        "JOB_LOG_OUTPUT": "Job_Log",
+        # The runner's own constant, read from the script.
+        "JOB_LOG_OUTPUT": module_constant(SCRIPT_PATH, "JOB_LOG_OUTPUT"),
         "robject": lambda value: value,
         "unwrap": lambda value: getattr(value, "val", value),
         "wrap": lambda value: value,
