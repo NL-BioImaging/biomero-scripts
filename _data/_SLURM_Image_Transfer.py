@@ -64,6 +64,7 @@ except ImportError:
     import Image
 from biomero import SlurmClient, constants
 from biomero_schema.zarr import (
+    CANONICAL_MARKER_NAME,
     CANONICAL_PLATE_IMAGE_NAMESPACE,
     CANONICAL_PLATE_LABEL_NAMESPACE,
     CANONICAL_PLATE_SOURCE_NAMESPACE,
@@ -1455,7 +1456,7 @@ def promote_exported_image_zarr(
         shutil.copytree(
             result.path,
             export_path,
-            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+            ignore=shutil.ignore_patterns(CANONICAL_MARKER_NAME),
         )
     log(
         " Verified canonical Image %s generation %s at %s"
@@ -1822,7 +1823,7 @@ def promote_exported_plate_zarr(
         shutil.copytree(
             committed,
             export_path,
-            ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+            ignore=shutil.ignore_patterns(CANONICAL_MARKER_NAME),
         )
     logger.info(
         "Promoted canonical Plate %s generation %s to %s with %s image "
@@ -2055,7 +2056,7 @@ def compress(
                     keepalive=keepalive,
                     keepalive_interval=keepalive_interval,
                     last_keepalive=last_keepalive,
-                    excluded_names=(".biomero-canonical.json",),
+                    excluded_names=(CANONICAL_MARKER_NAME,),
                 )
             for entry in base_path.iterdir():
                 if entry.name in direct_names:
@@ -2568,7 +2569,7 @@ def save_as_zarr(
                 source_path,
                 img_name,
                 dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(".biomero-canonical.json"),
+                ignore=shutil.ignore_patterns(CANONICAL_MARKER_NAME),
             )
     else:
         if canonical_source is None:

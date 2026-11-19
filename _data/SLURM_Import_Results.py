@@ -110,6 +110,13 @@ import ezomero
 from biomero import SlurmClient, constants
 from biomero.metadata_views import (
     format_large_field_reference, render_workflow_metadata)
+from biomero_schema.imports import (
+    IMPORT_STORAGE_FILENAME,
+    IMPORT_STORAGE_FULL,
+    IMPORT_STORAGE_SCHEMA,
+    IMPORT_STORAGE_SHALLOW,
+    parse_import_storage_record,
+)
 try:
     from omero_upload import upload_ln_s
     INPLACE_ATTACHMENTS_AVAILABLE = True
@@ -3731,14 +3738,20 @@ def collect_import_storage_provenance(conn, object_type, object_id, wf_id):
     shallow = manifest.is_file()
     if reference and not shallow:
         raise ValueError('Shallow reference has no readable manifest')
-    evidence = {'schema': 1, 'storage': 'shallow-zarr' if shallow else 'full-zarr'}
-    outcome = root / '.biomero-import-storage.json'
+    evidence = {'schema': IMPORT_STORAGE_SCHEMA,
+                'storage': IMPORT_STORAGE_SHALLOW if shallow else IMPORT_STORAGE_FULL}
+    outcome = root / IMPORT_STORAGE_FILENAME
     if outcome.is_file():
-        recorded = json.loads(outcome.read_text(encoding='utf-8'))
-        if (recorded.get('schema') != 1 or recorded.get('workflow_id') != str(wf_id)
-                or recorded.get('storage') != evidence['storage']):
+        recorded = parse_import_storage_record(
+            json.loads(outcome.read_text(encoding='utf-8')))
+        if (str(recorded.workflow_id) != str(wf_id)
+                or recorded.storage != evidence['storage']):
             raise ValueError('Storage outcome does not match imported result')
-        evidence.update(recorded)
+        # exclude_unset keeps the evidence to the keys the file holds, so a
+        # record from an earlier beta (no decision_basis) yields the same
+        # evidence as before.
+        evidence.update(
+            recorded.model_dump(by_alias=True, mode='json', exclude_unset=True))
     elif shallow:
         evidence['location'] = 'unknown'
     if shallow:
