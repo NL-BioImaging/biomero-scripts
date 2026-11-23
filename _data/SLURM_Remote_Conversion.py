@@ -56,7 +56,7 @@ CONV_OPTIONS_TARGET = ['tiff', 'zarr']
 CONVERSION_LOG_OUTPUT = "Conversion_Log"
 
 # Version constant for easy version management
-VERSION = "2.9.0b31"
+VERSION = "2.9.0b32"
 
 
 def resolve_log_fallback_target(client, conn):
