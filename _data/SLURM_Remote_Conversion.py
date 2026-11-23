@@ -369,7 +369,7 @@ def runScript() -> None:
 
                 # Only fail workflow if running standalone
                 if not is_subtask:
-                    slurmClient.workflowTracker.fail_workflow(wf_id, repr(e))
+                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e) or repr(e))
 
                 # Always set output message with error for parent detection
                 client.setOutput(constants.results.MESSAGE_OUTPUT,

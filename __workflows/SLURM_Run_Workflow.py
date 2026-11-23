@@ -1313,7 +1313,7 @@ def runScript() -> None:
                 logger.debug(
                     f"Workflow failed {wf_id} {slurmClient.workflowTracker.repository.get(wf_id)}")
                 try:
-                    slurmClient.workflowTracker.fail_workflow(wf_id, repr(e))
+                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e) or repr(e))
                 except Exception as db_e:
                     logger.error(
                         f"Database error marking workflow {wf_id} as failed: {db_e}")
@@ -2676,7 +2676,7 @@ def convertDataOnSLURM(client: omscripts.client,
         raise  # not a failure of this task: the run decides what to do
     except Exception as script_e:
         # Script execution failed entirely
-        error_msg = f"Conversion script execution failed: {script_e!r}"
+        error_msg = f"Conversion script execution failed: {str(script_e) or repr(script_e)}"
         try:
             slurmClient.workflowTracker.fail_task(task_id, error_msg)
         except Exception as db_e:
@@ -2854,7 +2854,7 @@ def exportImageToSLURM(client: omscripts.client,
     except WorkflowInterrupted:
         raise  # not a failure of this task: the run decides what to do
     except Exception as export_error:
-        error_msg = f"Export script execution failed: {export_error!r}"
+        error_msg = f"Export script execution failed: {str(export_error) or repr(export_error)}"
         try:
             slurmClient.workflowTracker.fail_task(task_id, error_msg)
         except Exception as db_e:

@@ -5964,7 +5964,7 @@ def runScript() -> None:
                     slurmClient.workflowTracker.update_task_status(
                         task_id, constants.workflow_status.FAILED)
                     slurmClient.workflowTracker.fail_task(
-                        task_id, f"Import failed: {e!r}")
+                        task_id, f"Import failed: {str(e) or repr(e)}")
                     logger.info(f"Updated task {task_id} status to FAILED")
                 except Exception as db_e:
                     logger.warning(
