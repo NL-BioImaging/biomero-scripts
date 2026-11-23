@@ -65,7 +65,8 @@ if not hasattr(eventsourcing.WorkflowTracker, 'add_launcher_task'):
     core_unavailable('Installed biomero lacks the detached mechanisms')
 
 from biomero.database import EngineManager  # noqa: E402
-from biomero.slurm_client import SlurmClient, SlurmJob  # noqa: E402
+from biomero.slurm_client import (  # noqa: E402
+    REQUEUEABLE_JOB_STATES, SlurmClient, SlurmJob)
 
 WORKFLOW = 'analysis'
 
@@ -102,6 +103,7 @@ def runner_namespace(**overrides):
     namespace = dict(
         logger=logging.getLogger('runner'), unwrap=lambda value: value,
         SlurmClient=SlurmClient, SlurmJob=SlurmJob, UUID=UUID,
+        REQUEUEABLE_JOB_STATES=REQUEUEABLE_JOB_STATES,
         Optional=Optional, Enum=Enum, dataclass=dataclass,
         WorkflowCancelled=eventsourcing.WorkflowCancelled,
         is_launcher_task=eventsourcing.is_launcher_task,
