@@ -225,7 +225,7 @@ def runScript() -> None:
                     slurmClient.workflowTracker.update_task_progress(
                         task_id, progress)
                 except Exception as e:
-                    print_result += f" ERROR WITH JOB: {e}"
+                    print_result += f" ERROR WITH JOB: {e!r}"
                     logger.warning(print_result)
                     slurmClient.workflowTracker.fail_workflow(
                         wf_id, "Error checking job status")

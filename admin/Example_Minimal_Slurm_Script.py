@@ -154,8 +154,8 @@ def runScript():
                     logger.info(f"Ran slurm: {results}")
                     print_result.append(str(results))
             except Exception as e:
-                logger.error(f"Command error: {e}")
-                print_result.append(f"Error: {e}")
+                logger.exception(f"Command error: {e!r}")
+                print_result.append(f"Error: {e!r}")
 
             client.setOutput(constants.results.MESSAGE_OUTPUT, rstring("\n".join(print_result)))
 

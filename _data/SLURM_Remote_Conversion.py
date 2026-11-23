@@ -361,14 +361,15 @@ def runScript() -> None:
                                 slurmClient.workflowTracker.complete_workflow(
                                     wf_id)
             except Exception as e:
-                error_msg = f" ERROR WITH CONVERTING DATA: {e}"
+                # repr(e) names the type for exceptions without a message
+                error_msg = f" ERROR WITH CONVERTING DATA: {e!r}"
                 message += error_msg
-                logger.error(
-                    f"Conversion script exception: {e} | Full error: {message}")
+                logger.exception(
+                    f"Conversion script exception: {e!r} | Full error: {message}")
 
                 # Only fail workflow if running standalone
                 if not is_subtask:
-                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+                    slurmClient.workflowTracker.fail_workflow(wf_id, repr(e))
 
                 # Always set output message with error for parent detection
                 client.setOutput(constants.results.MESSAGE_OUTPUT,

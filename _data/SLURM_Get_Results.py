@@ -2631,8 +2631,8 @@ def runScript() -> None:
             client.setOutput(constants.results.MESSAGE_OUTPUT,
                              rstring(str(message)))
         except Exception as e:
-            logger.error(f"Script execution failed: {e}", exc_info=True)
-            message += f"\nScript execution failed: {e}"
+            logger.error(f"Script execution failed: {e!r}", exc_info=True)
+            message += f"\nScript execution failed: {e!r}"
 
             # Set failure output and re-raise to show red X in OMERO
             try:

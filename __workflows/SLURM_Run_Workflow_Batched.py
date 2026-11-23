@@ -755,7 +755,8 @@ def runScript() -> None:
                     timesleep.sleep(10)
             except Exception as e:
                 logger.error(
-                    f"Exception in batch monitoring loop for batch {current_batch_being_processed}: {e}")
+                    f"Exception in batch monitoring loop for batch {current_batch_being_processed}: {e!r}",
+                    exc_info=True)
                 # Mark the workflow as failed due to monitoring exception
                 wf_failed = True
                 # Re-raise the exception to ensure it's not silently ignored
