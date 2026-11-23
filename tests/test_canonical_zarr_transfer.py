@@ -70,6 +70,7 @@ def _load_canonical_functions():
         "_canonical_registration_annotations",
         "_canonical_content_signature",
         "_update_canonical_annotation",
+        "restore_export_from_canonical",
         "promote_exported_image_zarr",
         "index_existing_image_zarr",
         "index_existing_plate_zarr",
@@ -1112,6 +1113,85 @@ def test_promotes_verified_image_and_restores_task_copy(
     assert "ISCC=ISCC:KPIXEL" in caplog.text
     assert "Calculating ISCC-BIO pixel identity from exported Zarr" in caplog.text
     assert "ISCC-BIO verification matched" in caplog.text
+
+
+def test_failed_registration_keeps_exported_image_for_transfer(
+    tmp_path, pixel_identity
+):
+    ns = _load_canonical_functions()
+    root = tmp_path / "managed"
+    export = tmp_path / "task" / "image.zarr"
+    export.mkdir(parents=True)
+    (export / ".zgroup").write_text("{}", encoding="utf-8")
+    canonical_path = root / ".processed/Image-7.ome.zarr"
+
+    class Provider:
+        def generate(self, path, **guard):
+            return pixel_identity
+
+        def generate_omero(self, conn, **guard):
+            return pixel_identity
+
+    class Promotion:
+        def promote(self, staging, **kwargs):
+            canonical_path.parent.mkdir(parents=True)
+            shutil.move(staging, canonical_path)
+            return SimpleNamespace(
+                source=source(pixel_identity), path=canonical_path)
+
+    def failing_writer(**kwargs):
+        raise RuntimeError("OMERO write failed")
+
+    with pytest.raises(RuntimeError, match="OMERO write failed"):
+        ns["promote_exported_image_zarr"](
+            "connection",
+            Object(7, []),
+            export,
+            {"group-3-data": root},
+            identity_provider=Provider(),
+            semantic_guard_reader=lambda path, node: SimpleNamespace(
+                zarr_format=2, ngff_version="0.4",
+                shape=(1, 1, 1, 16, 16),
+                dtype="uint16",
+                axes=("t", "c", "z", "y", "x"),
+                coordinate_transformations=(),
+            ),
+            promotion_service_factory=lambda **kwargs: Promotion(),
+            annotation_writer=failing_writer,
+        )
+
+    assert canonical_path.is_dir()
+    assert (export / ".zgroup").is_file()
+
+
+def test_restore_export_skips_existing_export(tmp_path):
+    ns = _load_canonical_functions()
+    canonical = tmp_path / "canonical.zarr"
+    canonical.mkdir()
+    (canonical / "new").write_text("canonical", encoding="utf-8")
+    export = tmp_path / "export.zarr"
+    export.mkdir()
+    (export / "old").write_text("export", encoding="utf-8")
+
+    ns["restore_export_from_canonical"](canonical, export)
+
+    assert (export / "old").is_file()
+    assert not (export / "new").exists()
+
+
+def test_plate_promotion_restores_export_before_registration():
+    script = SCRIPT_PATH.read_text(encoding="utf-8")
+    plate = script.split("def promote_exported_plate_zarr(")[1].split(
+        "\ndef ")[0]
+    assert plate.index("restore_export_from_canonical(") < plate.index(
+        "attach_canonical_plate_source(")
+
+
+def test_lost_export_after_failed_promotion_fails_clearly():
+    script = SCRIPT_PATH.read_text(encoding="utf-8")
+    handler = script.split("Canonical Zarr promotion failed for")[1]
+    assert "if not os.path.exists(img_name):" in handler
+    assert "during canonical Zarr promotion" in handler
 
 
 @pytest.mark.parametrize("version,ngff", [(2, "0.4"), (3, "0.5")])
