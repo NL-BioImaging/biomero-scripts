@@ -224,7 +224,8 @@ def check_job(slurmClient, message, slurm_job_id):
         else:
             message += f"\n{job_status_dict}"
     except Exception as e:
-        message += f" Show job failed: {e}"
+        logger.warning(f"Show job failed: {e!r}", exc_info=True)
+        message += f" Show job failed: {e!r}"
     return message
 
 

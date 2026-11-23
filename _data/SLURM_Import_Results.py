@@ -5923,8 +5923,8 @@ def runScript() -> None:
 
         except BaseException as e:
             script_failed = True
-            logger.error(f"Script execution failed: {e}", exc_info=True)
-            message += f"\nScript execution failed: {e}"
+            logger.error(f"Script execution failed: {e!r}", exc_info=True)
+            message += f"\nScript execution failed: {e!r}"
 
             # Best-effort log upload: if the import failed AFTER the job log was
             # copied from SLURM but BEFORE the happy-path upload ran (e.g. the
@@ -5964,7 +5964,7 @@ def runScript() -> None:
                     slurmClient.workflowTracker.update_task_status(
                         task_id, constants.workflow_status.FAILED)
                     slurmClient.workflowTracker.fail_task(
-                        task_id, f"Import failed: {str(e)}")
+                        task_id, f"Import failed: {str(e) or repr(e)}")
                     logger.info(f"Updated task {task_id} status to FAILED")
                 except Exception as db_e:
                     logger.warning(

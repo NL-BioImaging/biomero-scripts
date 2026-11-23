@@ -1313,12 +1313,12 @@ def runScript() -> None:
                 logger.debug(
                     f"Workflow failed {wf_id} {slurmClient.workflowTracker.repository.get(wf_id)}")
                 try:
-                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e))
+                    slurmClient.workflowTracker.fail_workflow(wf_id, str(e) or repr(e))
                 except Exception as db_e:
                     logger.error(
                         f"Database error marking workflow {wf_id} as failed: {db_e}")
             client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(
-                f"{UI_messages} ERROR: {str(e)}"))
+                f"{UI_messages} ERROR: {e!r}"))
             raise  # Re-raise the exception after handling
 
         finally:
@@ -2470,8 +2470,8 @@ def run_workflow(slurmClient: SlurmClient,
                         f"Database error updating task {task_id} status: {db_e}")
                     raise
     except Exception as e:
-        error_msg = f"Failed to submit workflow {name}: {e}"
-        logger.error(error_msg)
+        error_msg = f"Failed to submit workflow {name}: {e!r}"
+        logger.error(error_msg, exc_info=True)
         UI_messages += f" ERROR: {error_msg}"
         raise SSHException(UI_messages)
     return UI_messages, slurm_job_id, wf_id, task_id
@@ -2676,7 +2676,7 @@ def convertDataOnSLURM(client: omscripts.client,
         raise  # not a failure of this task: the run decides what to do
     except Exception as script_e:
         # Script execution failed entirely
-        error_msg = f"Conversion script execution failed: {script_e}"
+        error_msg = f"Conversion script execution failed: {str(script_e) or repr(script_e)}"
         try:
             slurmClient.workflowTracker.fail_task(task_id, error_msg)
         except Exception as db_e:
@@ -2854,7 +2854,7 @@ def exportImageToSLURM(client: omscripts.client,
     except WorkflowInterrupted:
         raise  # not a failure of this task: the run decides what to do
     except Exception as export_error:
-        error_msg = f"Export script execution failed: {export_error}"
+        error_msg = f"Export script execution failed: {str(export_error) or repr(export_error)}"
         try:
             slurmClient.workflowTracker.fail_task(task_id, error_msg)
         except Exception as db_e:

@@ -101,8 +101,8 @@ def runScript():
 
     except Exception as e:
         # If something goes wrong, log the error and return a message to OMERO
-        logger.error(f"Error occurred: {str(e)}")
-        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"Error: {str(e)}"))
+        logger.exception(f"Error occurred: {e!r}")
+        client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(f"Error: {e!r}"))
 
     finally:
         client.closeSession()

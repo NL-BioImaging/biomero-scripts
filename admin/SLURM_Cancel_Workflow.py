@@ -128,9 +128,9 @@ def runScript() -> None:
                 conn.getUser().isAdmin(), reason)
         client.setOutput(constants.results.MESSAGE_OUTPUT, rstring(message))
     except Exception as e:
-        logger.error(f"Could not cancel the workflow: {e}", exc_info=True)
+        logger.error(f"Could not cancel the workflow: {e!r}", exc_info=True)
         client.setOutput(constants.results.MESSAGE_OUTPUT,
-                         rstring(f"Error: {e}"))
+                         rstring(f"Error: {e!r}"))
         # Show the red X in OMERO, as the other scripts do on failure.
         raise
     finally:

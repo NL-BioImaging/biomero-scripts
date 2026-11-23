@@ -298,7 +298,7 @@ Connection ready? {slurmClient.validate()}""",
         except Exception as exc:
             logger.exception("File transfer failed")
             client.setOutput(constants.results.MESSAGE_OUTPUT,
-                             rstring(f"ERROR: {exc}"))
+                             rstring(f"ERROR: {exc!r}"))
             raise
 
         finally:
