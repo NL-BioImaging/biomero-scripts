@@ -51,7 +51,7 @@ from functools import partial
 from queue import Queue, Empty
 
 logger = logging.getLogger(__name__)
-VERSION = "2.9.0b31"
+VERSION = "2.9.0b32"
 
 
 def format_metadata_summary(report):
