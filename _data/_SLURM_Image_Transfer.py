@@ -1342,6 +1342,32 @@ def validate_omero_image_semantics(image, guard):
         )
 
 
+def restore_export_from_canonical(canonical_path, export_path):
+    """Copy the committed canonical Zarr back to the transfer folder.
+
+    Committing a promotion moves the export into the canonical location, so
+    the transfer folder only holds the export again after this restore.
+
+    Args:
+        canonical_path (Path): Committed canonical Zarr directory.
+        export_path (Path): Transfer location the export was moved from.
+    """
+    export_path = Path(export_path)
+    if export_path.exists():
+        logger.debug(
+            "Export %s still present after promotion; not restoring",
+            export_path)
+        return
+    logger.info(
+        "Restoring export %s from canonical Zarr %s",
+        export_path, canonical_path)
+    shutil.copytree(
+        canonical_path,
+        export_path,
+        ignore=shutil.ignore_patterns(CANONICAL_MARKER_NAME),
+    )
+
+
 def promote_exported_image_zarr(
     conn,
     image,
@@ -1443,6 +1469,9 @@ def promote_exported_image_zarr(
         source_generation,
         result.path,
     )
+    # The commit moved the export into the canonical location; restore the
+    # transfer copy first so a failing registration cannot lose the export.
+    restore_export_from_canonical(result.path, export_path)
     attach_canonical_source(
         conn,
         image,
@@ -1450,14 +1479,6 @@ def promote_exported_image_zarr(
         result.source,
         annotation_writer=annotation_writer,
     )
-
-    export_path = Path(export_path)
-    if not export_path.exists():
-        shutil.copytree(
-            result.path,
-            export_path,
-            ignore=shutil.ignore_patterns(CANONICAL_MARKER_NAME),
-        )
     log(
         " Verified canonical Image %s generation %s at %s"
         % (image.getId(), source_generation, result.path)
@@ -1812,19 +1833,15 @@ def promote_exported_plate_zarr(
         item.model_copy(update={"source": item.source.model_copy(update={
             "pixel_identity": None})}) for item in source.images)})
     committed = store.commit(export_path, source)
+    # The commit moved the export into the canonical location; restore the
+    # transfer copy first so a failing registration cannot lose the export.
+    restore_export_from_canonical(committed, export_path)
     attach_canonical_plate_source(
         conn,
         plate,
         source,
         annotation_writer=annotation_writer,
     )
-    export_path = Path(export_path)
-    if not export_path.exists():
-        shutil.copytree(
-            committed,
-            export_path,
-            ignore=shutil.ignore_patterns(CANONICAL_MARKER_NAME),
-        )
     logger.info(
         "Promoted canonical Plate %s generation %s to %s with %s image "
         "node(s)",
@@ -2695,6 +2712,11 @@ def save_as_zarr(
                     " Canonical caching unavailable for %s %s; using normal "
                     "export" % (data_type, object.getId())
                 )
+                if not os.path.exists(img_name):
+                    raise RuntimeError(
+                        f"Export of {data_type} {object.getId()} was lost "
+                        f"during canonical Zarr promotion: {exc}"
+                    ) from exc
     return canonical_source, os.path.basename(img_name), ()
 
 
