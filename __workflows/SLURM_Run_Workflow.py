@@ -151,7 +151,7 @@ LAUNCHER_EMAIL = "email"
 LAUNCHER_USE_ZARR_FORMAT = "use_zarr_format"
 LAUNCHER_OME_ZARR_VERSION = "ome_zarr_version"
 LAUNCHER_ROI_LABEL_PATTERN = "roi_label_pattern"
-VERSION = "2.9.0b29"
+VERSION = "2.9.0b30"
 
 
 def ensure_tracking_uuid(value):

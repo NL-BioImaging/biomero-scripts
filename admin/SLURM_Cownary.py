@@ -21,7 +21,7 @@ from omero.rtypes import rstring
 
 logger = logging.getLogger(__name__)
 
-VERSION = "2.9.0b29"
+VERSION = "2.9.0b30"
 
 _LOLCOW_IMAGE = "docker://godlovedc/lolcow"
 _COWNARY_SBATCH_COMMAND = (
