@@ -74,7 +74,7 @@ from biomero.eventsourcing import (Task, WorkflowCancelled,
                                    WorkflowInterrupted, WorkflowTracker,
                                    is_launcher_task)
 from biomero.metadata_views import WF_FILE_PARAMS_PREFIX, WF_PARAMS_PREFIX
-from biomero.slurm_client import SlurmJob
+from biomero.slurm_client import REQUEUEABLE_JOB_STATES, SlurmJob
 from dataclasses import dataclass
 from enum import Enum
 from typing import (Any, Callable, ContextManager, Dict, List, Optional,
@@ -2066,12 +2066,28 @@ def process_job_state(pipeline: PipelineRun,
             and the message for the user.
 
     Raises:
+        SSHException: When Slurm cannot tell whether a NODE_FAIL or PREEMPTED
+            job was requeued.
         Exception: Whatever the tracker raises when the task status or
             progress cannot be recorded (a database error); it propagates to
             the caller, which reports it.
         WorkflowInterrupted: When the caller's stop check stops the run.
     """
     logger.debug(f"Job {slurm_job_id} is {job_state}.")
+    ended_state = SlurmJob.state_name(job_state)
+    if ended_state in REQUEUEABLE_JOB_STATES:
+        # Slurm can requeue the job under the same ID; core owns that check.
+        with hpc_recovery_scope(pipeline.slurmClient, pipeline.conn.keepAlive):
+            requeued_state = pipeline.slurmClient.find_requeued_job_state(
+                slurm_job_id)
+        if requeued_state is None:
+            return end_failed_job(
+                pipeline, slurm_job_id, task_id, job_state, group,
+                f"Slurm job {slurm_job_id} ended in {ended_state} and was "
+                f"not requeued.")
+        logger.info(f"Slurm job {slurm_job_id} was requeued after "
+                    f"{ended_state}; still tracking (now {requeued_state}).")
+        job_state = requeued_state
     with hpc_recovery_scope(pipeline.slurmClient, pipeline.conn.keepAlive):
         progress = pipeline.slurmClient.get_active_job_progress(slurm_job_id)
     # Nothing below may be written by a run that lost its claim during the
