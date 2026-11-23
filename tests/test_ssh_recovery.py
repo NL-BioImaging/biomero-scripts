@@ -84,7 +84,8 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
             and not os.environ.get('BIOMERO_TEST_SSH_RECOVERY')):
         pytest.skip('Requires core with recovery enabled by default')
     from biomero import constants
-    from biomero.slurm_client import SlurmClient, SlurmJob
+    from biomero.slurm_client import (
+        REQUEUEABLE_JOB_STATES, SlurmClient, SlurmJob)
     from biomero import eventsourcing
     WorkflowCancelled = getattr(eventsourcing, 'WorkflowCancelled', RuntimeError)
     from dataclasses import dataclass
@@ -160,6 +161,7 @@ def test_pipeline_keeps_session_alive_during_status_and_progress_outages(monkeyp
         CONVERSION_SCRIPTS=('convert',) if owns_resume else (),
         IMPORT_SCRIPTS=(),
         SlurmClient=SlurmClient, SlurmJob=SlurmJob, UUID=UUID, Optional=Optional,
+        REQUEUEABLE_JOB_STATES=REQUEUEABLE_JOB_STATES,
         Enum=Enum, dataclass=dataclass, WorkflowCancelled=WorkflowCancelled,
         Any=Any, BlitzGateway=object, Callable=Callable, WorkflowInterrupted=getattr(
             eventsourcing, 'WorkflowInterrupted', RuntimeError),
