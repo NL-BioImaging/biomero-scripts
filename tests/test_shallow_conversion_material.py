@@ -42,7 +42,10 @@ def load_save_as_zarr(
     functions = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in {
                      "save_as_zarr", "is_legacy_tiff_conversion_source",
-                     "is_compatible_zarr_source"}]
+                     "is_compatible_zarr_source"}
+                 or isinstance(node, ast.Assign) and any(
+                     getattr(target, "id", None) == "ZARR_EXPORT_RETRY_DELAYS"
+                     for target in node.targets)]
     commands = []
     materializations = []
     promotions = []
