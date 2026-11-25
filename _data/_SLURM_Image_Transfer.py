@@ -56,7 +56,7 @@ import glob
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
-from time import monotonic
+from time import monotonic, sleep
 import logging
 try:
     from PIL import Image  # see ticket:2597
@@ -150,6 +150,8 @@ GROUP_MAPPINGS_FILE = os.getenv(
 IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
 IMPORT_MOUNT_STORAGE_ROOT = "import-mount-data"
 SCRIPT_CLIENT_KEEPALIVE_SECONDS = 60
+# Seconds to wait before retrying an export the CLI could not join.
+ZARR_EXPORT_RETRY_DELAYS = (10, 30)
 
 # keep track of log strings.
 log_strings = []
@@ -2643,15 +2645,27 @@ def save_as_zarr(
         log(f"OMERO ZARR command for {data_type}: {command}")
         cmd = cmd1 + " && " + command
         logger.debug(cmd)
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True
-        )
-        stdout, stderr = process.communicate()
-        if stderr:
-            logger.warning(stderr.decode("utf-8"))
+        # The CLI can fail to join a valid session transiently; retry that.
+        attempts = len(ZARR_EXPORT_RETRY_DELAYS) + 1
+        for attempt, delay in enumerate(
+                (*ZARR_EXPORT_RETRY_DELAYS, None), start=1):
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=True
+            )
+            stdout, stderr = process.communicate()
+            if stderr:
+                logger.warning(stderr.decode("utf-8"))
+            if (process.returncode == 0 or delay is None
+                    or b"Bad session key" not in stderr):
+                break
+            logger.warning(
+                f"OME-Zarr export attempt {attempt}/{attempts} of {data_type} "
+                f"{object.getId()} could not join the OMERO session; "
+                f"retrying in {delay}s")
+            sleep(delay)
         if process.returncode == 0:
             log(f"OME ZARR CLI: {stdout}")
             logger.debug(img_name)
