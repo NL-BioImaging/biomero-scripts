@@ -150,6 +150,8 @@ GROUP_MAPPINGS_FILE = os.getenv(
 IMPORT_MOUNT_PATH = os.getenv("IMPORT_MOUNT_PATH", "/data")
 IMPORT_MOUNT_STORAGE_ROOT = "import-mount-data"
 SCRIPT_CLIENT_KEEPALIVE_SECONDS = 60
+# Seconds to wait before retrying an export the CLI could not join.
+ZARR_EXPORT_RETRY_DELAYS = (10, 30)
 
 # keep track of log strings.
 log_strings = []
@@ -2643,11 +2645,10 @@ def save_as_zarr(
         log(f"OMERO ZARR command for {data_type}: {command}")
         cmd = cmd1 + " && " + command
         logger.debug(cmd)
-        # Check for both .ome.zarr and .zarr extensions for compatibility
-        source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
-        source_zarr = f"{exp_dir}/{object.getId()}.zarr"
         # The CLI can fail to join a valid session transiently; retry that.
-        for attempt, delay in enumerate((10, 30, None), start=1):
+        attempts = len(ZARR_EXPORT_RETRY_DELAYS) + 1
+        for attempt, delay in enumerate(
+                (*ZARR_EXPORT_RETRY_DELAYS, None), start=1):
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -2661,17 +2662,17 @@ def save_as_zarr(
                     or b"Bad session key" not in stderr):
                 break
             logger.warning(
-                "OME-Zarr export attempt %s/3 of %s %s could not join the "
-                "OMERO session; retrying in %ss", attempt, data_type,
-                object.getId(), delay)
-            for partial in (source_ome_zarr, source_zarr):
-                if os.path.exists(partial):
-                    logger.info("Removing partial export %s", partial)
-                    shutil.rmtree(partial)
+                f"OME-Zarr export attempt {attempt}/{attempts} of {data_type} "
+                f"{object.getId()} could not join the OMERO session; "
+                f"retrying in {delay}s")
             sleep(delay)
         if process.returncode == 0:
             log(f"OME ZARR CLI: {stdout}")
             logger.debug(img_name)
+
+            # Check for both .ome.zarr and .zarr extensions for compatibility
+            source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
+            source_zarr = f"{exp_dir}/{object.getId()}.zarr"
 
             if os.path.exists(source_ome_zarr):
                 os.rename(source_ome_zarr, img_name)
