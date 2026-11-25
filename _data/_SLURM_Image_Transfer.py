@@ -43,6 +43,7 @@ License: GNU GPL version 2 (see LICENSE)
 import shutil
 import subprocess
 import shlex
+import tempfile
 import json
 import omero.scripts as scripts
 from omero.gateway import BlitzGateway
@@ -56,7 +57,7 @@ import glob
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime
-from time import monotonic
+from time import monotonic, sleep
 import logging
 try:
     from PIL import Image  # see ticket:2597
@@ -2362,6 +2363,98 @@ def build_zarr_export_error(object, data_type, stderr):
     return " ".join(context)
 
 
+def mask_session_key(suuid):
+    """Shorten an OMERO session key so logs can identify but not reuse it."""
+    return "%s..." % suuid[:4] if suuid else "<no session>"
+
+
+def is_bad_session_key_failure(returncode, stderr_text):
+    """Recognize the CLI's catch-all "Bad session key" join failure.
+
+    The OMERO CLI exits with 523 for it, which a shell reports as 523 & 0xFF
+    = 11. The stderr text is the reliable signal.
+    """
+    return returncode in (11, 523) or "Bad session key" in stderr_text
+
+
+def run_zarr_export(conn, suuid, cmd, object, data_type, output_paths,
+                    retry_delays=(5, 15)):
+    """Run the omero-cli-zarr export with its own CLI session store.
+
+    Every attempt gets a fresh temporary OMERO_SESSIONDIR, so concurrent
+    exports on this worker never share the CLI's local session files. When the
+    CLI still cannot join the session and the script's own session is alive,
+    the export is retried with the same session key. Other failures are not
+    retried.
+
+    Returns:
+        tuple: (returncode, stdout, stderr) of the last attempt, with the
+        session key masked in stderr.
+
+    Raises:
+        ConnectionError: If the CLI could not join and the script's own OMERO
+            session is no longer alive.
+    """
+    masked = mask_session_key(suuid)
+    attempts = len(retry_delays) + 1
+    for attempt in range(1, attempts + 1):
+        session_dir = tempfile.mkdtemp(prefix="biomero-omero-sessions-")
+        logger.debug(
+            "OME-Zarr export attempt %s/%s for %s %s uses private CLI "
+            "session store %s", attempt, attempts, data_type, object.getId(),
+            session_dir)
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=True,
+                env=dict(os.environ, OMERO_SESSIONDIR=session_dir),
+            )
+            stdout, stderr = process.communicate()
+        finally:
+            shutil.rmtree(session_dir, ignore_errors=True)
+        if suuid and stderr:
+            stderr = stderr.replace(suuid.encode(), masked.encode())
+        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+        if (process.returncode == 0
+                or not is_bad_session_key_failure(
+                    process.returncode, stderr_text)):
+            return process.returncode, stdout, stderr
+        if attempt == attempts:
+            logger.error(
+                "OME-Zarr export of %s %s could not join OMERO session %s in "
+                "%s attempts; giving up. Last CLI stderr: %s",
+                data_type, object.getId(), masked, attempts, stderr_text)
+            return process.returncode, stdout, stderr
+        try:
+            _require_keepalive(conn.keepAlive, "retrying the OME-Zarr export")
+        except ConnectionError as exc:
+            logger.error(
+                "OME-Zarr export of %s %s could not join OMERO session %s and "
+                "the script's session is no longer alive; not retrying. CLI "
+                "stderr: %s", data_type, object.getId(), masked, stderr_text)
+            raise ConnectionError(
+                "The script's OMERO session is no longer alive, so the "
+                "OME-Zarr export cannot be retried. "
+                + build_zarr_export_error(object, data_type, stderr)
+            ) from exc
+        delay = retry_delays[attempt - 1]
+        logger.warning(
+            "OME-Zarr export attempt %s/%s of %s %s could not join OMERO "
+            "session %s (exit code %s), but the script's session is alive; "
+            "retrying in %ss. CLI stderr: %s",
+            attempt, attempts, data_type, object.getId(), masked,
+            process.returncode, delay, stderr_text)
+        for path in output_paths:
+            if os.path.exists(path):
+                logger.info(
+                    "Removing partial OME-Zarr export output %s before "
+                    "retrying", path)
+                shutil.rmtree(path)
+        sleep(delay)
+
+
 def is_legacy_tiff_conversion_source(source_path):
     """Check storage metadata without reading pixels or requiring the importer.
 
@@ -2637,28 +2730,22 @@ def save_as_zarr(
         elif data_type == constants.transfer.DATA_TYPE_IMAGE:
             command += f' Image:{object.getId()}'
         else:
-            log(f"OMERO ZARR command for {data_type}: {command}")
-            print(f"OMERO ZARR command for {data_type}: {command}")
             raise ValueError(f"No OMERO ZARR command known for data_type: {data_type}")
-        log(f"OMERO ZARR command for {data_type}: {command}")
         cmd = cmd1 + " && " + command
-        logger.debug(cmd)
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True
-        )
-        stdout, stderr = process.communicate()
+        if suuid:
+            command = command.replace(suuid, mask_session_key(suuid))
+        log(f"OMERO ZARR command for {data_type}: {command}")
+        # Check for both .ome.zarr and .zarr extensions for compatibility
+        source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
+        source_zarr = f"{exp_dir}/{object.getId()}.zarr"
+        returncode, stdout, stderr = run_zarr_export(
+            conn, suuid, cmd, object, data_type,
+            (source_ome_zarr, source_zarr))
         if stderr:
-            logger.warning(stderr.decode("utf-8"))
-        if process.returncode == 0:
+            logger.warning(stderr.decode("utf-8", errors="replace"))
+        if returncode == 0:
             log(f"OME ZARR CLI: {stdout}")
             logger.debug(img_name)
-
-            # Check for both .ome.zarr and .zarr extensions for compatibility
-            source_ome_zarr = f"{exp_dir}/{object.getId()}.ome.zarr"
-            source_zarr = f"{exp_dir}/{object.getId()}.zarr"
 
             if os.path.exists(source_ome_zarr):
                 os.rename(source_ome_zarr, img_name)
@@ -2672,7 +2759,7 @@ def save_as_zarr(
                 raise FileNotFoundError(error_msg)
         else:
             error_msg = (
-                f"ZARR export failed with return code {process.returncode}: "
+                f"ZARR export failed with return code {returncode}: "
                 f"{build_zarr_export_error(object, data_type, stderr)}"
             )
             logger.error(f"Critical error: {error_msg}")
