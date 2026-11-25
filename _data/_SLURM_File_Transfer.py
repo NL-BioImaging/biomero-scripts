@@ -49,7 +49,7 @@ from biomero import SlurmClient, constants
 
 logger = logging.getLogger(__name__)
 
-VERSION = "2.9.0b33"
+VERSION = "2.9.0"
 
 
 # ---------------------------------------------------------------------------
