@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 import shutil
-import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -43,9 +42,7 @@ def load_save_as_zarr(
     functions = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in {
                      "save_as_zarr", "is_legacy_tiff_conversion_source",
-                     "is_compatible_zarr_source", "run_zarr_export",
-                     "is_bad_session_key_failure", "mask_session_key",
-                     "_require_keepalive"}]
+                     "is_compatible_zarr_source"}]
     commands = []
     materializations = []
     promotions = []
@@ -113,12 +110,10 @@ def load_save_as_zarr(
             "BIOMERO.importer unavailable"
         ),
         "shutil": shutil,
-        "sleep": lambda _seconds: None,
         "subprocess": SimpleNamespace(
             PIPE=object(),
             Popen=Process,
         ),
-        "tempfile": tempfile,
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]),
                  str(TRANSFER_PATH), "exec"), namespace)
